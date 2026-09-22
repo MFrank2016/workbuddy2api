@@ -10,6 +10,7 @@ name: AI Governance
 on:
   issues:
     types: [opened]
+  workflow_dispatch: {}
   # pull_request_target 让 action（含写操作）以目标仓库而不是 fork 身份运行 ——
   # 这是 PR 治理改标题/正文/建 canonical 所必需的写权限来源（详见 DESIGN.md §12）。
   pull_request_target:
