@@ -50,6 +50,8 @@
                         无 activityId——服务端按 source=mini_program 指纹关联） 100c+5e
     school_season      参与「校园日」有奖活动（jump 落 coffee-activity H5 = school 开学季
                         同一活动；mini chat_request_send + activityId 点亮）    100c+5e
+    Sequential_Tasks_2 在小程序内选中专家并完成有效对话（mp 指纹 expert_actual_use，
+                        不带 activityId/conversationId——小程序源码实测形状）   200c+5e
   仍不可伪造：
     Expert_Philanthropy   真实捐款动作(M8)
 
@@ -122,6 +124,10 @@ MAPPING = {
     "Sequential_Tasks_1":     {"kind": "minichat", "target": 1, "src": "无(mini 对话无activityId)"},
     # 同下发口径的「校园日」任务：判据是 school 域 activityId 关联（mini chat + activityId）
     "school_season":          {"kind": "schoolseason", "target": 1, "src": "无(mini chat+activityId)"},
+    # 小程序成长任务续（同 mp 下发口径、同 minichat 处理链路）：
+    # Sequential_Tasks_2 = 小程序内选中专家并完成有效对话，判据 mp 指纹 expert_actual_use，
+    # 无 activityId/conversationId（小程序源码实测形状，勿照抄 school 的 expert 事件）
+    "Sequential_Tasks_2":     {"kind": "miniexpert", "target": 1, "src": "专家市场 ex_ id(mini)"},
     # 不可伪造（真实业务副作用）
     "Expert_Philanthropy":    {"unforgeable": True, "reason": "真实捐款动作(M8)"},
 }
@@ -471,6 +477,9 @@ def ids_for(kind, auth, need, offset=0):
         return [("", {}) for _ in range(need)]
     if kind == "richmeow":
         return [("", {}) for _ in range(need)]
+    if kind == "miniexpert":
+        # 专家 id 取自小程序自身的专家市场端点（mp 口径，与 school 段的 school 分类不同源）
+        return _dedup_slice(_fetch_market_experts(auth), offset, need)
     if kind in ("buddy5", "library", "buddyfirst", "minichat", "schoolseason"):
         # history/current 不是顺序语义：buddy5/library/buddyfirst 是固定事件组按需补 1 次（offset 无意义）
         return [("", {}) for _ in range(need)]
@@ -740,6 +749,25 @@ def build_event(auth, kind, obj_id, meta, idx):
                 "extVersion": "2.4.0", "mode": "chat",
                 "conversationId": cid, "requestId": cid, "inputLength": 12,
                 "mentionContexts": [], "mentionContextCount": 0, "userId": uid}
+
+    if kind == "miniexpert":
+        # 小程序成长任务 Sequential_Tasks_2（选中专家并完成有效对话）判据：
+        # mp 指纹 expert_actual_use。形状对齐小程序源码 app-service.js 的真实发射点
+        # （common.mp 遥测 y() + ideName=wx_app_cloud + 专家字段），机读差异字段：
+        #   · 无 conversationId/activityId —— 真实事件就是这两个字段都不带
+        #     （不同于 school 域 expert 事件：那套带 activityId+SaaS 才是开学季判据）
+        #   · extVersion 用小程序自身版本 2.2.8（school 段的 "SaaS" 是另一口径）
+        #   · type 固定 "send_message"（小程序恒发此值）
+        # 实测 00e26541：上报即 completed，claim 入账 200c+5e（两域无差异）。
+        return {"eventCode": "expert_actual_use", "timestamp": now, "reportDelay": 0,
+                "ideName": "wx_app_cloud", "ideType": "WorkBuddy_MP",
+                "extName": "workbuddy-mp", "extVersion": "2.2.8", "product": "SaaS",
+                "source": "mini_program", "os": "android", "osVersion": "14",
+                "arch": "arm64", "timezone": "Asia/Shanghai",
+                "machineId": derive_id(auth, "machine"),
+                "userId": uid, "id": obj_id, "name": obj_id,
+                "expertTitle": m.get("name") or obj_id, "type": "send_message",
+                "characterCount": 12, "expertType": m.get("expertType") or "agent"}
 
     if kind == "schoolseason":
         # growth 域 school_season（校园日）判据：mini 指纹 chat_request_send +
@@ -1321,14 +1349,16 @@ def process_account(auth, opts, stats):
     # 由 process_school_tasks 专段处理，不进 process_task（growth claim 端点对 school 任务 400）。
     # minichat 同理：mp 限定任务在默认口径列表不出现，由 process_minichat_task 专段处理。
     school_in_map = [c for c in MAPPING if MAPPING[c].get("kind") == "school"]
-    minichat_in_map = [c for c in MAPPING if MAPPING[c].get("kind") in ("minichat", "schoolseason")]
+    minichat_in_map = [c for c in MAPPING
+                      if MAPPING[c].get("kind") in ("minichat", "schoolseason", "miniexpert")]
     special = set(school_in_map) | set(minichat_in_map)
     if opts.only_codes:
         codes = [c for c in opts.only_codes if c not in special]
         process_school = bool(set(opts.only_codes) & set(school_in_map))
         process_minichat = bool(set(opts.only_codes) & set(minichat_in_map))
     else:
-        codes = [c for c in MAPPING if MAPPING[c].get("kind") not in ("school", "minichat", "schoolseason")]
+        codes = [c for c in MAPPING
+                 if MAPPING[c].get("kind") not in ("school", "minichat", "schoolseason", "miniexpert")]
         process_school = True
         process_minichat = True
         # 未在映射表但存在于任务列表的（如 Expert_Philanthropy）——只计数展示
