@@ -52,6 +52,8 @@
                         同一活动；mini chat_request_send + activityId 点亮）    100c+5e
     Sequential_Tasks_2 在小程序内选中专家并完成有效对话（mp 指纹 expert_actual_use，
                         不带 activityId/conversationId——小程序源码实测形状）   200c+5e
+    Sequential_Tasks_3 在小程序内完成 5 次有效对话（判据与 1 同形状，逐次上报、
+                        进度按上报条数累加，实测一次上报 5 条即 5/5）          300c+5e
   仍不可伪造：
     Expert_Philanthropy   真实捐款动作(M8)
 
@@ -128,6 +130,9 @@ MAPPING = {
     # Sequential_Tasks_2 = 小程序内选中专家并完成有效对话，判据 mp 指纹 expert_actual_use，
     # 无 activityId/conversationId（小程序源码实测形状，勿照抄 school 的 expert 事件）
     "Sequential_Tasks_2":     {"kind": "miniexpert", "target": 1, "src": "专家市场 ex_ id(mini)"},
+    # Sequential_Tasks_3 = 小程序内完成 5 次有效对话：与 Tasks_1 判据同形状（mp 指纹
+    # chat_request_send 无 activityId），只是 target=5 —— 按上报条数累加，无需新事件形状
+    "Sequential_Tasks_3":     {"kind": "minichat", "target": 5, "src": "无(mini 对话×5 无activityId)"},
     # 不可伪造（真实业务副作用）
     "Expert_Philanthropy":    {"unforgeable": True, "reason": "真实捐款动作(M8)"},
 }
@@ -1030,7 +1035,9 @@ def process_minichat_task(auth, code, opts, stats, uid8):
     ast = t.get("accept_status")
     prog = t.get("progress") or {}
     cur = prog.get("current") or 0
-    target = prog.get("target") or 1
+    # 未 accept 的 mp 任务 progress 为 null（实测 Sequential_Tasks_3 未激活时全空），
+    # 此时 target 必须由 MAPPING 提供——否则多元任务（Tasks_3 target=5）只会上报 1 次。
+    target = prog.get("target") or spec.get("target") or 1
     stats["total"] += 1
 
     if ast == "claimed":
@@ -1050,6 +1057,22 @@ def process_minichat_task(auth, code, opts, stats, uid8):
         stats["pending"] += 1
         return
 
+    # 判据上报的对象 id 先经 ids_for 解析（miniexpert 需真实专家 id，空 id 服务端
+    # 不入账）；无对象 id 的 kind 由 ids_for 返回空的 obj_id/meta，行为与原先一致。
+    # 与 process_task 同口径：ids 为空说明该类任务缺少可用载体，保守不点亮。
+    # 必须在 accept 之前判定——否则会留下「已登记未上报」的半程态（下次仍需 accept
+    # 分支才能补报），宁可整任务不动作。
+    need = max(1, target - cur)
+    ids = ids_for(kind, auth, need, offset=cur)
+    if not ids:
+        print(f"[task_runner] {uid8} {code}: {kind} 无可用对象 id，WARN 跳过点亮")
+        stats["pending"] += 1
+        return
+    if len(ids) < need:
+        # 对象池不够本轮目标（如专家市场返回数少于 need）：按可用数上报，剩余下次补
+        # （回读会如实报出缺口并记 pending，不伪造 id 凑数）。
+        print(f"[task_runner] {uid8} {code}: 可用对象 id {len(ids)} < 需 {need}，本轮按可用数上报")
+
     # 1) accept（mp 头；缺头实测 task not found）
     if ast == "not_accepted":
         st, r = tc.do_post(auth, tc.chat_base(auth), tc.PATH_ACCEPT_TASKS,
@@ -1064,9 +1087,8 @@ def process_minichat_task(auth, code, opts, stats, uid8):
 
     # 2) 判据上报：mini 指纹 chat_request_send（minichat 无 activityId /
     #    schoolseason 带 activityId），走 codebuddy.cn 域（school.report_events）
-    need = max(1, target - cur)
-    for i in range(need):
-        ev = build_event(auth, kind, "", {}, i)
+    for i, (obj_id, meta) in enumerate(ids):
+        ev = build_event(auth, kind, obj_id, meta, i)
         st, r = school.report_events(auth, [ev])
         sc = r.get("code") if isinstance(r, dict) else r
         print(f"[task_runner] {uid8} {code}: report {i + 1}/{need} {st} code={sc} (mini growth)")
@@ -1079,15 +1101,18 @@ def process_minichat_task(auth, code, opts, stats, uid8):
     ast2 = t2.get("accept_status")
     prog2 = t2.get("progress") or {}
     cur2 = prog2.get("current", 0)
-    print(f"[task_runner] {uid8} {code}: query re-read {cur2}/{prog2.get('target', target)} accept_status={ast2}")
+    # 回读同样要防 progress: null（键存在但值为 None 时 dict.get 的默认值不生效，
+    # 直接比较会抛 TypeError）；target2 与上面的 target 同口径兜底。
+    target2 = prog2.get("target") or spec.get("target") or 1
+    print(f"[task_runner] {uid8} {code}: query re-read {cur2}/{target2} accept_status={ast2}")
     if ast2 == "claimed":
         print(f"[task_runner] {uid8} {code}: {ast} -> claimed（本轮已入账）")
         stats["already"] += 1
         return
-    if ast2 == "completed" or cur2 >= prog2.get("target", target):
+    if ast2 == "completed" or cur2 >= target2:
         claim_one(auth, code, uid8, stats, opts.gap, mp=True)
         return
-    print(f"[task_runner] {uid8} {code}: report 未达 target（{cur2}/{prog2.get('target', target)}），WARN 待下次")
+    print(f"[task_runner] {uid8} {code}: report 未达 target（{cur2}/{target2}），WARN 待下次")
     stats["pending"] += 1
 
 
