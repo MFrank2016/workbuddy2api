@@ -7,6 +7,18 @@ const githubOps = require('./github');
 
 const DUPLICATE_PATTERN = /^DUPLICATE\(#?(\d+)\)/i;
 
+// canonical 草稿的标题兜底判据：标题（去掉 [Feature]/[Bug] 前缀后）若只是小节名或过短，
+// 就没有区分度可言，回落到来源内容的标题。
+const SECTION_LIKE_TITLES = new Set([
+  '概述', '背景与要点', '期望行为', '来源', '背景', '方案', '说明', '摘要', '标题', '待办', '任务'
+]);
+const MIN_CANONICAL_TITLE_LENGTH = 6;
+
+function isUsableCanonicalTitle(title) {
+  const bare = String(title || '').replace(/^\[[^\]]*\]\s*/, '').trim();
+  return bare.length >= MIN_CANONICAL_TITLE_LENGTH && !SECTION_LIKE_TITLES.has(bare);
+}
+
 /**
  * 从多态「请求体」统一拆出 title/body，供 issue 与 PR 两条治理链路复用。
  * PR 治理传入 { number, title, body }，issue 治理传入标准 issue 结构（body 可空）。
@@ -214,6 +226,12 @@ class IssueGovernanceService {
     const text = String(raw || '').trim();
     const lines = text.split('\n').map(l => l.trimEnd());
     let title = (lines[0] || '').replace(/^#+\s*/, '').trim() || fallbackTitle;
+    if (!isUsableCanonicalTitle(title)) {
+      // AI 偶尔把小节名或过短串当标题（2026-09 实测产出过「[Feature] 概述」）。canonical
+      // 索引的区分度全靠标题+正文，这种标题会让后续 issue 的归并匹配失准，因此回落到来源标题。
+      core.warning(`canonical 草稿标题不可用（${title}），回落到来源标题：${fallbackTitle}`);
+      title = fallbackTitle || title;
+    }
     if (!/^\[(Feature|Bug|Enhancement)\]/.test(title)) {
       const prefix = /bug|fix/i.test(classification || '') ? '[Bug] ' : '[Feature] ';
       title = prefix + title.replace(/^\[[^\]]*\]\s*/, '');

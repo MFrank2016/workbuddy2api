@@ -499,4 +499,28 @@ describe('IssueGovernanceService', () => {
     const commentCall = ops.addComment.mock.calls.find(c => c[3] === 22);
     expect(commentCall[4]).not.toContain(config.responses.governance_history_reference_note);
   });
+
+  test('canonical 草稿标题不可用时回落到来源标题（实测产出过「[Feature] 概述」）', () => {
+    const gov = new IssueGovernanceService(makeOpenai([]), 'model', buildConfig(), {}, makeOps());
+    const split = gov.splitCanonical(
+      '[Feature] 概述\n\n## 概述\n支持按账号跳过签到\n\n## 来源\n- 原始 issue: #1',
+      '希望支持按账号跳过签到任务',
+      'enhancement'
+    );
+    expect(split.title).toBe('[Feature] 希望支持按账号跳过签到任务');
+    // 被丢弃的只是那一行标题，正文小节不受影响
+    expect(split.body).toContain('## 概述');
+  });
+
+  test('可用的草稿标题保持原样，并按分类补前缀 / 保留来源前缀', () => {
+    const gov = new IssueGovernanceService(makeOpenai([]), 'model', buildConfig(), {}, makeOps());
+    expect(gov.splitCanonical('[Feature] 支持按账号跳过签到\n\n## 概述\nx', '兜底标题', 'enhancement').title)
+      .toBe('[Feature] 支持按账号跳过签到');
+    // 来源标题自带 [Bug] 前缀时不被再套一层 [Feature]
+    expect(gov.splitCanonical('概述\n\n## 概述\nx', '[Bug] 签到任务崩溃', 'bug').title)
+      .toBe('[Bug] 签到任务崩溃');
+    // 无前缀且标题可用 → 按分类补前缀
+    expect(gov.splitCanonical('支持按账号跳过签到\n\n## 概述\nx', '兜底标题', 'enhancement').title)
+      .toBe('[Feature] 支持按账号跳过签到');
+  });
 });
