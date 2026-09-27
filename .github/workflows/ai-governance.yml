@@ -100,7 +100,8 @@ jobs:
           duplicate-label: 'duplicate'
           # 治理正式生效（2026-09-13 重放验证通过后关闭 dry-run）
           dry-run: 'false'
-          maintainer-exempt: 'true'
+          # 临时置 false：仅为端到端验证 PR 治理写链路（验证后立即改回 true）
+          maintainer-exempt: 'false'
           # PR 治理：垃圾检测 + 要点提炼 + canonical 关联（永不关闭合法 PR）
           enable-pr-governance: 'true'
           # PR 历史语境评审：AI 对照相关历史 issue 的关闭结论评审新 PR，
