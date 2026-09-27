@@ -1,0 +1,29 @@
+name: AI Backend Probe
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  models: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe GitHub Models inference
+        run: |
+          set -uo pipefail
+          echo "runner: $(uname -a)"
+          for model in openai/gpt-4o openai/gpt-4o-mini; do
+            echo "=== $model ==="
+            curl -sS -o /tmp/out.json -D /tmp/h.txt -w 'http=%{http_code} type=%{content_type}\n' \
+              -X POST https://models.github.ai/inference/chat/completions \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/vnd.github+json" \
+              -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"reply with the single word OK\"}],\"max_tokens\":10}"
+            echo "--- headers ---"; head -6 /tmp/h.txt
+            echo "--- body (max 600) ---"; head -c 600 /tmp/out.json; echo
+          done
+      - name: Probe catalog endpoint
+        run: |
+          curl -sS -o /tmp/cat.json -w 'catalog http=%{http_code} type=%{content_type}\n' https://models.github.ai/catalog/models -H "Authorization: Bearer ${{ github.token }}"
+          head -c 300 /tmp/cat.json; echo
