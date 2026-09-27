@@ -230,6 +230,43 @@ describe('IssueGovernanceService', () => {
     expect(config.ai_settings.max_tokens).toBe(1000);
   });
 
+  test('canonical 草稿的 max_tokens 同样放宽到 2000（思考 token 吃满 1000 会返回空正文）', async () => {
+    const config = buildConfig();
+    const draft = [
+      '[Feature] 支持按账号跳过签到',
+      '',
+      '## 概述',
+      '支持把指定账号从签到任务里摘出来。',
+      '',
+      '## 背景与要点',
+      '- 多账号场景下需要临时排除某个账号',
+      '',
+      '## 期望行为',
+      '- 新增 checkin.skip_uids 配置项',
+      '',
+      '## 来源',
+      '- 原始 issue: #22'
+    ].join('\n');
+    // 依次: extract(structured) -> well_formed 判定(NEEDS_NORMALIZE) -> canonical 草稿
+    const openai = makeOpenai([
+      '```json\n{"要点":"跳过签到","要做的事":["新增配置项"]}\n```',
+      'NEEDS_NORMALIZE',
+      draft
+    ]);
+    const gov = new IssueGovernanceService(openai, 'model', config, { dryRun: false }, makeOps({ canonicalItems: [] }));
+
+    const result = await gov.govern({}, 'o', 'r', issue, 'enhancement');
+
+    expect(result).toMatchObject({
+      decision: GOVERNANCE_DECISIONS.NEW_TOPIC,
+      canonicalNumber: 99,
+      closed: true
+    });
+    const caps = openai._create.mock.calls.map(call => call[0].max_tokens);
+    expect(caps).toEqual([1000, 1000, 2000]);
+    expect(config.ai_settings.max_tokens).toBe(1000);
+  });
+
   test('WELL_FORMED 但 AI 评审生成失败：回落固定模板评论，流程不中断', async () => {
     const config = buildConfig();
     // 依次: extract -> well_formed 判定 -> 评审生成抛错
