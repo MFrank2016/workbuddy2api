@@ -1,4 +1,4 @@
-const { parseTargetNumber, loadDispatchTarget } = require('../src/utils/dispatch');
+const { parseTargetNumber, loadDispatchTarget, readDispatchInputs } = require('../src/utils/dispatch');
 
 describe('parseTargetNumber', () => {
   test('空值返回 null（未指定目标）', () => {
@@ -65,5 +65,22 @@ describe('loadDispatchTarget', () => {
     const octokit = makeOctokit();
     await expect(loadDispatchTarget(octokit, 'o', 'r', { issueNumber: '1', prNumber: '2' }))
       .rejects.toThrow('只接受一个目标');
+  });
+});
+
+describe('readDispatchInputs', () => {
+  test('getInput 取不到时回落到 INPUT_*_NUMBER 环境变量（连字符输入名的实际通道）', () => {
+    const env = { INPUT_ISSUE_NUMBER: '4', INPUT_PR_NUMBER: '' };
+    expect(readDispatchInputs(env, () => '')).toEqual({ issueNumber: '4', prNumber: '' });
+  });
+
+  test('getInput 有值时优先于环境变量', () => {
+    const env = { INPUT_ISSUE_NUMBER: '4', INPUT_PR_NUMBER: '9' };
+    const getInput = name => (name === 'pr-number' ? '3' : '');
+    expect(readDispatchInputs(env, getInput)).toEqual({ issueNumber: '4', prNumber: '3' });
+  });
+
+  test('两者都空时返回空串（交由 loadDispatchTarget 判为未指定目标）', () => {
+    expect(readDispatchInputs({}, () => '')).toEqual({ issueNumber: '', prNumber: '' });
   });
 });

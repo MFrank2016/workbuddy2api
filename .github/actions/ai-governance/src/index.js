@@ -5,7 +5,7 @@ const { loadConfig, parseInputs } = require('./utils/config');
 const { logMessage } = require('./utils/helpers');
 const { handleNewIssue } = require('./handlers/issueHandler');
 const { handleNewPR } = require('./handlers/prHandler');
-const { loadDispatchTarget } = require('./utils/dispatch');
+const { loadDispatchTarget, readDispatchInputs } = require('./utils/dispatch');
 const { GOVERNANCE_DEFAULTS } = require('./utils/constants');
 
 /**
@@ -123,10 +123,7 @@ async function run() {
     // 必须显式读输入、按编号取回目标对象，再复用同一条治理链路。此前它直接落到
     // 「事件类型不匹配，跳过处理」并返回 success，维护者会误读成「治理跑过且无待处理」。
     if (context.eventName === 'workflow_dispatch') {
-      const target = await loadDispatchTarget(octokit, owner, repo, {
-        issueNumber: core.getInput('issue-number'),
-        prNumber: core.getInput('pr-number')
-      });
+      const target = await loadDispatchTarget(octokit, owner, repo, readDispatchInputs());
       if (!target) {
         core.warning('workflow_dispatch 未指定目标：请填写 issue-number 或 pr-number 后重跑（本次不做任何处理）');
       } else if (target.kind === 'issue') {

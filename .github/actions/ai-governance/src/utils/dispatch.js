@@ -76,7 +76,28 @@ async function loadDispatchTarget(octokit, owner, repo, inputs = {}) {
   return { kind: 'issue', number: issueNumber, target: data };
 }
 
+/**
+ * 读取 workflow_dispatch 的重跑输入。
+ *
+ * 环境变量命名陷阱：@actions/core 的 getInput('issue-number') 找的是 `INPUT_ISSUE-NUMBER`
+ * （只把空格换成下划线，连字符原样保留），而 action.yml 里声明的 env 是 `INPUT_ISSUE_NUMBER`
+ * —— 直接 getInput 会永远拿到空串（2026-09 实测：手动触发填了编号仍落到「未指定目标」）。
+ * 本仓库既有输入（canonical-label / skip-users / analyze-file-changes 等）都靠
+ * `|| process.env.INPUT_*` 回落，这里沿用同一约定。
+ *
+ * @param {Object} env 环境变量表（默认 process.env，测试可注入）
+ * @param {Function} getInput core.getInput（测试可注入）
+ * @returns {{issueNumber: string, prNumber: string}}
+ */
+function readDispatchInputs(env = process.env, getInput = core.getInput) {
+  return {
+    issueNumber: getInput('issue-number') || env.INPUT_ISSUE_NUMBER || '',
+    prNumber: getInput('pr-number') || env.INPUT_PR_NUMBER || ''
+  };
+}
+
 module.exports = {
   parseTargetNumber,
-  loadDispatchTarget
+  loadDispatchTarget,
+  readDispatchInputs
 };
