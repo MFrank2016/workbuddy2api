@@ -164,7 +164,18 @@ class IssueGovernanceService {
         related_history: (relatedHistory || []).slice(0, this.gov.maxScreenedCandidates)
       })
     };
-    const raw = await callAI(this.openai, this.aiModel, request, this.config, '生成规范 issue 评审评论', false);
+    // 评论草稿是多段结构化中文，且推理模型的思考 token 与正文共享 max_tokens 预算 ——
+    // 沿用默认 1000 会被截断成半句话（2026-09 实测：finish_reason=length，thinking 占
+    // 355~781，三段结构只剩第一段）。与 prReviewService.draftReviewComment 同样局部
+    // 放宽到至少 2000，只影响本次调用，不改全局配置。
+    const configForDraft = {
+      ...this.config,
+      ai_settings: {
+        ...this.config.ai_settings,
+        max_tokens: Math.max(this.config.ai_settings.max_tokens || 0, 2000)
+      }
+    };
+    const raw = await callAI(this.openai, this.aiModel, request, configForDraft, '生成规范 issue 评审评论', false);
     return String(raw || '').trim() || null;
   }
 
