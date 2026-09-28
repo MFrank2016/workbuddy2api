@@ -172,7 +172,8 @@ async function callAI(openai, aiModel, request, config, purpose = 'AI调用', no
         instructions,
         input: request.input,
         max_output_tokens: config.ai_settings.max_tokens,
-        store: false
+        store: false,
+        ...(config.ai_settings.extra_params || {})
       });
       content = getResponsesText(response);
     } else {
@@ -183,7 +184,10 @@ async function callAI(openai, aiModel, request, config, purpose = 'AI调用', no
           { role: 'user', content: request.input }
         ],
         max_tokens: config.ai_settings.max_tokens,
-        temperature: config.ai_settings.temperature
+        temperature: config.ai_settings.temperature,
+        // 透传参数（ai-extra-params）：用于关掉/压低推理模型的思考 —— 思考 token 与正文
+        // 共享 max_tokens 预算，曾导致正文为空、整条治理 fail-open（见 config.js 的说明）
+        ...(config.ai_settings.extra_params || {})
       });
       content = readChatCompletionContent(response);
     }

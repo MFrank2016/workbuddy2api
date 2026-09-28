@@ -85,6 +85,28 @@ describe('callAI', () => {
     });
   });
 
+  test('extra_params 透传进请求体（用于关掉推理模型的思考）', async () => {
+    const create = jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] });
+    const withExtra = {
+      ...config,
+      ai_settings: { ...config.ai_settings, extra_params: { thinking: { type: 'disabled' } } }
+    };
+
+    await callAI({ chat: { completions: { create } } }, 'model',
+      { instructions: 'Classify.', input: 'prompt' }, withExtra);
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ thinking: { type: 'disabled' } }));
+  });
+
+  test('未配置 extra_params 时不污染请求体', async () => {
+    const create = jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] });
+
+    await callAI({ chat: { completions: { create } } }, 'model',
+      { instructions: 'Classify.', input: 'prompt' }, config);
+
+    expect(create.mock.calls[0][0]).not.toHaveProperty('thinking');
+  });
+
   test('supports the Responses API', async () => {
     const responsesCreate = jest.fn().mockResolvedValue({ output_text: 'not_spam' });
     const responsesConfig = {

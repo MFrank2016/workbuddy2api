@@ -184,7 +184,8 @@
     "max_files_to_analyze": 5,
     "max_patch_lines_per_file": 5,
     "max_tokens": 2000,
-    "temperature": 0.1
+    "temperature": 0.1,
+    "extra_params": {}
   },
   "defaults": {
     "ai_model": "openai/gpt-4o",

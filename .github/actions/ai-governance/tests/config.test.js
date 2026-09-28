@@ -138,6 +138,20 @@ describe('configuration', () => {
       expect(overridden.autoApproveLabel).toBe('merge-me');
     });
 
+    test('ai-extra-params：合法 JSON 透传到 ai_settings.extra_params，非法直接报错', () => {
+      process.env.INPUT_AI_EXTRA_PARAMS = '{"thinking":{"type":"disabled"}}';
+      expect(parseInputs(cloneConfig()).config.ai_settings.extra_params)
+        .toEqual({ thinking: { type: 'disabled' } });
+
+      process.env.INPUT_AI_EXTRA_PARAMS = '{不是 JSON}';
+      expect(() => parseInputs(cloneConfig())).toThrow('ai-extra-params');
+
+      process.env.INPUT_AI_EXTRA_PARAMS = '["数组不行"]';
+      expect(() => parseInputs(cloneConfig())).toThrow('JSON 对象');
+
+      delete process.env.INPUT_AI_EXTRA_PARAMS;
+      expect(parseInputs(cloneConfig()).config.ai_settings.extra_params).toEqual({});
+    });
   });
 
   describe('loadConfig / validateConfig（R15 顺手补测）', () => {

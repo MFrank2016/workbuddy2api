@@ -38,6 +38,10 @@ inputs:
     description: 'OpenAI 兼容 API 类型：chat-completions 或 responses'
     required: false
     default: 'chat-completions'
+  ai-extra-params:
+    description: '透传给模型端点的额外请求体字段（JSON 对象）。用于关掉/压低推理模型的思考 —— 思考 token 与正文共享 max_tokens 预算，思考过长会导致正文为空、整条治理 fail-open。例：{"thinking":{"type":"disabled"}}（该网关支持）或 {"reasoning_effort":"minimal"}'
+    required: false
+    default: ''
   labels:
     description: '逗号分隔的分类标签（对齐仓库 label 体系）'
     required: false
@@ -167,6 +171,7 @@ runs:
         INPUT_AI_BASE_URL: ${{ inputs.ai-base-url }}
         INPUT_AI_API_KEY: ${{ inputs.ai-api-key }}
         INPUT_AI_API_TYPE: ${{ inputs.ai-api-type }}
+        INPUT_AI_EXTRA_PARAMS: ${{ inputs.ai-extra-params }}
         INPUT_CANONICAL_LABEL: ${{ inputs.canonical-label }}
         INPUT_DUPLICATE_LABEL: ${{ inputs.duplicate-label }}
         INPUT_SKIP_USERS: ${{ inputs.skip-users }}

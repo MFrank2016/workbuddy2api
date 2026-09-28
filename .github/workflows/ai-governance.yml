@@ -92,6 +92,9 @@ jobs:
           ai-base-url: ${{ secrets.AI_BASE_URL }}
           ai-api-key: ${{ secrets.AI_API_KEY }}
           ai-model: ${{ secrets.AI_MODEL }}
+          # 关掉推理模型的思考：思考 token 与正文共享 max_tokens 预算，思考过长会让正文返回空串，
+          # 整条治理 fail-open（实测 cap=8000 时 100% 被思考吃光；关掉后同任务 2s、约 150 token）。
+          ai-extra-params: '{"thinking":{"type":"disabled"}}'
           # 分类标签对齐仓库现有 label 体系（与 .github/ISSUE_TEMPLATE/*.yml 一致）
           labels: 'bug,enhancement,question,documentation'
           language: zh-CN
