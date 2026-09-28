@@ -208,7 +208,9 @@
     "max_history_index": 100,
     "enable_two_stage": false,
     "max_screened_candidates": 5,
-    "screening_model": ""
+    "screening_model": "",
+    "enable_auto_approve": false,
+    "auto_approve_label": "ai-approved"
   },
   "analysis_depths": {
     "light": {

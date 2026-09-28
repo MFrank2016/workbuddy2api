@@ -46,6 +46,8 @@ async function run() {
       enableTwoStage,
       maxScreenedCandidates,
       screeningModel,
+      enableAutoApprove,
+      autoApproveLabel,
       config
     } = parseInputs(baseConfig);
 
@@ -115,6 +117,9 @@ async function run() {
       enableTwoStage,
       maxScreenedCandidates,
       screeningModel,
+      // 自动合并（ai-approved 标签 + 原生 auto-merge）
+      enableAutoApprove,
+      autoApproveLabel,
       governanceToken
     };
 

@@ -111,7 +111,9 @@ const GOV_INPUTS = [
   { input: 'max-history-index', env: 'INPUT_MAX_HISTORY_INDEX', key: 'max_history_index', out: 'maxHistoryIndex', type: 'int' },
   { input: 'enable-two-stage', env: 'INPUT_ENABLE_TWO_STAGE', key: 'enable_two_stage', out: 'enableTwoStage', type: 'boolean' },
   { input: 'max-screened-candidates', env: 'INPUT_MAX_SCREENED_CANDIDATES', key: 'max_screened_candidates', out: 'maxScreenedCandidates', type: 'int' },
-  { input: 'screening-model', env: 'INPUT_SCREENING_MODEL', key: 'screening_model', out: 'screeningModel', type: 'string' }
+  { input: 'screening-model', env: 'INPUT_SCREENING_MODEL', key: 'screening_model', out: 'screeningModel', type: 'string' },
+  { input: 'enable-auto-approve', env: 'INPUT_ENABLE_AUTO_APPROVE', key: 'enable_auto_approve', out: 'enableAutoApprove', type: 'boolean' },
+  { input: 'auto-approve-label', env: 'INPUT_AUTO_APPROVE_LABEL', key: 'auto_approve_label', out: 'autoApproveLabel', type: 'string' }
 ];
 
 /**

@@ -116,3 +116,8 @@ jobs:
           max-canonical-index: '50'
           # R12：diff 是垃圾/质量检测与历史语境评审的核心证据，统一开启（成本可接受，2026-09 决策）
           analyze-file-changes: 'true'
+          # 自动合并：通过确定性闸门（分层检测 KEEP + 无敏感路径 + 规模上限）的 PR 打 ai-approved 标签，
+          # 由 .github/workflows/pr-automerge.yml 启用仓库原生 auto-merge —— CI（PR CI / test）通过后才合并。
+          # 前置条件：仓库已开 Allow auto-merge，且 master 分支保护把 PR CI 的 test 检查列为必需。
+          enable-auto-approve: 'true'
+          auto-approve-label: 'ai-approved'

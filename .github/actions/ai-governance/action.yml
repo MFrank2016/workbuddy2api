@@ -125,6 +125,14 @@ inputs:
     description: '筛选阶段专用模型（可选，缺省用 ai-model；可配置更廉价的模型）'
     required: false
     default: ''
+  enable-auto-approve:
+    description: '自动合并开关：开启后，通过确定性闸门（分层检测 KEEP + 无敏感路径 + 规模上限）的 PR 会被打上 ai-approved 标签，由仓库原生 auto-merge 在 CI 通过后以 squash 合并（默认关闭）'
+    required: false
+    default: 'false'
+  auto-approve-label:
+    description: '自动合并批准标签名（默认 ai-approved）'
+    required: false
+    default: 'ai-approved'
 
 runs:
   using: 'composite'
@@ -175,3 +183,5 @@ runs:
         INPUT_ENABLE_TWO_STAGE: ${{ inputs.enable-two-stage }}
         INPUT_MAX_SCREENED_CANDIDATES: ${{ inputs.max-screened-candidates }}
         INPUT_SCREENING_MODEL: ${{ inputs.screening-model }}
+        INPUT_ENABLE_AUTO_APPROVE: ${{ inputs.enable-auto-approve }}
+        INPUT_AUTO_APPROVE_LABEL: ${{ inputs.auto-approve-label }}
