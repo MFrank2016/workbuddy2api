@@ -202,7 +202,9 @@ function parseInputs(config) {
     maxHistoryIndex,
     enableTwoStage,
     maxScreenedCandidates,
-    screeningModel
+    screeningModel,
+    enableAutoApprove,
+    autoApproveLabel
   } = govInputs;
 
   const skipUsersInput = core.getInput('skip-users') || process.env.INPUT_SKIP_USERS || '';
@@ -263,6 +265,8 @@ function parseInputs(config) {
     enableTwoStage,
     maxScreenedCandidates,
     screeningModel,
+    enableAutoApprove,
+    autoApproveLabel,
     config
   };
 }

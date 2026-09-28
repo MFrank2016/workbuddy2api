@@ -27,6 +27,8 @@ const githubOps = require('./github');
  */
 async function approveIfEligible(octokit, owner, repo, pr, detection, gov = {}, config = {}, ops = githubOps) {
   if (!gov.enableAutoApprove) {
+    // 一定要留下日志：这条路径曾因「输入没透传到 gov」而静默跳过，日志是唯一的取证线索
+    core.info(`PR #${pr.number} 不自动合并：自动合并未启用（enable-auto-approve=false）`);
     return { eligible: false, reason: '自动合并未启用（enable-auto-approve=false）' };
   }
 
