@@ -183,7 +183,7 @@
     "analyze_file_changes": true,
     "max_files_to_analyze": 5,
     "max_patch_lines_per_file": 5,
-    "max_tokens": 1000,
+    "max_tokens": 2000,
     "temperature": 0.1
   },
   "defaults": {

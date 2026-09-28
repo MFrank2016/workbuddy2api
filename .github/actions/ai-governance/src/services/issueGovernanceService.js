@@ -182,7 +182,7 @@ class IssueGovernanceService {
   }
 
   /**
-   * 长文生成调用的配置副本：把 max_tokens 抬到至少 2000。
+   * 长文生成调用的配置副本：把 max_tokens 抬到至少 4000。
    *
    * 推理模型的思考 token 与正文共享 max_tokens 预算（2026-09 实测某网关的 deepseek 系模型）：
    *   - 评审评论草稿在 1000 下 finish_reason=length，thinking 占 355~781，正文被截成半句；
@@ -197,7 +197,7 @@ class IssueGovernanceService {
       ...this.config,
       ai_settings: {
         ...this.config.ai_settings,
-        max_tokens: Math.max(this.config.ai_settings.max_tokens || 0, 2000)
+        max_tokens: Math.max(this.config.ai_settings.max_tokens || 0, 4000)
       }
     };
   }
