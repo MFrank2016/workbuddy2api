@@ -483,6 +483,14 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		// 经 auth.Realm() 统一判定：逃生门（global.enabled=false）下 global 账号被降级为 cn、
 		// 按 CN 处理——这是 D5 逃生门的刻意语义（纯 CN 部署锁死一切 global），与引用处一致。
 		if a.IsGlobal() {
+			if a.NeedsRefresh(checkinRefreshSkew) {
+				if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+					s.cfg.Pool.NoteRefreshFail(st.UID, err) // P0-1 续期观测台账（只记录，不判罚）
+					log.Printf("credit-refresh %s refresh: %v", logfmt.Label(st.UID, st.Nickname), err)
+				} else {
+					s.cfg.Pool.NoteRefreshOK(st.UID) // P0-1：续期链路此刻是活的，留证
+				}
+			}
 			oc.Status, oc.Detail = CheckinSkipped, "global"
 			skipN++
 			out = append(out, oc)
@@ -491,6 +499,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
 		if a.NeedsRefresh(checkinRefreshSkew) {
 			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+				s.cfg.Pool.NoteRefreshFail(st.UID, err) // P0-1 续期观测台账（只记录，不判罚）
 				log.Printf("checkin %s refresh: %v", logfmt.Label(st.UID, st.Nickname), err)
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
@@ -507,7 +516,8 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 					continue
 				}
 			} else {
-				a.BackfillRealm() // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
+				s.cfg.Pool.NoteRefreshOK(st.UID) // P0-1：续期成功，留证（与失败分支对称）
+				a.BackfillRealm()                // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
 				if err := a.SaveAtomic(); err != nil {
 					// 刷新成功但落盘失败：重启会用旧 token，必须暴露。
 					log.Printf("checkin %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
@@ -851,6 +861,7 @@ func (s *Scheduler) runKeepalive(trigger string) {
 		t.total++
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			t.fail++
+			s.cfg.Pool.NoteRefreshFail(st.UID, err) // P0-1 续期观测台账（只记录，不判罚）
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
@@ -861,6 +872,7 @@ func (s *Scheduler) runKeepalive(trigger string) {
 			continue
 		}
 		t.ok++
+		s.cfg.Pool.NoteRefreshOK(st.UID)    // P0-1：续期成功，留证（与失败分支对称）
 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
 		a.BackfillRealm()                   // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
 		if err := a.SaveAtomic(); err != nil {
