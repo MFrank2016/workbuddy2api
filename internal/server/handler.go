@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -83,6 +84,45 @@ type Config struct {
 	// （理由见 admin_tasks.go 的 TaskRunner 注释）。台账的数据结构与存储放在
 	// internal/taskledger，两个包都只依赖它，不产生环。
 	TaskLedger TaskLedgerReader
+
+	// CheckinFn 手动触发一次全量签到（POST /v1/checkin），返回报告。
+	//
+	// ★ 必须在网关**进程内**执行 ★ 号池的 credits 只由 scheduler.CheckinAll 写入
+	// （SetCreditsDetailed）；改用外部 CLI（deploy/signin）签到虽然上游确实签到了，
+	// 但**不会**更新网关内存里的额度 —— 这正是「签到成功、控制台积分却不刷新」的
+	// 成因。故这里要求的是一个能直接跑 CheckinAll 的回调，而不是去 exec 一个 CLI。
+	//
+	// busy=true 表示已有一次签到正在跑（scheduler.ErrBusy：手动入口与定时撞车），
+	// 调用方应回 429 提示稍后再试。nil = 未接线（如测试），端点回 501。
+	CheckinFn func() (report CheckinReport, busy bool, err error)
+}
+
+// CheckinResult 单账号签到结果（POST /v1/checkin 返回体的 results 元素）。
+type CheckinResult struct {
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname,omitempty"`
+	Realm    string `json:"realm,omitempty"`
+	// Status ok（签到成功）/ already（上游判定今天已签，幂等）/ fail / skipped。
+	Status string `json:"status"`
+	// Credits 签到后的余额；仅余额查询成功时非 nil。
+	// ★ global 账号也走这条路 ★ 它们跳过签到（无签到体系），但余额查询是号池
+	// 「剩余积分」的唯一数据源，故仍会出现在 results 里。
+	Credits *int64 `json:"credits,omitempty"`
+	// Detail 失败/跳过原因（成功与「已签到」不填）。
+	Detail string `json:"detail,omitempty"`
+}
+
+// CheckinReport 一次全量签到的报告。
+type CheckinReport struct {
+	// Enabled 排程是否启用（schedule.checkin_enabled）；false 时手动入口仍可用。
+	Enabled bool            `json:"enabled"`
+	Hours   []int           `json:"hours"` // 自动签到时点（本地小时）
+	Total   int             `json:"total"`
+	OK      int             `json:"ok"`
+	Already int             `json:"already"`
+	Fail    int             `json:"fail"`
+	Skipped int             `json:"skipped"`
+	Results []CheckinResult `json:"results"`
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -127,6 +167,11 @@ type Handler struct {
 	// budget 当日积分预算闸（budget.go）。恒非 nil（NewHandler 构造）；
 	// 仅当直接手搓 &Handler{} 时才为 nil，此时 admit/add 都是直通。
 	budget *dailyBudget
+
+	// lastCheckinUnix 上次手动签到**完成**时刻（unix 秒）。给 POST /v1/checkin 加一个
+	// 短冷却：一次签到会对每个账号打 2~3 次上游（refresh / daily-checkin / balance），
+	// 被脚本连点会成倍放大上游压力（含住宅代理出口的 WAF 风险）。进程内状态、重启清零。
+	lastCheckinUnix atomic.Int64
 }
 
 // NewHandler 构建 handler。
@@ -154,6 +199,11 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
 	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
+	// 手动签到入口（POST /v1/checkin）。**不**挂在 admin.enabled 闸下：签到是
+	// 幂等的余额刷新（不改变账号可用性），与 /admin/accounts/* 的 disable/revive
+	// 不同量级，和 /v1/stats/reset 同类；且控制台要开箱可用，不该要求先开管理面。
+	// 仍需 api_key（withAuth）+ 30s 冷却，防脚本连点放大上游压力。
+	h.mux.HandleFunc("POST /v1/checkin", h.withAuth(h.checkin))
 	// 运维管理端点（默认关闭，config admin.enabled 开启后生效）。
 	// 路径用 {uid} 通配而非查询参数：uid 是账号身份，放进路径便于审计与直观。
 	// 条件注册而非 handler 内 404（设计 supplement §2.3）：未注册的路由对未鉴权

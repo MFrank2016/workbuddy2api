@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
@@ -21,6 +22,68 @@ import (
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 )
+
+// checkinReportFn 把 scheduler 的**进程内**签到接到 HTTP 入口（POST /v1/checkin）。
+//
+// ★ 直接调 CheckinAll，而不是 exec deploy/signin ★ 号池的 credits 只由 CheckinAll
+// 这条路径写入（SetCreditsDetailed）；外部 CLI 虽然能签到成功，但那是另一个进程，
+// 网关内存里的额度不会更新，控制台照样显示旧值 —— 这正是 2026-09-22 用户报的
+// 「额度没刷新」。详见 internal/server/checkin.go。
+func checkinReportFn(sch *scheduler.Scheduler, p *pool.Pool, cfg *Config) func() (server.CheckinReport, bool, error) {
+	return func() (server.CheckinReport, bool, error) {
+		outcomes, err := sch.CheckinAll()
+		if errors.Is(err, scheduler.ErrBusy) {
+			// 手动入口与定时撞车：不是错误，交给 handler 回 429 busy。
+			return server.CheckinReport{}, true, nil
+		}
+		if err != nil {
+			return server.CheckinReport{}, false, err
+		}
+		// realm 由号池现查（CheckinOutcome 本身不带 realm，免得 scheduler 与 pool
+		// 两处各存一份口径）；查不到留空，前端按「—」显示。
+		realmOf := func(uid string) string {
+			if a := p.AuthByUID(uid); a != nil {
+				return a.Realm()
+			}
+			return ""
+		}
+		return buildCheckinReport(outcomes, realmOf,
+			cfg.Schedule.CheckinEnabled, cfg.Schedule.CheckinHours), false, nil
+	}
+}
+
+// buildCheckinReport 把 scheduler 的结果映射成 HTTP 响应体（纯函数，便于单测：
+// 计数与 realm 归属错了不会报错，只会让面板显示错，必须锁住）。
+func buildCheckinReport(outcomes []scheduler.CheckinOutcome, realmOf func(string) string,
+	enabled bool, hours []int) server.CheckinReport {
+	rep := server.CheckinReport{
+		Enabled: enabled,
+		Hours:   hours,
+		Total:   len(outcomes),
+		Results: make([]server.CheckinResult, 0, len(outcomes)),
+	}
+	for _, o := range outcomes {
+		rep.Results = append(rep.Results, server.CheckinResult{
+			UID:      o.UID,
+			Nickname: o.Nickname,
+			Realm:    realmOf(o.UID),
+			Status:   string(o.Status),
+			Credits:  o.Credits,
+			Detail:   o.Detail,
+		})
+		switch o.Status {
+		case scheduler.CheckinOK:
+			rep.OK++
+		case scheduler.CheckinAlready:
+			rep.Already++
+		case scheduler.CheckinFail:
+			rep.Fail++
+		case scheduler.CheckinSkipped:
+			rep.Skipped++
+		}
+	}
+	return rep
+}
 
 // modelJSONPath 由 state.json 路径推导 model.json 路径（同目录同名换缀）：
 // 两者同为数据目录持久化物（Docker ./data volume），配套而非各自配置。
@@ -273,6 +336,9 @@ func main() {
 		// 与 Tasks 同款：*taskledger.Store 结构上即满足 server 侧的窄接口，
 		// server 包不必反向 import scheduler。
 		TaskLedger: sch.Ledger(),
+		// 手动签到入口（POST /v1/checkin）。★ 走进程内 CheckinAll ★ 外部 CLI
+		// 签到不会更新网关内存额度（见 internal/server/checkin.go 顶部注释）。
+		CheckinFn: checkinReportFn(sch, p, cfg),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
