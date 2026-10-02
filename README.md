@@ -336,13 +336,20 @@ curl -s http://localhost:7863/v1/chat/completions \
    - `go.mod`、`go.sum`（依赖与构建图）；
    - `scripts/**`、任意 `*.sh` / `*.cmd` / `*.ps1`；
 3. **规模在上限内**：≤ 20 个文件且 ≤ 800 行改动（超过就只做人工评审）；
-4. **CI 绿**：`PR CI` 的 `test` 检查通过 —— 它已设为 `master` 的必需检查，auto-merge 会等它；
+4. **CI 绿**：`PR CI` 的 `test` 检查通过 —— 它已设为 `master` 的必需检查，auto-merge 会等它；该工作流走 `pull_request_target`，**来自 fork 的提交也会自动跑，不需要维护者批准**；
 5. **不是草稿**，且作者不是维护者 / 协作者（协作者的 PR 只做检测与打标，不走自动合并）。
 
 拿到 `ai-approved` 并启用 auto-merge 之后，**再推一次提交就会撤销批准**（重新评审：
 Actions → AI Governance → Run workflow，填 `pr-number`）—— 所以尽量一次改完再提。
 
-> 首次向本仓库贡献时，GitHub 默认需要维护者批准后才会跑 CI；在那之前 auto-merge 会一直等。
+> `PR CI` 走 `pull_request_target`，工作流定义固定取默认分支上的那一份：来自 fork 的运行**不需要**
+> 维护者批准就能上报 `test`。此前 fork 首次贡献会被 GitHub 挂起等人工点「Approve workflows to run」，
+> 那段时间 `test` 永不出结果 —— 即使 `ai-approved` 已打、auto-merge 已启用也只能无限等待，现已不存在。
+> 代价是 fork 的代码会自动在 runner 上执行：只有只读 `GITHUB_TOKEN`、不引用任何 secret，且 PR 改不动 CI 定义本身。
+>
+> 维护提示：分支保护里的必需检查必须由**不受 fork 批准策略约束**的事件产出（目前是 `pull_request_target`）。
+> 若将来新增必需检查（或把它改回 `pull_request` 触发），fork PR 会重新出现在批准前拿不到检查结果、
+> auto-merge 无限等待的死锁。
 
 ### 提交 PR 的清单
 
