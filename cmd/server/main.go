@@ -162,6 +162,9 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	// 积分耗尽后的冷却时长（cooldown.credit_exhausted，issue #78）：0 = 保持
+	// 「硬冷却到次日 04:00」旧行为；配了就只退出这一小段再回候选池。
+	p.SetCreditExhausted(cfg.CreditExhaustedDur)
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 
@@ -230,6 +233,13 @@ func main() {
 	checkinStore := server.NewCheckinHistoryStore(checkinJSONPath(cfg.StateFile))
 	checkinStore.Load()
 
+	// scheduleSeed 部署私有盐：让 random_delay_minutes 的每日随机时刻在重启后稳定、
+	// 且不同部署错开（上游用 APIKey 或 AuthDir 兜底——两者都已具备、无需新增熵源；
+	// 绝不出现在日志里）。
+	scheduleSeed := cfg.APIKey
+	if scheduleSeed == "" {
+		scheduleSeed = cfg.AuthDir
+	}
 	sch := scheduler.New(scheduler.Config{
 		Pool:                p,
 		Upstream:            up,
@@ -244,6 +254,11 @@ func main() {
 		JitterMinutes:      cfg.Schedule.JitterMinutes,
 		// 实例盐（schedule.jitter_salt，缺省空 = 与引入前逐字一致）。
 		JitterSalt: cfg.Schedule.JitterSalt,
+		// 账号间随机抖动 + 档位小时摊开（schedule.account_delay_* / random_delay_minutes）。
+		AccountDelayMinSeconds: cfg.Schedule.AccountDelayMinSeconds,
+		AccountDelayMaxSeconds: cfg.Schedule.AccountDelayMaxSeconds,
+		RandomDelayMinutes:     cfg.Schedule.RandomDelayMinutes,
+		RandomDelaySeed:        scheduleSeed,
 		ExpiringSoonWindow: cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
 		// 任务执行台账与当日失败重试（schedule.ledger_file / retry_*）。
 		// 重试默认关闭（RetryDelayMinutes=0），台账恒在（纯内存，除非给了落盘路径）。

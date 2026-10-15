@@ -38,6 +38,16 @@ type Schedule struct {
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
+	// AccountDelayMinSeconds / AccountDelayMaxSeconds：排程遍历时给账号间最小间隔
+	// 追加的随机抖动秒数（0 ≤ min ≤ max ≤ 600；0 = 关闭，逐字保持原间隔）。只作用于
+	// 排程遍历，手动调用不受影响。
+	AccountDelayMinSeconds int `json:"account_delay_min_seconds"`
+	AccountDelayMaxSeconds int `json:"account_delay_max_seconds"`
+	// RandomDelayMinutes 把每个每日档位在其小时窗口内摊开（0–60；0 = 保持整点）。
+	// 与 JitterMinutes 的语义不同：JitterMinutes 是「整点后偏移」，这里是「在小时
+	// 内随机选时刻」。超出范围报错，不静默回落。
+	RandomDelayMinutes int `json:"random_delay_minutes"`
+
 	// JitterMinutes 触发时刻抖动窗口（分钟，默认 0 = 关闭）。
 	//
 	// 六类任务的触发时刻默认精确落在整点（迁移自系统 crontab 的 `0 9 * * *` 语义），
@@ -150,6 +160,13 @@ func (s *Schedule) Normalize() error {
 	// 上限 1440（一天）——偏移必须小于 24h，否则触发时刻会漂到名义时点之后一整天，
 	// 当天那次实际上被跳过。注意窗口大于相邻槽位间隔（如 9 点与 10 点相隔 60 分钟）时，
 	// 任务顺序可能与配置的小时顺序不一致：这是摊开负载的必然代价，不是 bug。
+	if s.AccountDelayMinSeconds < 0 || s.AccountDelayMaxSeconds > 600 ||
+		s.AccountDelayMaxSeconds < s.AccountDelayMinSeconds {
+		return fmt.Errorf("schedule account delays require 0 <= min <= max <= 600 seconds")
+	}
+	if s.RandomDelayMinutes < 0 || s.RandomDelayMinutes > 60 {
+		return fmt.Errorf("schedule.random_delay_minutes must be between 0 and 60")
+	}
 	if s.JitterMinutes < 0 {
 		return fmt.Errorf("schedule.jitter_minutes: %d 不得为负；0 = 关闭抖动（精确整点）", s.JitterMinutes)
 	}

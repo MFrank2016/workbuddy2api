@@ -38,6 +38,19 @@ type Config struct {
 	// JitterSalt 实例盐：参与抖动偏移散列，让**同配置的不同部署**算出不同偏移。
 	// 缺省空串 = 散列输入与引入本字段之前逐字一致（零行为变化）。
 	JitterSalt string
+
+	// AccountDelayMinSeconds / AccountDelayMaxSeconds：排程遍历时给账号间最小间隔
+	// 追加的随机抖动秒数（0 ≤ min ≤ max ≤ 600）。只作用于**排程遍历**，手动调用与
+	// 零区间（max<=0）保持原行为（accountGap 开关语义）。
+	AccountDelayMinSeconds int
+	AccountDelayMaxSeconds int
+	// RandomDelayMinutes 把每个每日档位在其小时窗口内摊开（0–60；0 = 保持整点）。
+	// 与 JitterMinutes 语义不同：JitterMinutes 是「整点后偏移」，这里是「在小时内
+	// 随机选时刻」。scheduledSlot 用 sha256 做确定性派生（重启后同一 slot 得到同一时刻）。
+	RandomDelayMinutes int
+	// RandomDelaySeed 部署私有盐：参与 scheduledSlot 的 sha256 派生，让重启后同一
+	// slot 时刻稳定、且不同部署错开。**绝不打印**（main.go 用 APIKey 或 AuthDir 兜底）。
+	RandomDelaySeed string
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int
@@ -262,6 +275,31 @@ func (k taskKind) String() string {
 	return "unknown"
 }
 
+// fireAt 返回某类任务在 now 之后的最近触发时刻，按配置选择抖动模式：
+//   - RandomDelayMinutes > 0：scheduledSlot 在小时窗口内随机选时刻（sha256 派生）
+//   - 否则：nextFire 的 jitterOffset（整点后偏移，fnv 派生）
+// 两种都是确定性派生，重启后同一 slot 时刻稳定。
+func (s *Scheduler) fireAt(now time.Time, hours []int, kind taskKind) time.Time {
+	if s.cfg.RandomDelayMinutes > 0 {
+		var earliest time.Time
+		for _, h := range hours {
+			for d := 0; d < 2; d++ {
+				day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, d)
+				at := s.scheduledSlot(day, h, kind)
+				if !at.After(now) {
+					continue
+				}
+				if earliest.IsZero() || at.Before(earliest) {
+					earliest = at
+				}
+				break
+			}
+		}
+		return earliest
+	}
+	return nextFire(now, hours, kind, s.cfg.JitterMinutes, s.cfg.JitterSalt)
+}
+
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
 // 多类任务若配到同一小时（如签到与旅行都含 9），该时刻多类任务需一并执行。
 // 已显式禁用的任务不进候选（nextFire 对其零值返回零时间，nextWake 再跳过零时点）。
@@ -271,24 +309,23 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 		kind taskKind
 	}
 	var slots []slot
-	jit := s.cfg.JitterMinutes
 	if !s.cfg.CheckinDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.CheckinHours, taskCheckin, jit, s.cfg.JitterSalt), taskCheckin})
+		slots = append(slots, slot{s.fireAt(now, s.cfg.CheckinHours, taskCheckin), taskCheckin})
 	}
 	if !s.cfg.TravelDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.TravelHours, taskTravel, jit, s.cfg.JitterSalt), taskTravel})
+		slots = append(slots, slot{s.fireAt(now, s.cfg.TravelHours, taskTravel), taskTravel})
 	}
 	if !s.cfg.ActivityDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.ActivityHours, taskActivity, jit, s.cfg.JitterSalt), taskActivity})
+		slots = append(slots, slot{s.fireAt(now, s.cfg.ActivityHours, taskActivity), taskActivity})
 	}
 	if !s.cfg.KeepaliveDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.KeepaliveHours, taskKeepalive, jit, s.cfg.JitterSalt), taskKeepalive})
+		slots = append(slots, slot{s.fireAt(now, s.cfg.KeepaliveHours, taskKeepalive), taskKeepalive})
 	}
 	if !s.cfg.SchoolDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.SchoolHours, taskSchool, jit, s.cfg.JitterSalt), taskSchool})
+		slots = append(slots, slot{s.fireAt(now, s.cfg.SchoolHours, taskSchool), taskSchool})
 	}
 	if !s.cfg.CatDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.CatHours, taskCat, jit, s.cfg.JitterSalt), taskCat})
+		slots = append(slots, slot{s.fireAt(now, s.cfg.CatHours, taskCat), taskCat})
 	}
 	// 当日失败重试：**所有已排期的重试**（含尚未到点的）都参与「下一个唤醒时刻」
 	// 的竞争——只算到点的会让未到点的重试失去唤醒源，主循环会一路睡到下一个正常
@@ -388,6 +425,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 // runBatch 并行派发一批任务（同一唤醒时刻的多类任务），等全部完成返回。
 // 供 Run 主循环与测试使用；ctx 取消时由各任务内部的 sleepCtx 快速收尾。
 func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
+	// 排程遍历标记：accountGap/accountScriptArgs 只对本 ctx 派生的调用加账号间抖动，
+	// 手动入口（RunXxxNow，走 context.Background()）不带此标记、保持原行为。
+	ctx = context.WithValue(ctx, scheduledAccountKey{}, true)
 	var wg sync.WaitGroup
 	for _, k := range kinds {
 		wg.Add(1)
@@ -652,7 +692,7 @@ func (s *Scheduler) runActivity(ctx context.Context, trigger string) {
 		// 点亮连登）；realmBase 路由/头由 upstream.billingJSON/BillingHeaders 按 realm 切。
 		// 单账号失败只记 WARN 不影响遍历（下方 report err → break 该号 → continue 下号）。
 		if !first {
-			if !sleepCtx(ctx, activityAccountDelay) {
+			if !sleepCtx(ctx, s.accountGap(ctx, activityAccountDelay)) {
 				t.interrupted = true
 				return // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}

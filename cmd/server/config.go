@@ -218,6 +218,9 @@ type Config struct {
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
 		// 的积分被标记为"快过期"，选号优先消耗（issue:积分过期）。空/0 = 禁用分桶。
 		ExpiringSoon string `json:"expiring_soon"`
+		// CreditExhausted 积分耗尽后的冷却时长（如 "10m"）。空 = 旧行为：硬冷却到次日 04:00
+		// （等签到恢复）。配了就只退出这一小段，到期回到候选池（issue #78）。
+		CreditExhausted string `json:"credit_exhausted"`
 		// CostExploreInterval costTier 条件探索窗口（issue #136 方案 a′）：tier 0
 		// 垄断层存在且 tier 1 有成员时，距上次探索 ≥ 窗口则本次 pick 生效层切
 		// tier 1-only（探索=搭车改道，零新增上游请求；成功即毕业，失败走既有
@@ -242,6 +245,9 @@ type Config struct {
 	SessionTTL          time.Duration `json:"-"`
 	SessionGCInterval   time.Duration `json:"-"`
 	ExpiringSoonDur     time.Duration `json:"-"`
+	// CreditExhaustedDur 解析后的积分耗尽冷却时长（issue #78）；0 = 不启用
+	// （保持「硬冷却到次日 04:00」的旧行为）。
+	CreditExhaustedDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
 }
@@ -406,6 +412,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_EXPIRING_SOON"); v != "" {
 		c.Pool.ExpiringSoon = v
 	}
+	if v := os.Getenv("WB2A_CREDIT_EXHAUSTED"); v != "" {
+		c.Pool.CreditExhausted = v
+	}
 	if v := os.Getenv("WB2A_ADMIN_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Admin.Enabled = b
@@ -544,6 +553,20 @@ func (c *Config) normalize() error {
 	}
 	if c.ExpiringSoonDur < 0 {
 		c.ExpiringSoonDur = 0 // 负值视为禁用，避免 upstream 判定窗口反转
+	}
+	// 积分耗尽后的冷却时长（issue #78）：空 = 保持「硬冷却到次日 04:00」的旧行为；
+	// 填了必须是正时长（负值会让冷却立即到期，等于没冷却 —— 与其静默放行，不如报错）。
+	if v := strings.TrimSpace(c.Pool.CreditExhausted); v == "" {
+		c.CreditExhaustedDur = 0
+	} else {
+		d, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("cooldown.credit_exhausted: %w", perr)
+		}
+		if d <= 0 {
+			return fmt.Errorf("cooldown.credit_exhausted: must be a positive duration, got %q", v)
+		}
+		c.CreditExhaustedDur = d
 	}
 	// costTier 探索窗口（issue #136）：空值回落默认 30m（Default 已置；此兜底覆盖
 	// 显式 ""）；"0" 是合法值（关停，完全回到现状行为），不回落；负值钳 0 同关停

@@ -107,7 +107,7 @@ func (s *Scheduler) runTravel(ctx context.Context, trigger string) {
 			continue
 		}
 		if !first {
-			if !sleepCtx(ctx, travelAccountDelay) {
+			if !sleepCtx(ctx, s.accountGap(ctx, travelAccountDelay)) {
 				t.interrupted = true
 				return // 优雅停机：不等限速睡满，剩余账号下轮再巡
 			}
