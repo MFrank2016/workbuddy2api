@@ -30,6 +30,35 @@ func (k CoolKind) String() string {
 // 运维在 /status 一处即可看到「为什么被降权/冷却」，不新增台账字段。
 const degradeReason = "consecutive failures"
 
+// TokenUsage 账号聊天请求的累计 token 用量摘要（不包含任何原始凭证）。
+type TokenUsage struct {
+	RequestCount        int64     `json:"request_count,omitempty"`
+	UsageCount          int64     `json:"usage_count,omitempty"`
+	PromptTokens        int64     `json:"prompt_tokens,omitempty"`
+	CompletionTokens    int64     `json:"completion_tokens,omitempty"`
+	TotalTokens         int64     `json:"total_tokens,omitempty"`
+	LastLatencyMs       int64     `json:"last_latency_ms,omitempty"`
+	LastTokensPerSecond *float64  `json:"last_tokens_per_second,omitempty"`
+	LastUsedAt          time.Time `json:"last_used_at,omitempty"`
+	LastModel           string    `json:"last_model,omitempty"`
+}
+
+// TokenUsageDelta 是一次聊天账号尝试的 usage 增量。
+// 各 Has* 字段用于区分上游缺少字段与字段值确实为 0。
+type TokenUsageDelta struct {
+	Model               string
+	HasPromptTokens     bool
+	PromptTokens        int64
+	HasCompletionTokens bool
+	CompletionTokens    int64
+	HasTotalTokens      bool
+	TotalTokens         int64
+	HasLatencyMs        bool
+	LatencyMs           int64
+	HasTokensPerSecond  bool
+	TokensPerSecond     float64
+}
+
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
 	UID   string `json:"uid"`
@@ -73,11 +102,13 @@ type Status struct {
 	// Paused 暂停选号（panel 语义）：退出选号候选，但保号任务照常（运维可见）。
 	Paused bool `json:"paused,omitempty"`
 	// CheckinDone 本地今日已签到（签到成功或上游幂等拒绝均算；跨零点自然过期）。
-	CheckinDone     bool      `json:"checkin_done,omitempty"`
-	SuccessCount    int64     `json:"success_count,omitempty"`
-	ErrTotal        int64     `json:"err_total,omitempty"`
-	LastSuccessTime time.Time `json:"last_success,omitempty"`
-	LastErrTime     time.Time `json:"last_err,omitempty"`
+	CheckinDone bool `json:"checkin_done,omitempty"`
+	// TokenUsage 聊天 token 用量摘要（面板账号表「最近一次用量」列）。
+	TokenUsage      TokenUsage `json:"token_usage,omitempty"`
+	SuccessCount    int64      `json:"success_count,omitempty"`
+	ErrTotal        int64      `json:"err_total,omitempty"`
+	LastSuccessTime time.Time  `json:"last_success,omitempty"`
+	LastErrTime     time.Time  `json:"last_err,omitempty"`
 	// ConsecutiveFails 连续失败计数（连败降权用，见 entry.consecutiveFails）。
 	// 零值也透出（运维口径：与 err_total/session_dead_fails 一致，零值缺失会让人
 	// 误以为"没记录"，实际是零值被 omitempty 省略）。
@@ -176,7 +207,9 @@ type entry struct {
 	creditsEarliestRemaining int64
 	// lastCheckinDay 最近一次签到成功的本地日期（panel CheckinDone 观测）。
 	lastCheckinDay string
-	successCount   int64 // 累计成功
+	// tokenUsage 聊天请求 token 用量摘要（panel TokenUsage，持久化）。
+	tokenUsage   TokenUsage
+	successCount int64 // 累计成功
 	// errTotal 累计错误（终身累计，仅状态展示用；选号权重不消费——原「成功率」
 	// 因子已删，见 pick.weightOf 注释与 success-ema-review）。
 	errTotal    int64     // 累计错误（终身累计，供状态展示；选号权重不消费，原成功率因子已删）
@@ -317,7 +350,9 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 // 连败降权与冷却/熔断同入本判定（取更长者不叠加：三个截止是并列的或门，
 // 只要任一未到期即不可选，天然「并存取更远者」——不需要显式比较长短）。
 func (e *entry) healthy(now time.Time) bool {
-	if e.disabled || e.manualDisabled {
+	// paused（运维暂停选号）与 disabled 同口径退出候选，但**照常参与保号任务**
+	// （签到/活跃/保活/余额刷新）；语义见 transition.pauseLocked。
+	if e.disabled || e.manualDisabled || e.paused {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
@@ -342,7 +377,7 @@ func (e *entry) healthy(now time.Time) bool {
 // 调用方负责 now 与冷却有效性的判断（本方法只看形态，不看冷却是否已过期）。
 func (e *entry) modelExempt() bool {
 	return len(e.modelCooldowns) > 0 &&
-		!e.disabled && !e.manualDisabled && e.breakerUntil.IsZero()
+		!e.disabled && !e.manualDisabled && !e.paused && e.breakerUntil.IsZero()
 }
 
 // modelCooled 报告账号对指定 model 是否正处 6004 模型级冷却（该模型的独立冷却未过期）。
@@ -522,6 +557,8 @@ type stateAccount struct {
 	// 陈旧价格不复活）；恢复侧剔除非法值（负 per1k/零 LastSeen 的结构破损条目）。
 	// 与运行态 modelCostEntry 字段一一对应（单一表示，内存与落盘同构不搞两套）。
 	ModelCosts map[string]stateModelCost `json:"model_costs,omitempty"`
+	// TokenUsage 聊天 token 用量摘要（panel 口径，持久化）。
+	TokenUsage TokenUsage `json:"token_usage,omitempty"`
 }
 
 // stateModelCooldown 单个 (账号, 模型) 的 6004 独立冷却持久化记录，与运行态

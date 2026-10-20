@@ -187,6 +187,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			creditsEarliestExpiry:    s.CreditsEarliestExpiry,
 			creditsEarliestRemaining: s.CreditsEarliestRemaining,
 			lastCheckinDay:           s.LastCheckinDay,
+			tokenUsage:               s.TokenUsage,
 			paused:                   s.Paused,
 		}
 		// 恢复熔断器：breakerUntil 在未来才恢复（惰性过滤过期/零值，与落盘同口径）。
@@ -439,6 +440,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 			CreditsEarliestRemaining: e.creditsEarliestRemaining,
 			LastCheckinDay:           e.lastCheckinDay,
+			TokenUsage:               e.tokenUsage,
 			Paused:                   e.paused,
 			ModelCooldowns:           mcs,
 			ModelCosts:               mcosts,

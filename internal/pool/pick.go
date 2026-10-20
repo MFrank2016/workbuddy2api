@@ -285,8 +285,8 @@ func (p *Pool) pickEarliestExpiryLockedScoped(tried map[string]bool, now time.Ti
 		if !e.a.MatchesGroups(groups) {
 			continue // 分组过滤：其他密钥分组的冷却账号不参与本组兜底（见函数注释）
 		}
-		if e.disabled || e.manualDisabled {
-			continue // 禁用/手动停用的账号永不参与兜底
+		if e.disabled || e.manualDisabled || e.paused {
+			continue // 禁用/手动停用/暂停的账号永不参与兜底
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402

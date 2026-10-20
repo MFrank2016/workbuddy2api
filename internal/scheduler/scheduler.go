@@ -532,9 +532,10 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
 	var okN, alreadyN, failN, skipN int
+	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
-		if st.Disabled {
+		if st.Disabled && !includeDisabled {
 			oc.Status, oc.Detail = CheckinSkipped, "disabled"
 			skipN++
 			out = append(out, oc)
@@ -700,8 +701,9 @@ func (s *Scheduler) runActivity(ctx context.Context, trigger string) {
 
 	count := s.cfg.ActivityReportCount
 	first := true
+	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
+		if st.Disabled && !includeDisabled {
 			t.skipped++
 			continue
 		}
@@ -956,8 +958,9 @@ func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(triggerManual) }
 func (s *Scheduler) runKeepalive(trigger string) {
 	started := time.Now()
 	var t runTally
+	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
+		if st.Disabled && !includeDisabled {
 			t.skipped++
 			continue
 		}

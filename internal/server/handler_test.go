@@ -1607,17 +1607,24 @@ func TestStatusRateLimitedModelsLedger(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	// 双号都被 6004 → 全部换完仍限流。末端错误已规范化（冷启动重构）：限流语义
-	// 映射为 429 rate_limit_exceeded（不再原样 503 透传上游原文），换号过程已把 u1 冷却。
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("code=%d want 429 body=%s", rec.Code, rec.Body)
+	// 双号都被 6004 → 全部换完仍限流；且两个号都对该模型处于模型级冷却（选号
+	// 侧快照 modelBlock 归因成立）→ 末端按「模型不可用」映射 400 model_unavailable
+	// （吸收 panel 语义：模型级阻塞与账号级限流区分开——换号必然同样失败，
+	// 客户端应换模型而不是按可重试错误重试；最早解封时刻在 gateway_hint 里）。
+	// 换号过程已把 u1 冷却、写入模型级台账（本测试下半部分验证 /status）。
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body)
 	}
 	var e map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
 		t.Fatalf("resp not json: %v body=%s", err, rec.Body)
 	}
-	if errObj, _ := e["error"].(map[string]any); errObj == nil || errObj["code"] != "rate_limit_exceeded" {
-		t.Fatalf("want rate_limit_exceeded envelope: %s", rec.Body)
+	errObj, _ := e["error"].(map[string]any)
+	if errObj == nil || errObj["code"] != "model_unavailable" {
+		t.Fatalf("want model_unavailable envelope: %s", rec.Body)
+	}
+	if hint, _ := errObj["gateway_hint"].(string); !strings.Contains(hint, "model_blocked") {
+		t.Errorf("gateway_hint 应含 model_blocked 归因（模型级阻塞 vs 账号级限流区分）: %s", rec.Body)
 	}
 	// u1 被选中过（已冷却 + 有台账）。
 	st, ok := p.Status("u1")

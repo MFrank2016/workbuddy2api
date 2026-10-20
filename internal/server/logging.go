@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/reqlog"
 	"workbuddy2api/internal/upstream"
 )
@@ -39,6 +40,8 @@ type chatStat struct {
 	ttfb   time.Duration
 	toks   int // <0 表示 usage 缺失 → 显示 "-"
 	status int
+	// attempts 本次请求对上游的账号尝试次数（含失败尝试；轮转放大在 metrics 可见）。
+	attempts int
 
 	// metrics 采集字段（供 /v1/stats 聚合）：全部来自上游 usage，缺失时保持零值
 	// 并由 hasUsage 区分「缺观测」与「显式 0」——与成本账本同一纪律。
@@ -47,6 +50,7 @@ type chatStat struct {
 	cacheHit  int
 	cacheMiss int
 	cacheWr   int
+	hasCache  bool
 	credit    float64
 	hasCredit bool
 
@@ -145,6 +149,20 @@ func (s *chatStatsReader) CacheTotals() (hit, miss, write int, ok bool) {
 		miss = s.prompt - s.cacheHit
 	}
 	return s.cacheHit, miss, s.cacheWr, true
+}
+
+// Usage 返回本次流观测到的 usage 增量（RecordTokenUsage / 用量时序共用）。
+// hasUsage 为假（上游没给 usage）时三个 Has* 全假——空 delta 会被计为
+// 「未观测到 token 的一次尝试」，与失败路径同口径。
+func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
+	return pool.TokenUsageDelta{
+		HasPromptTokens:     s.hasUsage,
+		PromptTokens:        int64(s.prompt),
+		HasCompletionTokens: s.hasUsage,
+		CompletionTokens:    int64(s.tokens),
+		HasTotalTokens:      s.hasUsage,
+		TotalTokens:         int64(s.prompt + s.tokens),
+	}
 }
 
 // parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
@@ -246,6 +264,48 @@ func usageCreditTotal(resp map[string]any) (credit float64, total int, ok bool) 
 		return 0, 0, false
 	}
 	return c, int(pt) + int(ct), true
+}
+
+// usageDeltaFromResponse 从聚合响应的 usage 提取 token 增量（记录账号台账 / 用量
+// 时序共用）。字段缺失 ≠ 0：只有实际出现的键才置 Has*，调用方据此区分「没观测到」
+// 与「观测到 0」。
+func usageDeltaFromResponse(resp map[string]any) pool.TokenUsageDelta {
+	delta := pool.TokenUsageDelta{}
+	u, ok := resp["usage"].(map[string]any)
+	if !ok {
+		return delta
+	}
+	read := func(key string) (int64, bool) {
+		v, ok := u[key]
+		if !ok {
+			return 0, false
+		}
+		switch n := v.(type) {
+		case float64:
+			return int64(n), true
+		case float32:
+			return int64(n), true
+		case int:
+			return int64(n), true
+		case int64:
+			return n, true
+		case json.Number:
+			i, err := n.Int64()
+			return i, err == nil
+		default:
+			return 0, false
+		}
+	}
+	if n, ok := read("prompt_tokens"); ok {
+		delta.HasPromptTokens, delta.PromptTokens = true, n
+	}
+	if n, ok := read("completion_tokens"); ok {
+		delta.HasCompletionTokens, delta.CompletionTokens = true, n
+	}
+	if n, ok := read("total_tokens"); ok {
+		delta.HasTotalTokens, delta.TotalTokens = true, n
+	}
+	return delta
 }
 
 // uidPrefix 只显示 uid 前 8 位；空 uid 显示 "-"。
@@ -391,6 +451,9 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 	return !clientGone && errors.Is(err, context.Canceled)
 }
 
+// errUpstreamTimeout 上游超时的哨兵：末端出口据此给出与「没号可用」可区分的文案。
+var errUpstreamTimeout = errors.New("upstream timeout")
+
 // maxUserAgentLen 记录到请求日志/归档的 UA 上限（超出截断，避免日志列被长 UA 挤没）。
 const maxUserAgentLen = 200
 
@@ -469,6 +532,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.HasCredit = s.hasCredit
 		e.CacheHitTokens = int64(s.cacheHit)
 		e.CacheMissTokens = int64(s.cacheMiss)
+		e.Attempts = s.attempts
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent

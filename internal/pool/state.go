@@ -187,6 +187,51 @@ func (p *Pool) ReenableIfCredits(uid string, remain int64, total ...int64) {
 	}
 }
 
+// RecordTokenUsage 累计一次聊天账号尝试的 token 用量（panel 口径）：
+// 每次尝试都计请求数（失败也计）；有 token 观测才计 UsageCount 与各 token 累计；
+// 缺 completion_tokens 时清除上次吞吐速率（不展示过期数据）。
+func (p *Pool) RecordTokenUsage(uid string, delta TokenUsageDelta) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	usage := &e.tokenUsage
+	usage.RequestCount++
+	usage.LastUsedAt = time.Now()
+	if delta.Model != "" {
+		usage.LastModel = delta.Model
+	}
+	known := false
+	if delta.HasPromptTokens && delta.PromptTokens >= 0 {
+		usage.PromptTokens += delta.PromptTokens
+		known = true
+	}
+	if delta.HasCompletionTokens && delta.CompletionTokens >= 0 {
+		usage.CompletionTokens += delta.CompletionTokens
+		known = true
+	}
+	if delta.HasTotalTokens && delta.TotalTokens >= 0 {
+		usage.TotalTokens += delta.TotalTokens
+		known = true
+	}
+	if known {
+		usage.UsageCount++
+	}
+	if delta.HasLatencyMs && delta.LatencyMs >= 0 {
+		usage.LastLatencyMs = delta.LatencyMs
+	}
+	if delta.HasTokensPerSecond && delta.TokensPerSecond >= 0 {
+		speed := delta.TokensPerSecond
+		usage.LastTokensPerSecond = &speed
+	} else {
+		// 失败或缺少 completion_tokens 时不展示上一次请求的旧吞吐速度。
+		usage.LastTokensPerSecond = nil
+	}
+	p.dirty.Store(true)
+}
+
 // NoteError 记录一次错误：喂入唯一的连续失败计数器 fails + 累计错误 errTotal
 // （仅状态展示；原成功率 EMA 已删，此处不再喂）。达到 breakerThreshold 触发熔断
 // （指数退避），连续失败语义整体并入熔断器（不再有独立的 err 冷却）。
@@ -693,6 +738,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,
 		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),
 		Enterprise:               e.a.IsEnterprise(),
+		TokenUsage:               e.tokenUsage,
 		SuccessCount:             e.successCount,
 		ErrTotal:                 e.errTotal,
 		LastSuccessTime:          e.lastSuccess,
