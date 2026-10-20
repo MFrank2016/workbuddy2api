@@ -10,6 +10,8 @@ services:
         GOPROXY: ""
     container_name: workbuddy2api
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
     # 「写入 auths/*.json.tmp 失败 permission denied」，三种解法任选：
     #   1) 非 root · 让容器以你自己的 uid 运行（挂载目录本来就是你建的）：
@@ -20,8 +22,17 @@ services:
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
       - TZ=Asia/Shanghai
+    # 只监听本机回环：公网统一走宿主机 Caddy（workbuddy2api.061995.xyz，DNS-01 签证书）。
+    # 本机脚本（login.sh / checkin.sh 等）仍用 http://127.0.0.1:7863 访问，不受影响。
+    # 注意：workbuddy-manager 的「更新上游」会保留本文件的定制（网络/卷/环境变量），
+    # 并把端口绑定维持为 127.0.0.1，不会在此处回退成公网绑定。
     ports:
-      - "7863:7863"
+      - "127.0.0.1:7863:7863"
+    networks:
+      - default
+      # 宿主机 Caddy 所在 compose 项目的网络（项目目录 /opt/caddy 时名为 caddy_caddy_net），
+      # Caddy 经容器名 workbuddy2api:7863 回源；GUI / 管理端也在此网络内直连本网关。
+      - caddy_caddy_net
     volumes:
       # auths 凭证卷：login.sh 在宿主机落盘 workbuddy-<uid>.json（0600），容器网关以
       # app(uid 10001) 读 + 回写（refresh / realm backfill 走 tmp+rename，需目录写权限）。
@@ -41,3 +52,7 @@ services:
       # 但前提是它能以文件形式写入 —— 挂载目录会挡住这条路径）。
       # 不挂 :ro：面板「配置」页需要写回此文件（保存后热生效）。
       - ./config.json:/app/config.json
+
+networks:
+  caddy_caddy_net:
+    external: true
