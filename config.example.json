@@ -105,6 +105,8 @@
     "client_name": "WorkBuddy",
     "passthrough_ip": false,
     "model_aliases": {},
+    "ca_bundle": "",
+    "cn_chat_base": "",
     "retry_enabled": false,
     "retry_attempts": 1,
     "retry_backoff": 0.5

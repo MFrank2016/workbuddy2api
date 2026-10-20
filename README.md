@@ -70,6 +70,9 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 | `server.max_body_mb` | `16` | 单请求体上限（MB）；`0` = 不限制，超限 413 |
 | `upstream.model_aliases` | `{}` | 模型重定向（后缀 `*` 通配）：如把桌面端后台任务模型改写到免费模型；空 = 不启用 |
 | `panel.password_hash` / `panel.session_hours` | `""` / `24` | 面板独立密码（PBKDF2 摘要，`wb2api -hash-password '<pw>'` 生成）；空 = 仅 API Key |
+| `upstream.ca_bundle` / `upstream.cn_chat_base` | `""` / `""` | 额外根证书 PEM（TLS 解密代理）/ 国内上游地址覆盖（如 `https://www.workbuddy.cn`） |
+| `api_keys[].models` / `api_keys[].realm` | 空 | 密钥级模型白名单（`*` 通配）与域绑定；不匹配本地 400 |
+| `auth.disabled_models`（auth 文件） | 空 | 账号级禁用模型（`*` 通配），选号跳过 |
 | `pool.account_fault_hold` / `account_fault_disable_after` | `"24h"` / `3` | 11140 风控处置：长冷却后自动重试，连续 N 次升级禁用；`"0"` = 立即禁用 |
 
 ### 其他社区前端面板

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -217,6 +218,12 @@ func main() {
 	}
 
 	up := upstream.New()
+	// 额外根证书（upstream.ca_bundle，企业代理/Clash TLS 解密）：启动期加载，失败即退出。
+	if p := strings.TrimSpace(cfg.Upstream.CABundle); p != "" {
+		if err := up.SetCABundle(p); err != nil {
+			log.Fatalf("upstream.ca_bundle: %v", err)
+		}
+	}
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
@@ -244,6 +251,10 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	up.GlobalEnabled = cfg.Global.Enabled
+	// 国内版对话上游覆盖（upstream.cn_chat_base，空 = 内置默认 copilot.tencent.com）。
+	if v := strings.TrimSpace(cfg.Upstream.CNChatBase); v != "" {
+		up.ChatBaseCN = v
+	}
 	// 聊天 SSE 同账号瞬时重试（upstream.retry_*，默认关 = 行为逐字一致）。
 	up.Retry = upstream.RetryConfig{
 		Enabled:  cfg.Upstream.RetryEnabled,

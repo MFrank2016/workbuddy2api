@@ -49,6 +49,9 @@ type Pool struct {
 	// creditFloor 积分保底（SetCreditFloor 注入；0 = 关闭，缺省即现状）。
 	// 账号 credits < floor 时不再参与收费模型选号，防止收费请求把余额打穿。
 	creditFloor int64
+	// modelEntitlements (realm|model) → 11158「免费账号不可用」观测（24h 过期）。
+	// 纯观测，不参与选号。
+	modelEntitlements map[string]modelEntitlement
 	// accountFaultHold / accountFaultDisableAfter 11140 账号级风控处置策略
 	// （SetAccountFaultPolicy 注入；默认 24h / 3 次）。hold<=0 = 立即永久禁用（旧行为）。
 	accountFaultHold         time.Duration

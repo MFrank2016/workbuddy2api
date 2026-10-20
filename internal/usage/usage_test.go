@@ -369,3 +369,22 @@ func TestSnapshotByKey(t *testing.T) {
 		t.Fatalf("by_key=%+v（空 key 不应计入）", snap.ByKey)
 	}
 }
+
+func TestAccountModelUsage(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "m", Delta{TotalTokens: 100, HasTotal: true}, true)
+	r.Add(now, "cn", "u1", "m", Delta{TotalTokens: 50, HasTotal: true}, true)
+	r.Add(now, "cn", "u2", "m", Delta{TotalTokens: 30, HasTotal: true}, true)
+	got := r.AccountModelUsage(Window{Hours: 24})
+	if len(got) != 2 {
+		t.Fatalf("rows=%d want 2: %+v", len(got), got)
+	}
+	byUID := map[string]int64{}
+	for _, a := range got {
+		byUID[a.UID] = a.Tokens
+	}
+	if byUID["u1"] != 150 || byUID["u2"] != 30 {
+		t.Fatalf("byUID=%v", byUID)
+	}
+}

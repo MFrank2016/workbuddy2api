@@ -36,6 +36,10 @@ type AuthKey struct {
 	Key    string
 	Name   string
 	Groups []string
+	// Models 密钥级模型白名单（后缀 "*" 通配）；空 = 不限。
+	Models []string
+	// Realm 密钥级域绑定（"cn"/"global"）；空 = 不限。
+	Realm string
 }
 
 // Config handler 依赖。
@@ -518,6 +522,10 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	if tl := h.taskLedgerStatus(); tl != nil {
 		body["task_ledger"] = tl
 	}
+	// model_entitlements 11158 观测（仅非空时写键，保持老响应形状）。
+	if ents := h.cfg.Pool.ModelEntitlements(); len(ents) > 0 {
+		body["model_entitlements"] = ents
+	}
 	writeJSON(w, http.StatusOK, body)
 }
 
@@ -896,6 +904,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		tr.stat = st
 	}
 	defer st.done()
+
+	// 密钥级模型白名单 + realm 绑定（吸收自 hub）：不匹配本地 400，零上游请求。
+	if ki := authKeyFrom(r.Context()); ki != nil {
+		if ki.Realm != "" && ki.Realm != realm {
+			st.status = http.StatusBadRequest
+			writeOpenAIError(w, http.StatusBadRequest, "key_realm_mismatch",
+				"this api key is bound to realm "+ki.Realm+", but the requested model routes to "+realm)
+			return
+		}
+		if len(ki.Models) > 0 && !matchModelPatterns(ki.Models, bareModel) {
+			st.status = http.StatusBadRequest
+			writeOpenAIError(w, http.StatusBadRequest, "model_not_allowed",
+				"model "+bareModel+" is not allowed for this api key")
+			return
+		}
+	}
 
 	tried := map[string]bool{}
 	var lastErr error
@@ -1394,6 +1418,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
 				// （与 default 同语义），请求日志归为中断（人已走，未完成）。
 				h.cfg.Pool.NoteSuccess(acct.UID)
+				h.cfg.Pool.ClearModelEntitlement(realm, bareModel)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				if stickyKey != "" && h.cfg.Session != nil {
 					h.cfg.Session.Bind(stickyKey, acct.UID)
@@ -1401,6 +1426,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			default:
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
 				h.cfg.Pool.NoteSuccess(acct.UID)
+				h.cfg.Pool.ClearModelEntitlement(realm, bareModel)
 				// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 				// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
@@ -1495,6 +1521,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toks = completionTokens(resp)
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		h.cfg.Pool.ClearModelEntitlement(realm, bareModel)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 		if stickyKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(stickyKey, acct.UID)
@@ -1559,6 +1586,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 把不可重试的性质讲清楚。
 			code = "model_unavailable"
 			status = http.StatusBadRequest
+		case upstream.ErrModelEntitlement:
+			// 11158「model not allowed for user type」：模型级权限（免费号不可用），
+			// 不是账号问题——400 + 明确 code，客户端应换模型而非重试。
+			status = http.StatusBadRequest
+			code = "model_not_allowed"
+			msg = "this model is not available for the current account type (11158), try another model"
 		}
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
@@ -1762,6 +1795,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 24h）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
 		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
 		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason)
+	case upstream.ErrModelEntitlement:
+		// 11158「model not allowed for user type」（免费号不可用）：模型级权限，不是
+		// 账号故障——不冷却/不禁用，仅记录 (realm, model) 观测供 /status 展示；
+		// 仍轮换（付费号可能可用）。
+		realm := "cn"
+		if st, ok := h.cfg.Pool.Status(uid); ok && st.Realm != "" {
+			realm = st.Realm
+		}
+		h.cfg.Pool.NoteModelEntitlement(realm, model, "11158")
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 		// ErrClient（未知 4xx）喂连败计数（issue #114）：连续 N 次该形态失败 →

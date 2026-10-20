@@ -199,6 +199,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/balance_all", p.withAuth(p.balanceAll))
 	p.mux.HandleFunc("GET /panel/api/packages", p.withAuth(p.packages))
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
+	p.mux.HandleFunc("GET /panel/api/usage/remaining", p.withAuth(p.usageRemaining))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
@@ -953,4 +954,114 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"ok": false, "error": msg})
+}
+
+// usageRemaining 剩余用量估算（吸收自 hub）：上游 24h 窗口配额不可见，用「撞线
+// 账号（模型级 6004 冷却）的窗口用量」反推预算；无样本的组合标 estimated（只给
+// 已用，剩余为未知）。纯只读，不参与请求路径。
+func (p *Panel) usageRemaining(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Usage == nil || p.cfg.Pool == nil {
+		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
+		return
+	}
+	hours := 24
+	if v := r.URL.Query().Get("hours"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 24*60 {
+			hours = n
+		}
+	}
+	rows := p.cfg.Usage.AccountModelUsage(usage.Window{Hours: hours})
+
+	statuses := p.cfg.Pool.List()
+	limited := map[string]time.Time{} // uid|model → 冷却截止
+	nicks := map[string]string{}
+	for _, st := range statuses {
+		if st.Nickname != "" {
+			nicks[st.UID] = st.Nickname
+		}
+		for _, lm := range st.RateLimitedModels {
+			limited[st.UID+"|"+lm.Model] = lm.Until
+		}
+	}
+
+	// 预算样本 = 撞线账号在该模型上的窗口用量；按 realm|model 聚合。
+	samples := map[string][]int64{}
+	for _, row := range rows {
+		if _, ok := limited[row.UID+"|"+row.Model]; ok {
+			k := row.Realm + "|" + row.Model
+			samples[k] = append(samples[k], row.Tokens)
+		}
+	}
+	type budget struct {
+		Realm   string `json:"realm"`
+		Model   string `json:"model"`
+		Avg     int64  `json:"avg"`
+		Min     int64  `json:"min"`
+		Max     int64  `json:"max"`
+		Samples int    `json:"samples"`
+	}
+	budgets := make([]budget, 0, len(samples))
+	budgetBy := map[string]budget{}
+	for k, ss := range samples {
+		var sum, min, max int64
+		min, max = ss[0], ss[0]
+		for _, v := range ss {
+			sum += v
+			if v < min {
+				min = v
+			}
+			if v > max {
+				max = v
+			}
+		}
+		parts := strings.SplitN(k, "|", 2)
+		b := budget{Realm: parts[0], Model: parts[1], Avg: sum / int64(len(ss)), Min: min, Max: max, Samples: len(ss)}
+		budgets = append(budgets, b)
+		budgetBy[k] = b
+	}
+	sort.Slice(budgets, func(i, j int) bool {
+		if budgets[i].Realm != budgets[j].Realm {
+			return budgets[i].Realm < budgets[j].Realm
+		}
+		return budgets[i].Model < budgets[j].Model
+	})
+
+	type remainRow struct {
+		Realm     string     `json:"realm"`
+		UID       string     `json:"uid"`
+		Nickname  string     `json:"nickname,omitempty"`
+		Model     string     `json:"model"`
+		Used      int64      `json:"used"`
+		Budget    *int64     `json:"budget,omitempty"`
+		Remaining *int64     `json:"remaining,omitempty"`
+		Cooling   bool       `json:"cooling"`
+		ResetAt   *time.Time `json:"reset_at,omitempty"`
+		Estimated bool       `json:"estimated"`
+	}
+	out := make([]remainRow, 0, len(rows))
+	for _, r0 := range rows {
+		rr := remainRow{Realm: r0.Realm, UID: r0.UID, Nickname: nicks[r0.UID], Model: r0.Model, Used: r0.Tokens}
+		if until, ok := limited[r0.UID+"|"+r0.Model]; ok {
+			rr.Cooling = true
+			u := until
+			rr.ResetAt = &u
+		}
+		if b, ok := budgetBy[r0.Realm+"|"+r0.Model]; ok {
+			avg := b.Avg
+			rr.Budget = &avg
+			rem := avg - r0.Tokens
+			if rem < 0 || rr.Cooling {
+				rem = 0
+			}
+			rr.Remaining = &rem
+		} else {
+			rr.Estimated = true
+		}
+		out = append(out, rr)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"window_hours": hours,
+		"budgets":      budgets,
+		"rows":         out,
+	})
 }

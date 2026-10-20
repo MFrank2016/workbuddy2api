@@ -49,3 +49,20 @@ func matchModelAlias(aliases map[string]string, model string) string {
 	}
 	return best
 }
+
+// matchModelPatterns 判断 model 是否命中白名单（精确或后缀 "*" 通配）。
+func matchModelPatterns(patterns []string, model string) bool {
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if p == model {
+			return true
+		}
+		if strings.HasSuffix(p, "*") && strings.HasPrefix(model, strings.TrimSuffix(p, "*")) {
+			return true
+		}
+	}
+	return false
+}

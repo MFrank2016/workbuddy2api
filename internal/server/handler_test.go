@@ -2885,3 +2885,65 @@ func TestChatModelAliasRewritesBody(t *testing.T) {
 		t.Fatalf("upstream model=%q want glm-5.2（别名未生效）", got)
 	}
 }
+
+// TestChatKeyModelWhitelistAndRealm 密钥级模型白名单 + realm 绑定：不匹配本地 400，
+// 零上游请求。
+func TestChatKeyModelWhitelistAndRealm(t *testing.T) {
+	var calls atomic.Int32
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls.Add(1)
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	h := NewHandler(Config{
+		Pool: p, Upstream: up, APIKey: "main-key",
+		AuthKeys: []AuthKey{{Key: "child-key", Name: "child", Models: []string{"glm*"}, Realm: "cn"}},
+	})
+	do := func(model string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"`+model+`","messages":[]}`))
+		req.Header.Set("Authorization", "Bearer child-key")
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := do("glm-5.2"); rec.Code != 200 {
+		t.Fatalf("allowed code=%d body=%s", rec.Code, rec.Body)
+	}
+	before := calls.Load()
+	rec := do("deepseek-v4.1-flash")
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "model_not_allowed") {
+		t.Fatalf("disallowed code=%d body=%s", rec.Code, rec.Body)
+	}
+	if calls.Load() != before {
+		t.Fatalf("disallowed 不应触达上游: calls=%d->%d", before, calls.Load())
+	}
+	rec = do("global:glm-5.2")
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "key_realm_mismatch") {
+		t.Fatalf("realm code=%d body=%s", rec.Code, rec.Body)
+	}
+}
+
+// TestChatModelEntitlement11158 11158（免费号不可用）：不罚账号、最终 400
+// model_not_allowed，并在 /status 留下 model_entitlements 观测。
+func TestChatModelEntitlement11158(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 403, `{"error":{"data":{"code":11158,"msg":"model not allowed for user type"}}}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "model_not_allowed") {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling || st.Disabled {
+		t.Fatalf("11158 不应罚账号: %+v", st)
+	}
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest("GET", "/status", nil))
+	if !strings.Contains(rec2.Body.String(), "model_entitlements") {
+		t.Fatalf("/status 应包含 model_entitlements: %s", rec2.Body)
+	}
+}

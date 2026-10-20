@@ -772,6 +772,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Reason:                   reason,
 		Disabled:                 e.disabled,
 		AccountFaultHolds:        e.accountFaultHolds,
+		DisabledModels:           e.a.DisabledModels,
 		ManualDisabled:           e.manualDisabled,
 		Paused:                   e.paused,
 		CreditsTotal:             e.creditsTotal,

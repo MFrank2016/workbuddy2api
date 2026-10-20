@@ -2321,6 +2321,7 @@ async function loadUsage() {
     await warmUsageModelRates();
     const d = await api('usage?' + q.toString());
     renderUsage(d);
+    loadUsageRemaining();
   } catch (e) {
     // 失败时三块都要清干净：只改图表会留下上一次窗口的数字，看起来像"刷新成功"。
     usageData = null;
@@ -2337,6 +2338,38 @@ async function loadUsage() {
     $('usCreditTabs').innerHTML = usTabsHtml([['account', '按账号'], ['model', '按模型']], usCreditDim, null);
     $('usDimBody').innerHTML = '<tr><td colspan="10" class="empty">读取用量失败</td></tr>';
     $('usCreditBody').innerHTML = '<tr><td colspan="7" class="empty">读取用量失败</td></tr>';
+    $('usRemainNote').textContent = '—';
+    $('usRemainBudgets').textContent = '';
+    $('usRemainBody').innerHTML = '<tr><td colspan="7" class="empty">读取用量失败</td></tr>';
+  }
+}
+
+// loadUsageRemaining 剩余用量估算（撞线样本反推 24h 预算；无样本显示「按 24h 估算」）。
+async function loadUsageRemaining() {
+  try {
+    const d = await api('usage/remaining?hours=24');
+    const rows = d.rows || [];
+    const budgets = d.budgets || [];
+    $('usRemainNote').textContent = budgets.length + ' 个模型有撞线样本 · ' + rows.length + ' 行';
+    $('usRemainBudgets').textContent = budgets.length
+      ? '预算样本：' + budgets.map(b => b.realm + ':' + b.model + ' avg=' + Number(b.avg || 0).toLocaleString() + ' (n=' + b.samples + ', ' + Number(b.min || 0).toLocaleString() + '~' + Number(b.max || 0).toLocaleString() + ')').join('；')
+      : '暂无撞线样本（预算未知，剩余列显示 —）';
+    $('usRemainBody').innerHTML = rows.map(r => {
+      const used = Number(r.used || 0).toLocaleString();
+      const budget = r.budget == null ? '—' : Number(r.budget).toLocaleString();
+      const rem = r.remaining == null ? '—' : Number(r.remaining).toLocaleString();
+      const st = r.cooling
+        ? ('冷却至 ' + (r.reset_at ? new Date(r.reset_at).toLocaleTimeString() : '—'))
+        : (r.estimated ? '按 24h 估算' : '');
+      return '<tr><td>' + esc(String(r.uid || '').slice(0, 8)) + (r.nickname ? ' ' + esc(r.nickname) : '') + '</td>' +
+        '<td>' + esc(r.realm || '') + '</td><td>' + esc(r.model || '') + '</td>' +
+        '<td class="num">' + used + '</td><td class="num">' + budget + '</td><td class="num">' + rem + '</td>' +
+        '<td>' + esc(st) + '</td></tr>';
+    }).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+  } catch (e) {
+    $('usRemainNote').textContent = '—';
+    $('usRemainBudgets').textContent = '';
+    $('usRemainBody').innerHTML = '<tr><td colspan="7" class="empty">读取失败：' + esc(e.message) + '</td></tr>';
   }
 }
 

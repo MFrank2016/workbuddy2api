@@ -874,6 +874,21 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
       <div class="box">
         <header>
+          <h3>剩余用量估算</h3>
+          <span class="grow"></span>
+          <span class="note" id="usRemainNote">—</span>
+        </header>
+        <div class="pad" id="usRemainBudgets" style="font-size:12.5px"></div>
+        <div class="tbl-wrap">
+          <table class="acc zebra">
+            <thead><tr><th>账号</th><th>域</th><th>模型</th><th class="num">窗口已用</th><th class="num">预算</th><th class="num">剩余</th><th>状态</th></tr></thead>
+            <tbody id="usRemainBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
           <h3>积分扣除历史</h3>
           <span class="vtabs" id="usCreditTabs">
             <button data-dim="account" class="on">按账号</button>

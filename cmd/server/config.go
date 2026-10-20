@@ -26,6 +26,12 @@ type APIKeyEntry struct {
 	Key    string   `json:"key"`
 	Name   string   `json:"name"`
 	Groups []string `json:"groups"`
+	// Models 密钥级模型白名单（支持后缀 "*" 通配）；空 = 不限。不匹配本地 400，
+	// 零上游请求（吸收自 hub）。
+	Models []string `json:"models"`
+	// Realm 密钥级域绑定（"cn" / "global"）；空 = 不限。请求路由到的 realm
+	// 不匹配时本地 400。
+	Realm string `json:"realm"`
 }
 
 // Config 顶层配置。
@@ -198,6 +204,12 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP（X-Forwarded-For/X-Real-IP 首段）给上游。
 		// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）；true 才透传。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// CABundle 额外根证书 PEM 文件路径（企业代理/Clash TLS 解密场景）：在系统
+		// 根证书之外追加，不关闭证书校验。空 = 不加载。
+		CABundle string `json:"ca_bundle"`
+		// CNChatBase 国内版对话上游覆盖（如 https://www.workbuddy.cn）；空 = 内置
+		// 默认 https://copilot.tencent.com。仅改「往哪发」，计费侧不变。
+		CNChatBase string `json:"cn_chat_base"`
 		// ModelAliases 模型别名/重定向（吸收自 hub 的后台模型重定向）：键为源模型名
 		// （支持后缀 "*" 通配），值为目标模型名；命中后改写请求 model，选号/账本按
 		// 目标模型记账。默认空 = 不启用（避免静默改写用户请求）。
@@ -717,6 +729,13 @@ func (c *Config) normalize() error {
 	if c.Panel.SessionHours <= 0 {
 		c.Panel.SessionHours = 24
 	}
+	// 国内版对话上游覆盖：空 = 内置默认；非空必须是 http(s) URL。
+	if v := strings.TrimSpace(c.Upstream.CNChatBase); v != "" {
+		if !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+			return fmt.Errorf("upstream.cn_chat_base: 必须以 http:// 或 https:// 开头")
+		}
+		c.Upstream.CNChatBase = v
+	}
 	// 11140 处置策略：空值回落 24h；"0" = 立即永久禁用（旧行为）；负时长报错。
 	if strings.TrimSpace(c.Pool.AccountFaultHold) == "" {
 		c.Pool.AccountFaultHold = "24h"
@@ -1034,7 +1053,7 @@ func buildAuthKeys(cfg *Config) []server.AuthKey {
 		out = append(out, server.AuthKey{Key: k, Name: "主密钥"})
 	}
 	for _, e := range cfg.APIKeys {
-		out = append(out, server.AuthKey{Key: e.Key, Name: e.Name, Groups: e.Groups})
+		out = append(out, server.AuthKey{Key: e.Key, Name: e.Name, Groups: e.Groups, Models: e.Models, Realm: e.Realm})
 	}
 	return out
 }

@@ -809,3 +809,66 @@ func (r *Recorder) Describe() string {
 	}
 	return fmt.Sprintf("%d buckets, file %d bytes", n, sz)
 }
+
+// AccountModelUsage 单个 (realm, 账号, 模型) 在窗口内的累计（剩余用量估算用）。
+type AccountModelUsage struct {
+	Realm    string `json:"realm"`
+	UID      string `json:"uid"`
+	Model    string `json:"model"`
+	Tokens   int64  `json:"tokens"`
+	Requests int64  `json:"requests"`
+}
+
+// AccountModelUsage 返回窗口内每个 (realm, uid, model) 的 token/请求累计。
+func (r *Recorder) AccountModelUsage(w Window) []AccountModelUsage {
+	if r == nil {
+		return nil
+	}
+	from, to := w.bounds()
+	r.mu.Lock()
+	bs := make([]bucket, 0, len(r.buckets))
+	for _, b := range r.buckets {
+		bs = append(bs, *b)
+	}
+	r.mu.Unlock()
+
+	type key struct{ realm, uid, model string }
+	agg := map[key]*AccountModelUsage{}
+	for i := range bs {
+		b := &bs[i]
+		if !from.IsZero() || !to.IsZero() {
+			ts, ok := bucketTime(b.Scope)
+			if !ok {
+				continue
+			}
+			if !from.IsZero() && ts.Before(from) {
+				continue
+			}
+			if !to.IsZero() && ts.After(to) {
+				continue
+			}
+		}
+		k := key{b.Realm, b.UID, b.Model}
+		a := agg[k]
+		if a == nil {
+			a = &AccountModelUsage{Realm: b.Realm, UID: b.UID, Model: b.Model}
+			agg[k] = a
+		}
+		a.Tokens += b.TT
+		a.Requests += b.Req
+	}
+	out := make([]AccountModelUsage, 0, len(agg))
+	for _, a := range agg {
+		out = append(out, *a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Tokens != out[j].Tokens {
+			return out[i].Tokens > out[j].Tokens
+		}
+		if out[i].UID != out[j].UID {
+			return out[i].UID < out[j].UID
+		}
+		return out[i].Model < out[j].Model
+	})
+	return out
+}

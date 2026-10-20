@@ -74,6 +74,10 @@ type Auth struct {
 	// pool.min_interval_default（默认 0 = 不限）。软约束：全部被限住时回落
 	// LRU 兜底，不报「暂无可用账号」。生命周期同 Weight。
 	MinInterval float64 `json:"min_interval"`
+	// DisabledModels 账号级禁用模型（auth 文件顶层 disabled_models，支持后缀 "*" 通配）。
+	// 选号时该账号对命中模型不可用（上游 11158/11102 的本地前置规避）。
+	// 生命周期同 Groups/Weight：Parse 后只读。
+	DisabledModels []string
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -422,6 +426,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Weight         *float64 `json:"weight"`
 			MaxConcurrency int      `json:"max_concurrency"`
 			MinInterval    float64  `json:"min_interval"`
+			DisabledModels []string `json:"disabled_models"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -440,6 +445,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Weight:         n.Weight,
 			MaxConcurrency: n.MaxConcurrency,
 			MinInterval:    n.MinInterval,
+			DisabledModels: normalizeModels(n.DisabledModels),
 		}
 	} else {
 		var f struct {
@@ -456,6 +462,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Weight         *float64 `json:"weight"`
 			MaxConcurrency int      `json:"max_concurrency"`
 			MinInterval    float64  `json:"min_interval"`
+			DisabledModels []string `json:"disabled_models"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -474,6 +481,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Weight:         f.Weight,
 			MaxConcurrency: f.MaxConcurrency,
 			MinInterval:    f.MinInterval,
+			DisabledModels: normalizeModels(f.DisabledModels),
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -521,6 +529,11 @@ func (a *Auth) SaveAtomic() error {
 	// 忽略 → 表现为"某分组突然无号可用"，但文件里看不到任何报错。
 	if len(a.Groups) > 0 {
 		doc["groups"] = a.Groups
+	}
+	// DisabledModels 非空才写回（同 groups 策略）。★ 必须写回 ★ 否则 token 刷新会
+	// 静默清掉账号级禁用模型。
+	if len(a.DisabledModels) > 0 {
+		doc["disabled_models"] = a.DisabledModels
 	}
 	// 账号级流量整形（v0.1.3）：与 device_token/groups 同策略——只在显式配置时
 	// 写回，不给旧文件引入空键。★ 必须写回 ★ 本函数固定字段集整体重写，漏掉
@@ -606,4 +619,34 @@ func LoadDir(dir string) ([]*Auth, error) {
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// ModelDisabled 报告账号是否禁用指定模型（精确或后缀 "*" 通配）。
+func (a *Auth) ModelDisabled(model string) bool {
+	if a == nil || model == "" || len(a.DisabledModels) == 0 {
+		return false
+	}
+	for _, p := range a.DisabledModels {
+		if p == model {
+			return true
+		}
+		if strings.HasSuffix(p, "*") && strings.HasPrefix(model, strings.TrimSuffix(p, "*")) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeModels 去空白/空串（与 normalizeGroups 同风格）。
+func normalizeModels(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

@@ -5,12 +5,15 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -38,6 +41,7 @@ const (
 	ErrWafBlock                        // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
 	ErrPromptTooLong                   // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                    // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrModelEntitlement                // 11158「model not allowed for user type」（免费号不可用）→ 模型级权限，不罚号、仍轮换
 	ErrClient                          // 其他 4xx / 业务错误
 	ErrToolCallMismatch                // 11148 工具调用/结果历史错配 → 请求级错误：不罚号、不轮转
 )
@@ -68,6 +72,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrImageInvalid:
 		return "image_invalid"
+	case ErrModelEntitlement:
+		return "model_entitlement"
 	case ErrToolCallMismatch:
 		return "tool_call_mismatch"
 	case ErrClient:
@@ -576,6 +582,11 @@ func Classify(status int, body string) ErrKind {
 	// 只认 400/404（见 IsModelBlocked），429+11102 落下方 status==429 层走限流语义。
 	if IsModelBlocked(status, body) {
 		return ErrModelBlocked
+	}
+	// 11158「model not allowed for user type」（免费账号不可用）：模型级权限，不是
+	// 账号故障——不罚号、仍轮换（付费号可能可用）；由 handler 记录观测供 /status 展示。
+	if hasBusinessCode(body, "11158") {
+		return ErrModelEntitlement
 	}
 	if status == http.StatusPaymentRequired {
 		return ErrHardCredit
@@ -2127,4 +2138,27 @@ func parsePackageEndTime(raw string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// SetCABundle 在系统根证书之外追加 PEM 根证书（企业代理/Clash TLS 解密场景），
+// 不关闭证书校验；空路径 = 无操作。文件不可读或没有证书时返回错误（启动期 fail fast）。
+func (c *Client) SetCABundle(path string) error {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read ca bundle: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return fmt.Errorf("no certificates found in %s", path)
+	}
+	tr := newTransport()
+	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	c.HTTP.Transport = tr
+	if c.ChatHTTP != nil {
+		c.ChatHTTP.Transport = tr
+	}
+	return nil
 }

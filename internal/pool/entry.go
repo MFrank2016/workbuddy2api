@@ -93,6 +93,8 @@ type Status struct {
 	DisabledReason string            `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
 	// AccountFaultHolds 连续 11140 风控计数（>0 时运维可见；成功/复活清零）。
 	AccountFaultHolds int `json:"account_fault_holds,omitempty"`
+	// DisabledModels 账号级禁用模型（auth 文件 disabled_models；选号跳过）。
+	DisabledModels []string `json:"disabled_models,omitempty"`
 	// Enterprise 企业版账号（auth.EnterpriseID 非空，计算值不落盘）。
 	Enterprise bool `json:"enterprise,omitempty"`
 	// ManualDisabled 运维手动停用（issue #138/#118）——与 disabled **并列独立**，
@@ -413,6 +415,9 @@ func (e *entry) modelCooled(now time.Time, reqModel string) bool {
 // 因此不存在「账号级冷却因病 6004 而起、应豁免其他模型」的形态。
 func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
 	if !e.healthy(now) { // 全账号级（disabled/until/breakerUntil）先判
+		return false
+	}
+	if e.a.ModelDisabled(reqModel) { // 账号级禁用模型（auth disabled_models）
 		return false
 	}
 	if e.modelCooled(now, reqModel) { // 全账号健康时再查该模型的 6004 独立冷却
