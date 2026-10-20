@@ -46,3 +46,8 @@ func (s alertSource) Health(realm string) alert.Health {
 }
 
 func (s alertSource) WAFActive() bool { return s.h.WAFActive() }
+
+// ConsecutiveFails 委托 pool.FailingAccountCount（存在性语义：≥1 即告警）。
+func (s alertSource) ConsecutiveFails(threshold int) int {
+	return s.pool.FailingAccountCount(threshold)
+}

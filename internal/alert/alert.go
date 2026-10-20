@@ -56,6 +56,9 @@ type Source interface {
 	Health(realm string) Health
 	// WAFActive 报告 IP 级 WAF 拦截是否处于激活期。
 	WAFActive() bool
+	// ConsecutiveFails 返回「连续失败计数 ≥ threshold」的账号数（≥1 即告警）。
+	// threshold 由规则配置传入；实现方从账号池读熔断连续失败计数（fails）。
+	ConsecutiveFails(threshold int) int
 }
 
 // Config 告警配置。零值即"全部关闭"（Enabled=false）。
@@ -80,6 +83,10 @@ type Config struct {
 	RecoverHealthy int
 	// BreakerThreshold 熔断中账号数阈值；0 = 关闭该规则。
 	BreakerThreshold int
+	// MinConsecutiveFails 连续失败预警阈值；0 = 关闭该规则。
+	// 统计「熔断连续失败计数 ≥ 该值」的账号数，≥1 即告警（存在性语义，
+	// 对齐 mirror alerts.py 的 account_failing 桶）。
+	MinConsecutiveFails int
 
 	ForTicks   int // 连续满足 for_ticks 拍才触发，默认 2
 	ClearTicks int // 连续不满足 clear_ticks 拍才解除，默认 2
@@ -236,6 +243,21 @@ func newRules(cfg Config) []*rule {
 				v := float64(src.Health("cn").Breaker + src.Health("global").Breaker)
 				return v, v >= float64(th), v < float64(th), float64(th),
 					fmt.Sprintf("accounts in circuit-breaker (%d) reached threshold (%d)", int(v), th)
+			},
+		})
+	}
+
+	// account_failing 连续失败预警（v0.1.3 移植）：存在性语义（≥1 个账号
+	// 连续失败达阈值即报）。与 breaker_high 互补：本规则在熔断边界同步发出。
+	if cfg.MinConsecutiveFails > 0 {
+		th := cfg.MinConsecutiveFails
+		rs = append(rs, &rule{
+			id:       "account_failing",
+			severity: "warning",
+			sample: func(src Source) (float64, bool, bool, float64, string) {
+				v := float64(src.ConsecutiveFails(th))
+				return v, v > 0, v == 0, float64(th),
+					fmt.Sprintf("accounts with %d consecutive failures (threshold %d)", int(v), th)
 			},
 		})
 	}

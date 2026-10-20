@@ -260,7 +260,7 @@ func main() {
 		CatHours:            cfg.Schedule.CatHours,
 		ActivityReportCount: cfg.Schedule.ActivityReportCount,
 		// 触发时刻抖动窗口（schedule.jitter_minutes，0 = 精确整点 = 旧行为）。
-		JitterMinutes:      cfg.Schedule.JitterMinutes,
+		JitterMinutes: cfg.Schedule.JitterMinutes,
 		// 实例盐（schedule.jitter_salt，缺省空 = 与引入前逐字一致）。
 		JitterSalt: cfg.Schedule.JitterSalt,
 		// 账号间随机抖动 + 档位小时摊开（schedule.account_delay_* / random_delay_minutes）。
@@ -268,7 +268,7 @@ func main() {
 		AccountDelayMaxSeconds: cfg.Schedule.AccountDelayMaxSeconds,
 		RandomDelayMinutes:     cfg.Schedule.RandomDelayMinutes,
 		RandomDelaySeed:        scheduleSeed,
-		ExpiringSoonWindow: cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
+		ExpiringSoonWindow:     cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
 		// 任务执行台账与当日失败重试（schedule.ledger_file / retry_*）。
 		// 重试默认关闭（RetryDelayMinutes=0），台账恒在（纯内存，除非给了落盘路径）。
 		LedgerFile:        cfg.Schedule.LedgerFile,
@@ -407,29 +407,30 @@ func main() {
 	// 可用性阈值告警（config alerting.enabled，默认关闭）：独立 ticker 评估只读健康
 	// 快照，越界时 POST 到运维自备的 webhook。与请求路径完全隔离，且从不调用上游。
 	alertMon := alert.New(alert.Config{
-		Enabled:          cfg.Alerting.Enabled,
-		WebhookURL:       cfg.Alerting.WebhookURL,
-		Secret:           cfg.Alerting.Secret,
-		Interval:         time.Duration(cfg.Alerting.IntervalSeconds) * time.Second,
-		Timeout:          time.Duration(cfg.Alerting.TimeoutSeconds) * time.Second,
-		StartupGrace:     time.Duration(cfg.Alerting.StartupGraceSeconds) * time.Second,
-		MinHealthyCN:     cfg.Alerting.MinHealthyCN,
-		MinHealthyGlobal: cfg.Alerting.MinHealthyGlobal,
-		RecoverHealthy:   cfg.Alerting.RecoverHealthy,
-		BreakerThreshold: cfg.Alerting.BreakerThreshold,
-		ForTicks:         cfg.Alerting.ForTicks,
-		ClearTicks:       cfg.Alerting.ClearTicks,
-		SendResolve:      cfg.Alerting.SendResolve,
-		ServiceName:      server.ServiceName,
+		Enabled:             cfg.Alerting.Enabled,
+		WebhookURL:          cfg.Alerting.WebhookURL,
+		Secret:              cfg.Alerting.Secret,
+		Interval:            time.Duration(cfg.Alerting.IntervalSeconds) * time.Second,
+		Timeout:             time.Duration(cfg.Alerting.TimeoutSeconds) * time.Second,
+		StartupGrace:        time.Duration(cfg.Alerting.StartupGraceSeconds) * time.Second,
+		MinHealthyCN:        cfg.Alerting.MinHealthyCN,
+		MinHealthyGlobal:    cfg.Alerting.MinHealthyGlobal,
+		RecoverHealthy:      cfg.Alerting.RecoverHealthy,
+		BreakerThreshold:    cfg.Alerting.BreakerThreshold,
+		MinConsecutiveFails: cfg.Alerting.MinConsecutiveFails,
+		ForTicks:            cfg.Alerting.ForTicks,
+		ClearTicks:          cfg.Alerting.ClearTicks,
+		SendResolve:         cfg.Alerting.SendResolve,
+		ServiceName:         server.ServiceName,
 	}, alertSource{pool: p, h: h})
 	go alertMon.Run(ctx)
 	defer alertMon.Stop()
 	if !cfg.Alerting.Enabled {
 		log.Printf("可用性告警已禁用（alerting.enabled=false）")
 	} else {
-		log.Printf("可用性告警已启用：每 %ds 评估，健康阈值 cn=%d / global=%d（0=关闭该规则），熔断阈值=%d（0=关闭）",
+		log.Printf("可用性告警已启用：每 %ds 评估，健康阈值 cn=%d / global=%d（0=关闭该规则），熔断阈值=%d / 连败阈值=%d（0=关闭）",
 			cfg.Alerting.IntervalSeconds, cfg.Alerting.MinHealthyCN,
-			cfg.Alerting.MinHealthyGlobal, cfg.Alerting.BreakerThreshold)
+			cfg.Alerting.MinHealthyGlobal, cfg.Alerting.BreakerThreshold, cfg.Alerting.MinConsecutiveFails)
 	}
 
 	srv := &http.Server{

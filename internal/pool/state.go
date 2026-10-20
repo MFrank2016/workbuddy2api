@@ -517,6 +517,25 @@ func (p *Pool) RealmHealth(realm string) RealmHealth {
 	return h
 }
 
+// FailingAccountCount 返回「熔断连续失败计数（e.fails）≥ threshold」的账号数。
+// 供告警的 account_failing 规则使用（存在性语义：≥1 即告警）。只读遍历，
+// 需读锁。fails 是熔断器连续失败计数（401/403/429 喂入 +1），与 breaker_high
+// 的「已熔断账号数」互补——本规则在熔断边界同步发出。
+func (p *Pool) FailingAccountCount(threshold int) int {
+	if threshold <= 0 {
+		return 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	n := 0
+	for _, e := range p.byUID {
+		if e.fails >= threshold {
+			n++
+		}
+	}
+	return n
+}
+
 // ServableNow 报告池当前是否可服务：存在至少一个（对任意模型）healthy 且未占满在途名额的账号。
 // 与 CountsDetailed 的 healthy 口径不同：healthy 只看 disabled/until/breakerUntil（状态机权威判定），
 // 不看 inFlight；ServableNow 额外叠加在途维度，与 chat 的真实可达性（Pick 会跳过 inFlightFull 账号）对齐。

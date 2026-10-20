@@ -94,6 +94,7 @@ type fakeSource struct {
 	cn     Health
 	global Health
 	waf    bool
+	fails  int // 连续失败达标账号数（ConsecutiveFails 的返回值）
 }
 
 func (f *fakeSource) Health(realm string) Health {
@@ -109,6 +110,18 @@ func (f *fakeSource) WAFActive() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.waf
+}
+
+func (f *fakeSource) ConsecutiveFails(threshold int) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fails
+}
+
+func (f *fakeSource) setFails(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fails = n
 }
 
 func (f *fakeSource) setCN(h Health) {
@@ -490,5 +503,70 @@ func TestAlertBreakerAndWAFRules(t *testing.T) {
 	}
 	if !seen["breaker_high"] || !seen["waf_ip_block"] {
 		t.Errorf("应同时收到 breaker_high 与 waf_ip_block，got %v", seen)
+	}
+}
+
+// TestAccountFailingEdge：account_failing 规则边沿触发 + 恢复（复用既有
+// receiver / newTestMonitor / advance 骨架）。
+func TestAccountFailingEdge(t *testing.T) {
+	rec := newReceiver(t)
+	src := &fakeSource{}
+	m := newTestMonitor(t, Config{
+		WebhookURL:          rec.URL(),
+		MinConsecutiveFails: 3,
+		ForTicks:            2, ClearTicks: 2,
+	}, src)
+
+	base := time.Now()
+	// 0 达标：不触发
+	advance(m, base, 3)
+	if got := rec.count(); got != 0 {
+		t.Fatalf("达标 0 账号不应触发，got %d", got)
+	}
+
+	// 3 个账号达标：2 拍后触发恰一次
+	src.setFails(3)
+	base = advance(m, base, 1) // pending
+	if got := rec.count(); got != 0 {
+		t.Fatalf("第 1 拍不应投递，got %d", got)
+	}
+	base = advance(m, base, 1) // firing
+	if got := rec.count(); got != 1 {
+		t.Fatalf("第 2 拍应投递 1 次，got %d", got)
+	}
+	p := rec.payload(t, 0)
+	if p.Event != "alert" || p.Rule != "account_failing" || p.Severity != "warning" {
+		t.Errorf("payload = %+v, want alert/account_failing/warning", p)
+	}
+	if p.Value != 3 || p.Threshold != 3 {
+		t.Errorf("value/threshold = %v/%v, want 3/3", p.Value, p.Threshold)
+	}
+	// firing 期间持续越界不重复投递
+	base = advance(m, base, 2)
+	if got := rec.count(); got != 1 {
+		t.Fatalf("firing 期间不应重复投递，got %d", got)
+	}
+
+	// 恢复：达标 0 连续 2 拍 → resolve（SendResolve 开启时投递）
+	src.setFails(0)
+	m.cfg.SendResolve = true
+	base = advance(m, base, 2)
+	if got := rec.count(); got != 2 {
+		t.Fatalf("恢复后应投递 resolve，got %d 条（want 2：alert + resolve）", got)
+	}
+	pr := rec.payload(t, 1)
+	if pr.Event != "resolve" || pr.Rule != "account_failing" {
+		t.Errorf("resolve payload = %+v, want resolve/account_failing", pr)
+	}
+}
+
+// TestAccountFailingDisabled：阈值 0 = 不构建规则（不触发）。
+func TestAccountFailingDisabled(t *testing.T) {
+	rec := newReceiver(t)
+	src := &fakeSource{fails: 5}
+	m := newTestMonitor(t, Config{WebhookURL: rec.URL(), MinConsecutiveFails: 0}, src)
+	advance(m, time.Now(), 4)
+	if got := rec.count(); got != 0 {
+		t.Fatalf("阈值 0 关闭规则不应触发，got %d", got)
 	}
 }
