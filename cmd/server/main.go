@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -446,8 +447,8 @@ func main() {
 		Live:         live,
 		ConfigPath:   *cfgPath,
 		LoadConfig:   func() (any, error) { return Load(*cfgPath) },
-		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+		SaveConfig: func(raw []byte, write bool) ([]string, error) {
+			return saveConfig(raw, *cfgPath, live, p, up, sch, write)
 		},
 	})
 	// 成长任务队列（面板任务中心同管线）：独立排程（schedule.growth_hours，默认
@@ -608,19 +609,71 @@ func balanceIntervalFor(c *Config) time.Duration {
 }
 
 // restartRequiredFields 返回无法热生效、需重启进程的字段名（面板据此提示）。
-func restartRequiredFields() []string {
-	return []string{
-		"listen", "auth_dir", "state_file", "server.read_timeout", "server.max_body_mb",
-		"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
-		"upstream.user_agent",
-		"upstash", "session_sticky.ttl", "session_sticky.gc_interval",
-		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
-		"panel.password_hash", "panel.session_hours",
+// restartRequiredPaths 这些字段只在**启动时**读取，改了必须重启才生效。
+var restartRequiredPaths = []string{
+	"listen", "auth_dir", "state_file", "server.read_timeout", "server.max_body_mb",
+	"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
+	"upstream.user_agent",
+	"upstash", "session_sticky.ttl", "session_sticky.gc_interval",
+	"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
+	"panel.password_hash", "panel.session_hours",
+}
+
+// applyIncoming 深合并提交的配置，并返回「确实变了、且必须重启才生效」的字段。
+//
+// **必须在这里做深拷贝**：`mergeConfigMaps` 是**原地深合并**（直接改 cur），
+// 合并后再拿 cur 去比就永远相等 —— restart_required 会恒为空，看起来像
+// 「所有字段都热生效了」，而实际上改 listen 也没人提醒你重启。
+func applyIncoming(cur, incoming map[string]any) (map[string]any, []string) {
+	before := deepCopyMap(cur)
+	merged := mergeConfigMaps(cur, incoming)
+	return merged, restartRequiredFields(before, merged)
+}
+
+// deepCopyMap 经 JSON 往返深拷贝（配置是小对象，代价可忽略）。
+func deepCopyMap(m map[string]any) map[string]any {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return m
 	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return m
+	}
+	return out
+}
+
+// restartRequiredFields 返回「**本次确实变化了**、且必须重启才生效」的字段。
+//
+// 此前这里返回的是**固定清单**：只要保存一次就报全部 17 个字段，哪怕只改了
+// schedule（那是热生效的）。后果不是多一行字 —— 用户会被引导去做一次没必要的
+// 重启，久而久之就学会忽略这条提示，而它真正该被重视的时候（改了 listen）
+// 也就不会被重视了。
+func restartRequiredFields(oldCfg, newCfg map[string]any) []string {
+	out := make([]string, 0, len(restartRequiredPaths))
+	for _, path := range restartRequiredPaths {
+		if !reflect.DeepEqual(lookupPath(oldCfg, path), lookupPath(newCfg, path)) {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+// lookupPath 按 "a.b.c" 取值；中间缺失返回 nil（与「值为 null」同等对待）。
+func lookupPath(m map[string]any, path string) any {
+	var cur any = m
+	for _, key := range strings.Split(path, ".") {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = mm[key]
+	}
+	return cur
 }
 
 // saveConfig 面板保存配置：深合并 → 校验 → 原子落盘 → 热应用，返回需重启字段清单。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, write bool) ([]string, error) {
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read current config: %w", err)
@@ -632,21 +685,28 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
-	merged := mergeConfigMaps(cur, incoming)
+	merged, restartFields := applyIncoming(cur, incoming)
 	newCfg, err := ParseConfig(mergedJSON(merged))
 	if err != nil {
 		return nil, err
 	}
-	out, err := json.MarshalIndent(merged, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("marshal config: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return nil, fmt.Errorf("write config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return nil, fmt.Errorf("replace config: %w", err)
+	// write=false：只校验并热应用，不落盘。
+	//
+	// 外部管理端（workbuddy-manager）自己已经在宿主文件系统上原子写好了 config.json；
+	// 而上游这里是**单文件 bind mount**，`os.Rename` 覆盖它会返回 EBUSY
+	// （device or resource busy）—— 所以写盘权交给调用方，上游只负责校验 + 热应用。
+	if write {
+		out, err := json.MarshalIndent(merged, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("marshal config: %w", err)
+		}
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, out, 0o600); err != nil {
+			return nil, fmt.Errorf("write config: %w", err)
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return nil, fmt.Errorf("replace config: %w", err)
+		}
 	}
 	// 热应用（能立即生效的字段全部应用）。
 	live.Store(livecfg.Snapshot{
@@ -678,7 +738,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.SetBalanceInterval(balanceIntervalFor(newCfg))
-	return restartRequiredFields(), nil
+	return restartFields, nil
 }
 
 // mergeConfigMaps 把 incoming 深合并进 cur（只覆盖提交的键，保留手写未知键）。

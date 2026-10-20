@@ -31,6 +31,9 @@ func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
 
 // saveConfig 保存配置：body 直接是配置 JSON（前端按 schema 组装完整对象）。
 // SaveConfig 闭包内部完成校验+落盘+热应用；校验失败返回 400 且不写盘。
+//
+// 查询参数 `write=0`：只校验并热应用、**不落盘**（供外部管理端用，见
+// Panel.Config.SaveConfig 的说明）。
 func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.SaveConfig == nil {
 		writeErr(w, http.StatusNotImplemented, "config api not available")
@@ -41,7 +44,9 @@ func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
 	}
-	restartRequired, err := p.cfg.SaveConfig(raw)
+	// 缺省写盘（内嵌面板自己用）；write=0 时只应用不写。
+	write := r.URL.Query().Get("write") != "0"
+	restartRequired, err := p.cfg.SaveConfig(raw, write)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -49,7 +54,7 @@ func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 	if restartRequired == nil {
 		restartRequired = []string{}
 	}
-	log.Printf("panel: 配置已保存（热生效完成；需重启字段 %d 个）", len(restartRequired))
+	log.Printf("panel: 配置已应用（热生效完成；写盘=%v；需重启字段 %d 个）", write, len(restartRequired))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":               true,
 		"restart_required": restartRequired,

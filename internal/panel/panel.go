@@ -53,7 +53,11 @@ type Config struct {
 	LoadConfig func() (any, error)
 	// SaveConfig 校验并落盘配置，返回需要重启才能生效的字段列表；随后由 main 注入的
 	// ApplyConfig 闭包完成热生效（池参数/排程/密钥/脱敏）。error 时配置不写盘。
-	SaveConfig func(raw []byte) (restartRequired []string, err error)
+	//
+	// write=false 时**只校验并热应用、不写盘**：给外部管理端用 —— 它自己已经在
+	// 宿主文件系统上原子写好 config.json；而上游这里若是单文件 bind mount，
+	// rename 覆盖会返回 EBUSY（device or resource busy）。
+	SaveConfig func(raw []byte, write bool) (restartRequired []string, err error)
 
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
