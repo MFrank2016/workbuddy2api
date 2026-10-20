@@ -30,6 +30,14 @@ var chatSeq atomic.Int64
 // 测试包经 TestMain 置 false 关闭 stdout 噪音，需要断言行输出的测试用 withChatLog 临时开启（R5）。
 var chatLogEnabled = true
 
+// chatLogOut 聊天表格日志的输出目标。nil = 动态取 os.Stdout（测试 captureStdout
+// 依赖替换 os.Stdout 变量来捕获输出）；main 启动期经 SetChatLogOutput 注入
+// MultiWriter(os.Stdout, panel.Logs())，把每行镜像进 /panel/api/logs 的环形缓冲。
+var chatLogOut io.Writer
+
+// SetChatLogOutput 替换聊天表格日志输出目标（仅 main 启动期调用一次；传 nil 恢复动态 os.Stdout）。
+func SetChatLogOutput(w io.Writer) { chatLogOut = w }
+
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
 	start  time.Time
@@ -359,7 +367,11 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 	if ttfb > 0 {
 		ttfbMS = fmt.Sprintf("%dms", ttfb.Milliseconds())
 	}
-	fmt.Fprintf(os.Stdout, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |\n",
+	out := chatLogOut
+	if out == nil {
+		out = os.Stdout // 动态取值：测试 captureStdout 替换 os.Stdout 后仍可捕获
+	}
+	fmt.Fprintf(out, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,

@@ -47,9 +47,14 @@ type Config struct {
 	// 丢失，表现为"分组密钥能拿到全部账号"——隔离静默失效，且从网关日志上完全看不出来。
 	APIKeys []APIKeyEntry `json:"api_keys"`
 
-	Server struct{} `json:"server"` // 已退役段：max_body_mb 移除后无字段；旧配置该段下任意键因 JSON 未知字段而自然忽略
+	Server struct {
+		// ReadTimeout 入站请求读取（含 body 上传）总时长上限（issue #100，吸收自 panel）。
+		// http.Server 的 ReadTimeout 覆盖整个请求读取：大上下文/文件块请求经慢链路上传
+		// 需要更宽裕的窗口；"0" = 不限制（旧 max_body_mb 的硬编码 60s 约束的接替）。
+		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+	} `json:"server"`
 
-	// Logging 请求归档与调用来源（吸收自 panel；归档默认关闭，来源默认关闭）。
+	// Logging 请求归档与调用来源（吸收自 panel；归档/来源默认开启，对齐 panel）。
 	Logging struct {
 		RequestArchiveEnabled bool `json:"request_archive_enabled"`
 		RequestRetentionDays  int  `json:"request_retention_days"`
@@ -293,6 +298,9 @@ type Config struct {
 	SessionTTL          time.Duration `json:"-"`
 	SessionGCInterval   time.Duration `json:"-"`
 	ExpiringSoonDur     time.Duration `json:"-"`
+	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100，吸收自 panel）；
+	// 0 = 不限制。
+	ServerReadTimeoutDur time.Duration `json:"-"`
 	// CreditExhaustedDur 解析后的积分耗尽冷却时长（issue #78）；0 = 不启用
 	// （保持「硬冷却到次日 04:00」的旧行为）。
 	CreditExhaustedDur time.Duration `json:"-"`
@@ -382,9 +390,13 @@ func Default() *Config {
 	// 连续失败预警默认开启（阈值 3，镜像 mirror 的 account_fail_threshold=3）；
 	// 0 显式关闭。
 	c.Alerting.MinConsecutiveFails = 3
-	// 请求归档保留策略默认（归档本身默认关闭）。
+	// 请求归档与调用来源默认开启（对齐 panel）；保留策略默认 7 天 / 100MB。
+	c.Logging.RequestArchiveEnabled = true
+	c.Logging.RequestClientInfo = true
 	c.Logging.RequestRetentionDays = 7
 	c.Logging.RequestArchiveMaxMB = 100
+	// 入站读取上限默认 300s（吸收自 panel issue #100；"0" = 不限制）。
+	c.Server.ReadTimeout = "300s"
 	return c
 }
 
@@ -659,6 +671,17 @@ func (c *Config) normalize() error {
 	}
 	if c.ExpiringSoonDur < 0 {
 		c.ExpiringSoonDur = 0 // 负值视为禁用，避免 upstream 判定窗口反转
+	}
+	// 入站读取上限（吸收自 panel issue #100）：空值回落 300s；"0" = 不限制；
+	// 负时长无意义，报错（处理风格同 pool.expiring_soon）。
+	if c.Server.ReadTimeout == "" {
+		c.Server.ReadTimeout = "300s"
+	}
+	if c.ServerReadTimeoutDur, err = time.ParseDuration(c.Server.ReadTimeout); err != nil {
+		return fmt.Errorf("server.read_timeout: %w", err)
+	}
+	if c.ServerReadTimeoutDur < 0 {
+		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义（0 = 不限制）", c.Server.ReadTimeout)
 	}
 	// 积分耗尽后的冷却时长（issue #78）：空 = 保持「硬冷却到次日 04:00」的旧行为；
 	// 填了必须是正时长（负值会让冷却立即到期，等于没冷却 —— 与其静默放行，不如报错）。

@@ -7,6 +7,15 @@
     "soft_rate": "600s",
     "soft_rate_max": "2h"
   },
+  "server": {
+    "read_timeout": "300s"
+  },
+  "logging": {
+    "request_archive_enabled": true,
+    "request_retention_days": 7,
+    "request_archive_max_mb": 100,
+    "request_client_info": true
+  },
   "schedule": {
     "checkin_hours": [
       9,
@@ -34,11 +43,18 @@
     "keepalive_enabled": true,
     "school_enabled": true,
     "cat_enabled": true,
+    "growth_hours": [
+      1
+    ],
+    "growth_enabled": true,
     "jitter_minutes": 0,
     "jitter_salt": "",
     "ledger_file": "",
     "retry_delay_minutes": 0,
-    "retry_max_per_day": 1
+    "retry_max_per_day": 1,
+    "include_disabled_in_tasks": false,
+    "balance_refresh_enabled": true,
+    "balance_refresh_minutes": 5
   },
   "admin": {
     "enabled": false,
@@ -110,6 +126,7 @@
     "idle_weight_per_hour": 0.5,
     "idle_weight_max": 5.0,
     "expiring_soon": "168h",
+    "prefer_expiring": true,
     "cost_explore_interval": "30m",
     "weight_default": 1.0,
     "max_concurrency_default": 0,
