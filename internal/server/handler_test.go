@@ -1588,6 +1588,60 @@ func TestStatusPortraitFields(t *testing.T) {
 	}
 }
 
+// TestChatInvalidJSONRejectedLocally 非法 JSON 在网关侧直接 400 invalid_request：
+// 不进入选号/轮转、零上游请求、不罚账号。旧行为是把坏 body 逐个账号转发给上游
+// （实测 reqlog attempts=2）——白耗配额，且上游对重复非法请求回 403
+// account_fault(11140) 后网关会按封禁禁用，客户端一个坏请求就能误禁健康号（实测）。
+func TestChatInvalidJSONRejectedLocally(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"语法非法", `{"model":`},
+		{"非对象 JSON", `[1,2,3]`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var calls atomic.Int32
+			up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+				calls.Add(1)
+				return 200, `{}`, false
+			})
+			p := testPoolWith(
+				&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+				&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
+			)
+			h := NewHandler(Config{Pool: p, Upstream: up})
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(c.body)))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body)
+			}
+			if calls.Load() != 0 {
+				t.Errorf("upstream calls=%d want 0（非法 JSON 不应触达上游）", calls.Load())
+			}
+			var e struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+				t.Fatalf("resp not json: %v body=%s", err, rec.Body)
+			}
+			if e.Error.Code != "invalid_request" {
+				t.Fatalf("want invalid_request envelope: %s", rec.Body)
+			}
+			for _, uid := range []string{"u1", "u2"} {
+				st, ok := p.Status(uid)
+				if !ok {
+					t.Fatalf("%s missing", uid)
+				}
+				if st.Cooling || st.Disabled {
+					t.Errorf("%s 不应被罚: cooling=%v disabled=%v", uid, st.Cooling, st.Disabled)
+				}
+			}
+		})
+	}
+}
+
 // TestStatusRateLimitedModelsLedger end-to-end（issue #36）：上游 429 6004 带
 // 「将在 … 重置」→ 账号 modelCooldowns 被写入 → /status accounts 输出该模型的
 // 限额台账（rate_limited_models[].model + reset_at + until）。

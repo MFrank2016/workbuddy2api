@@ -846,7 +846,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Stream bool   `json:"stream"`
 		Model  string `json:"model"`
 	}
-	_ = json.Unmarshal(body, &peek)
+	// 请求体必须是合法 JSON 对象：否则不该进入选号/轮转。旧行为是把坏 body 逐个
+	// 账号转发给上游（实测 reqlog attempts=2），白耗配额；上游对重复非法请求会回
+	// 403 account_fault(11140)，网关再按封禁禁用 → 客户端一个坏请求就能误禁健康号
+	// （实测）。本地直接 400，零上游请求、不罚账号。
+	if err := json.Unmarshal(body, &peek); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "request body is not valid JSON: "+err.Error())
+		return
+	}
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
 	// （见 upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」
 	// 与「会话历史里出现过的工具名」两个来源——实测 tools 声明会在中转环节丢失，
