@@ -413,3 +413,45 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 	}
 	return out, infos, efforts, defaults, nil
 }
+
+// probeResult 单路模型目录探测结果（/v3/config 某 UA 路，或企业端点家族）。
+// infos 为对象形态条目（窄表探测为 nil），names 与之平行；err 非 nil 表示该路失败。
+type probeResult struct {
+	names []string
+	infos []ModelInfo
+	err   error
+}
+
+// mergeV3Routes 按优先级合并 /v3/config 多路 UA 探测结果：routes 必须按权威
+// 顺序传入（主路在前）。前序路的字段权威，后续路只补前序路缺失的模型 id。
+// 容错：全路失败才返回 err（取首路错误）；部分失败 warn 后用成功路继续。
+func mergeV3Routes(routes []struct {
+	label string
+	res   probeResult
+}) probeResult {
+	var out probeResult
+	var firstErr error
+	nOK := 0
+	for _, r := range routes {
+		if r.res.err != nil {
+			log.Printf("WARN: [upstream] global models: v3/config %s probe failed: %v", r.label, r.res.err)
+			if firstErr == nil {
+				firstErr = r.res.err
+			}
+			continue
+		}
+		nOK++
+		if out.err != nil || (len(out.names) == 0 && len(out.infos) == 0) {
+			// 首个成功路：整体作为基底（字段权威）。
+			out = r.res
+			continue
+		}
+		// 后续成功路：只补缺失的 id。
+		mergedNames, mergedInfos := mergeGlobalCatalog(out.names, out.infos, r.res.names, r.res.infos)
+		out.names, out.infos = mergedNames, mergedInfos
+	}
+	if nOK == 0 {
+		return probeResult{err: firstErr}
+	}
+	return out
+}

@@ -18,8 +18,8 @@ var sanitizeFeatures = []string{
 	"You are Claude Code",        // 身份句（截断前缀即可命中）
 	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
-	"github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
-	"11128",                      // 上游反探测：裸数字错误码
+	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+	"11128",                                           // 上游反探测：裸数字错误码
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -197,6 +197,16 @@ func sanitizeMessages(messages []any) bool {
 		if rc, ok := m["reasoning_content"].(string); ok {
 			if s := sanitizeText(rc); s != rc {
 				m["reasoning_content"] = s
+				changed = true
+			}
+		}
+		// reasoning：另一形态的思维链字段。thinking.go 的回填会把客户端送来的
+		// reasoning_content 镜像进 reasoning（反之亦然），而此前只洗 content /
+		// reasoning_content / tool_calls —— 镜像进 reasoning 的指纹原样出站，
+		// 裸 "11-128" 这种反探测串同样致命。
+		if r, ok := m["reasoning"].(string); ok {
+			if s := sanitizeText(r); s != r {
+				m["reasoning"] = s
 				changed = true
 			}
 		}

@@ -31,6 +31,9 @@ type Config struct {
 	KeepaliveHours []int // 默认 [22]
 	SchoolHours    []int // 默认 [12]：开学季任务（迁移自系统 crontab）
 	CatHours       []int // 默认 [1]：夜猫子任务（迁移自系统 crontab）
+	// IncludeDisabledInTasks 让保号类任务（签到/活跃/保活/余额刷新）对已禁用账号也执行
+	// （panel 语义：禁用只关选号，不停保号）。缺省 false 保持现状。
+	IncludeDisabledInTasks bool
 	// JitterMinutes 触发时刻抖动窗口（分钟）：每类任务的触发时刻在该窗口内取一个
 	// **确定性**偏移，把「所有部署都在整点同一秒打上游」摊开，对 WAF 友好。
 	// 0/缺省 = 不加偏移（精确整点，与引入前逐字一致）。
@@ -120,6 +123,8 @@ type Scheduler struct {
 	// 与 Handler.budget 的直通语义同口径：观测组件缺席不该让任务本身 panic
 	// （调度 goroutine 里 panic 会带走整个进程）。
 	ledger *taskledger.Store
+	// rearmSchedule 「排程已变，立即重算」通知（Reconfigure 时 poke）：Run 消费。
+	rearmSchedule chan struct{}
 }
 
 // Ledger 返回任务执行台账（只读视图），供 server 的 /status 与 /metrics 渲染。
@@ -154,6 +159,7 @@ func New(cfg Config) *Scheduler {
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
+		rearmSchedule: make(chan struct{}, 1),
 		rewardClaimed: make(map[string]string),
 		ledger:        taskledger.New(cfg.LedgerFile),
 	}
@@ -278,6 +284,7 @@ func (k taskKind) String() string {
 // fireAt 返回某类任务在 now 之后的最近触发时刻，按配置选择抖动模式：
 //   - RandomDelayMinutes > 0：scheduledSlot 在小时窗口内随机选时刻（sha256 派生）
 //   - 否则：nextFire 的 jitterOffset（整点后偏移，fnv 派生）
+//
 // 两种都是确定性派生，重启后同一 slot 时刻稳定。
 func (s *Scheduler) fireAt(now time.Time, hours []int, kind taskKind) time.Time {
 	if s.cfg.RandomDelayMinutes > 0 {
@@ -577,7 +584,9 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			}
 		}
 		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
-		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+		if a.IsEnterprise() {
+			oc.Status = CheckinOK // 企业版无个人签到体系；余额仍走企业口径查询
+		} else if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
 			if upstream.IsAlreadyCheckin(err) {
 				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
 				// 出现一整段 400 报文、被误读成签到失败。
@@ -592,7 +601,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		}
 		// 分桶查余额：快过期窗口内的积分单独标记，pool 优先消耗（issue:积分过期）。
 		// ExpiringSoonWindow<=0 时退化为纯总量（与引入前一致）。
-		remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow)
+		remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, s.cfg.ExpiringSoonWindow)
 		if err != nil {
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			oc.Status = CheckinFail
@@ -601,8 +610,8 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
-		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
-		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, buckets.Expiring)
+		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
+		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
 		oc.Credits = &remain
 		switch oc.Status {
 		case CheckinOK:
@@ -686,6 +695,10 @@ func (s *Scheduler) runActivity(ctx context.Context, trigger string) {
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.AccessTokenValue() == "" {
 			t.skipped++
+			continue
+		}
+		if a.IsEnterprise() {
+			t.skipped++ // 企业版无个人成长体系，不发起活跃上报
 			continue
 		}
 		// global 账号同样上报（PR #45 实测国际版 /v2/report 在 workbuddy.ai 上 code=0 OK，
@@ -962,4 +975,79 @@ func (s *Scheduler) runKeepalive(trigger string) {
 		}
 	}
 	s.recordRun(taskKeepalive, trigger, started, t)
+}
+
+// ExpiringSoonWindow 返回快过期积分窗口（配置只读透出；0 = 关闭分桶）。
+func (s *Scheduler) ExpiringSoonWindow() time.Duration { return s.cfg.ExpiringSoonWindow }
+
+// RunBalanceRefreshNow 立即对全池刷新余额与到期快照（面板手动按钮与周期任务共用）：
+// 只更新余额/到期数据，不触动冷却状态（解冻由 ReenableIfCredits 的余额恢复路径负责）。
+func (s *Scheduler) RunBalanceRefreshNow() {
+	expiringSoon := s.ExpiringSoonWindow()
+	includeDisabled := s.includeDisabledInTasks()
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled && !includeDisabled {
+			continue
+		}
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil {
+			continue
+		}
+		remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
+		if err != nil {
+			log.Printf("balance-refresh %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+			continue
+		}
+		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
+		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
+	}
+}
+
+// includeDisabledInTasks 保号任务是否覆盖已禁用账号（panel 语义）。
+func (s *Scheduler) includeDisabledInTasks() bool { return s.cfg.IncludeDisabledInTasks }
+
+// wallclockCheckStep 墙钟校验段长：等待槽位时单次 timer 的最大时长，每段醒来用
+// 墙钟重判（睡眠冻结单调时钟时，至多一段后即到点补跑）。
+const wallclockCheckStep = time.Minute
+
+// slotWake waitSlot 的返回态。
+type slotWake int
+
+const (
+	slotFired  slotWake = iota // 墙钟已到计划时点：补跑本批
+	slotRearm                  // 排程已变（Reconfigure）：上层重算下一次唤醒
+	slotCancel                 // ctx 取消：上层优雅退出
+)
+
+// waitSlot 等 next 到点；每段最多 step，段末回到循环顶用墙钟重判；
+// ctx 取消 / rearmSchedule（在线改配置重排）在每段的 select 里随时返回。
+func (s *Scheduler) waitSlot(ctx context.Context, next time.Time, step time.Duration) slotWake {
+	for {
+		wallRemain := time.Until(next)
+		if wallRemain <= 0 {
+			return slotFired
+		}
+		d := wallRemain
+		if d > step {
+			d = step
+		}
+		timer := time.NewTimer(d)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return slotCancel
+		case <-s.rearmSchedule:
+			timer.Stop()
+			return slotRearm
+		case <-timer.C:
+		}
+	}
+}
+
+// poke 非阻塞通知重排（容量 1，已有待处理通知时丢弃）。
+func poke(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }

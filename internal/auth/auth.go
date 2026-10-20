@@ -251,6 +251,31 @@ func (a *Auth) RealmStored() string {
 // IsGlobal 报告账号是否属于 global realm（= Realm() == "global"）。
 func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 
+// IsEnterprise 报告账号是否为企业版（enterpriseId 非空）。
+// 企业版无个人成长体系（签到/成长任务/连登/旅行/夜猫子 上游均拒），
+// 调度与面板据此跳过对应操作；选号、保活、额度展示不受影响。
+func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) != "" }
+
+// BackfillRealmFor 把账号的 realm 显式置为 cn/global（面板 OAuth 登录后补标识用）。
+// 返回是否发生变化；realm 非法返回错误。调用方负责随后 SaveAtomic 落盘。
+func BackfillRealmFor(a *Auth, realm string) (bool, error) {
+	if a == nil {
+		return false, fmt.Errorf("nil auth")
+	}
+	switch strings.TrimSpace(realm) {
+	case "cn", "global":
+	default:
+		return false, fmt.Errorf("realm must be cn/global, got %q", realm)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.realm == realm {
+		return false, nil
+	}
+	a.realm = realm
+	return true, nil
+}
+
 // GroupsValue 返回账号分组标签的**副本**（调用方可能缓存或跨 goroutine 传递，
 // 返回副本以免误改内部切片）。
 func (a *Auth) GroupsValue() []string {

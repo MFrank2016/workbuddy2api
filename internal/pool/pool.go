@@ -46,6 +46,11 @@ type Pool struct {
 	degradeThreshold   int
 	degradeCooldown    time.Duration
 	degradeCooldownMax time.Duration
+	// creditFloor 积分保底（SetCreditFloor 注入；0 = 关闭，缺省即现状）。
+	// 账号 credits < floor 时不再参与收费模型选号，防止收费请求把余额打穿。
+	creditFloor int64
+	// modelRateOf 按 (realm, 模型) 查上游目录倍率（SetModelRateOf 注入；nil = 不兜底）。
+	modelRateOf func(realm, model string) string
 	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
@@ -432,4 +437,42 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 	e := &entry{a: a}
 	e.refreshThrottleLocked(p.weightDefault, p.maxConcDefault, p.minIntervalDefault)
 	p.byUID[a.UID] = e
+}
+
+// Remove 移除账号：出池（立即落盘 state），返回被移除的凭证供调用方删除 auth 文件。
+func (p *Pool) Remove(uid string) *auth.Auth {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return nil
+	}
+	delete(p.byUID, uid)
+	p.dirty.Store(true)
+	p.saveLocked()
+	return e.a
+}
+
+// CreditFloor 透出生效的积分保底值（/status 用）。0 = 关闭。
+func (p *Pool) CreditFloor() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.creditFloor
+}
+
+// SetCreditFloor 注入积分保底线（main 从 config 解析后调用）。0 = 关闭；负值保留原值。
+func (p *Pool) SetCreditFloor(n int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n >= 0 {
+		p.creditFloor = n
+	}
+}
+
+// SetModelRateOf 注入上游目录倍率查表（main 用 upstream.Client.ModelRate 装配）。
+// 供积分保底判定「未实测过的模型是否收费」——无观测不能等于放行。
+func (p *Pool) SetModelRateOf(fn func(realm, model string) string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.modelRateOf = fn
 }

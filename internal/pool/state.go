@@ -165,15 +165,19 @@ func (p *Pool) ManualDisabledState(uid string) (disabled bool, reason string, ok
 	return e.manualDisabled, e.manualReason, true
 }
 
-// ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却域（余额恢复）。
-// 迁移经 transition.reviveCoolingLocked：只清冷却域（until/coolKind/softStreak/
-// modelCooldowns）并更新 credits，不动熔断器（fails/retryCount/breakerUntil）——
+// ReenableIfCredits 签到/余额刷新后解冻：仅当 remain > 0 且账号非禁用时，清冷却域
+// （余额恢复）。迁移经 transition.reviveCoolingLocked：只清冷却域（until/coolKind/
+// softStreak/modelCooldowns）并更新 credits，不动熔断器（fails/retryCount/breakerUntil）——
 // 签到成功只证明余额恢复与 billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx
 // 信号）不应被签到覆盖。remain==0 或禁用时只更新 credits（不动冷却/禁用）。
-func (p *Pool) ReenableIfCredits(uid string, remain int64) {
+// total 可选：给出时同步更新 creditsTotal（面板余额显示用）。
+func (p *Pool) ReenableIfCredits(uid string, remain int64, total ...int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		if len(total) > 0 {
+			e.creditsTotal = total[0]
+		}
 		if remain > 0 && !e.disabled {
 			p.reviveCoolingLocked(e, remain)
 		} else {
@@ -406,6 +410,9 @@ func (p *Pool) PickByUIDForModelGroups(uid, model string, groups []string) *auth
 	if !e.healthyForModel(now, model) {
 		return nil
 	}
+	if p.floorBlockedForRealmModel(e, model, e.a.Realm(), now) {
+		return nil // 积分保底：粘性命中同样不放行触底号的收费模型
+	}
 	if p.inFlightFull(e) {
 		return nil
 	}
@@ -440,7 +447,7 @@ func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, di
 // 会让 /status 与 /metrics 报出不一致的账号数，运维据此误判池健康）。
 func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, inFlightFull int) {
 	h := p.RealmHealth(realm)
-	return h.Total, h.Healthy, h.Cooling, h.Disabled, h.InFlightFull
+	return h.Total, h.Healthy, h.Cooling, h.Disabled + h.Paused, h.InFlightFull
 }
 
 // RealmHealth 单 realm 的健康度分解（供 /metrics 只读导出）。
@@ -468,8 +475,39 @@ type RealmHealth struct {
 	Breaker        int
 	Degraded       int
 	ManualDisabled int
+	Paused         int
 	ModelCooled    int
 	InFlight       int
+}
+
+// CountsDetailedWithPaused 同 CountsDetailed，但 paused 与 disabled 分开返回（面板概况用）。
+func (p *Pool) CountsDetailedWithPaused() (total, healthy, cooling, disabled, paused, inFlightFull int) {
+	h := p.RealmHealth("")
+	return h.Total, h.Healthy, h.Cooling, h.Disabled, h.Paused, h.InFlightFull
+}
+
+// Revive 面板语义的账号解冻：禁用/暂停/冷却/熔断/连败降权一并清除（全清）。
+func (p *Pool) Revive(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.disabled = false
+	e.paused = false
+	e.until = time.Time{}
+	e.coolKind = 0
+	e.reason = ""
+	e.softStreak = 0
+	e.breakerUntil = time.Time{}
+	e.fails = 0
+	e.retryCount = 0
+	e.degradeUntil = time.Time{}
+	e.consecutiveFails = 0
+	e.sessionDeadFails = 0
+	p.dirty.Store(true)
+	return true
 }
 
 // RealmHealth 返回指定 realm 的健康度分解；realm=="" 统计全池。
@@ -489,6 +527,9 @@ func (p *Pool) RealmHealth(realm string) RealmHealth {
 		// 具体是哪一种看 /status 账号级的 manual_disabled/disabled 两位。
 		case e.disabled || e.manualDisabled:
 			h.Disabled++
+		case e.paused:
+			// 暂停选号（panel 语义）：退出选号候选，但保号任务照常；与 disabled 分开计。
+			h.Paused++
 		case !e.healthy(now):
 			h.Cooling++
 		default:
@@ -641,21 +682,28 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Credits:    e.credits,
 		// Cooling 口径含连败降权（degradeUntil）：降权期账号不可选，运维在 /status
 		// 应看到它处于非健康态（CoolRemaining 取三截止最远者，与 healthy 或门同口径）。
-		Cooling:          now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
-		Reason:           reason,
-		Disabled:         e.disabled,
-		ManualDisabled:   e.manualDisabled,
-		SuccessCount:     e.successCount,
-		ErrTotal:         e.errTotal,
-		LastSuccessTime:  e.lastSuccess,
-		LastErrTime:      e.lastErr,
-		ConsecutiveFails: e.consecutiveFails,
-		DegradeUntil:     e.degradeUntil,
-		Until:            e.until,
-		SoftStreak:       e.softStreak,
-		InFlight:         int(e.inFlight.Load()),
-		BreakerFails:     e.fails,
-		BreakerUntil:     e.breakerUntil,
+		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
+		Reason:                   reason,
+		Disabled:                 e.disabled,
+		ManualDisabled:           e.manualDisabled,
+		Paused:                   e.paused,
+		CreditsTotal:             e.creditsTotal,
+		CreditsExpiring:          e.creditsExpiring,
+		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
+		CreditsEarliestRemaining: e.creditsEarliestRemaining,
+		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),
+		Enterprise:               e.a.IsEnterprise(),
+		SuccessCount:             e.successCount,
+		ErrTotal:                 e.errTotal,
+		LastSuccessTime:          e.lastSuccess,
+		LastErrTime:              e.lastErr,
+		ConsecutiveFails:         e.consecutiveFails,
+		DegradeUntil:             e.degradeUntil,
+		Until:                    e.until,
+		SoftStreak:               e.softStreak,
+		InFlight:                 int(e.inFlight.Load()),
+		BreakerFails:             e.fails,
+		BreakerUntil:             e.breakerUntil,
 		// 账号级流量整形生效值（v0.1.3）：只读字段，直接透出。
 		Weight:         e.weightMul,
 		MaxConcurrency: e.maxConcurrency,

@@ -9,10 +9,9 @@ package scheduler
 import (
 	"encoding/json"
 	"log"
-	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/logfmt"
 )
 
 // RunStreakBonusNow 对所有可用账号执行连登兑换 + 抽奖（幂等：locked/无次数自动跳过）。
@@ -97,23 +96,4 @@ func compactJSON(raw json.RawMessage) string {
 		return s[:220] + "…"
 	}
 	return s
-}
-
-// makeupYesterday 昨日漏签且有补签卡时自动补签（保住连登连续天数）。
-// 无卡 / 无漏签 / 查询失败均静默（不影响主流程）。
-func (s *Scheduler) makeupYesterday(a *auth.Auth) {
-	missed, err := s.cfg.Upstream.HeatmapYesterdayMissed(a)
-	if err != nil || !missed {
-		return
-	}
-	full, err := s.cfg.Upstream.GrowthStreakFull(a)
-	if err != nil || full.MakeupCards.Balance <= 0 {
-		return
-	}
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	if err := s.cfg.Upstream.UseMakeupCard(a, yesterday); err != nil {
-		log.Printf("streak-bonus %s: 补签 %s 失败: %v", logfmt.Label(a.UID, a.Nickname), yesterday, err)
-		return
-	}
-	log.Printf("streak-bonus %s: ★ 已用补签卡补签 %s（保连登）", logfmt.Label(a.UID, a.Nickname), yesterday)
 }

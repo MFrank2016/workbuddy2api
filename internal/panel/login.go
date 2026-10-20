@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"workbuddy2api/internal/auth"
 )
 
 const (
@@ -271,9 +271,9 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 			checkinMsg = err.Error()
 		}
 	}
-	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+	if rm, tt, err := p.cfg.Upstream.UserResourceTotal(a); err == nil {
 		remain, total = rm, tt
-		p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
+		p.cfg.Pool.ReenableIfCredits(acct.UID, rm)
 	}
 
 	p.loginMu.Lock()

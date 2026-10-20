@@ -3,11 +3,16 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -93,7 +98,9 @@ type chatStatsReader struct {
 	cacheHit  int     // 末帧 usage.prompt_cache_hit_tokens（供 /v1/stats）
 	cacheMiss int     // 末帧 usage.prompt_cache_miss_tokens
 	cacheWr   int     // 末帧 usage.prompt_cache_write_tokens
-	pend      []byte  // 已读未返回的行缓存
+	// hasCache 末帧是否出现任一缓存字段（决定 CacheTokens 的 ok；缺失 ≠ 全 0）。
+	hasCache bool
+	pend     []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -118,9 +125,23 @@ func (s *chatStatsReader) TotalTokens() int { return s.prompt + s.tokens }
 // PromptTokens 返回末帧 usage.prompt_tokens（供 /v1/stats 输入侧统计）。
 func (s *chatStatsReader) PromptTokens() int { return s.prompt }
 
-// CacheTokens 返回缓存三段计数（命中 / 未命中 / 写入），供 /v1/stats 的命中率聚合。
-func (s *chatStatsReader) CacheTokens() (hit, miss, write int) {
-	return s.cacheHit, s.cacheMiss, s.cacheWr
+// CacheTokens 返回缓存命中/未命中两段（面板口径）。ok=false 表示上游未回任何缓存
+// 字段（不参与命中率统计）；只回 hit 时 miss 按 prompt-hit 推导。
+func (s *chatStatsReader) CacheTokens() (hit, miss int, ok bool) {
+	hit, miss, _, ok = s.CacheTotals()
+	return hit, miss, ok
+}
+
+// CacheTotals 返回缓存三段计数（命中 / 未命中 / 写入），供 /v1/stats 的命中率聚合。
+func (s *chatStatsReader) CacheTotals() (hit, miss, write int, ok bool) {
+	if !s.hasCache {
+		return 0, 0, 0, false
+	}
+	miss = s.cacheMiss
+	if miss <= 0 && s.cacheHit > 0 && s.prompt > s.cacheHit {
+		miss = s.prompt - s.cacheHit
+	}
+	return s.cacheHit, miss, s.cacheWr, true
 }
 
 // parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
@@ -157,6 +178,9 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	s.cacheHit = chunk.Usage.PromptCacheHitTokens
 	s.cacheMiss = chunk.Usage.PromptCacheMissTokens
 	s.cacheWr = chunk.Usage.PromptCacheWriteTokens
+	if chunk.Usage.PromptCacheHitTokens != 0 || chunk.Usage.PromptCacheMissTokens != 0 || chunk.Usage.PromptCacheWriteTokens != 0 {
+		s.hasCache = true
+	}
 	if chunk.Usage.Credit != nil {
 		s.hasCredit = true
 		s.credit = *chunk.Usage.Credit
@@ -284,4 +308,82 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 		logfmt.Pad(tokpsField, chatRateWidth),
 		total.Seconds(),
 	)
+}
+
+// cacheMissSignal 低命中率告警信号（issue #92 P1 轻量化）：同一模型此前观测到过
+// 命中、本次大前缀（>=1000 tok）却整段未命中 → 触发一次 WARN（冷却内不重复）。
+type cacheMissSignal struct {
+	mu      sync.Mutex
+	everHit map[string]bool
+	last    map[string]time.Time
+}
+
+var cacheMissWarn = &cacheMissSignal{everHit: map[string]bool{}, last: map[string]time.Time{}}
+
+// cacheMissWarnEvery 冷却间隔；变量供测试缩短。
+var cacheMissWarnEvery = 10 * time.Minute
+
+// noteCacheTokens 记录一次观测：有命中 → 标记该模型可命中；整段未命中且此前
+// 命中过 → 触发 WARN（冷却内不重复）。
+func (c *cacheMissSignal) noteCacheTokens(model string, prompt, hit, miss int64) {
+	if model == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if hit > 0 {
+		c.everHit[model] = true
+		return
+	}
+	if prompt < 1000 {
+		return
+	}
+	if miss <= 0 {
+		miss = prompt
+	}
+	if !c.everHit[model] {
+		return
+	}
+	now := time.Now()
+	if t, ok := c.last[model]; ok && now.Sub(t) < cacheMissWarnEvery {
+		return
+	}
+	c.last[model] = now
+	log.Printf("WARN: [server] cache miss: model=%s 本次大前缀未命中（prompt=%d miss=%d，此前观测到过命中）；上游前缀缓存重算，费用会显著升高", model, prompt, miss)
+}
+
+// minGenWindow 可信生成窗口的下限：扣除 TTFB 后剩余窗口不足该值即视为「生成
+// 时长不可测」，退回端到端耗时（issue #127：假流式/攒批下发形态）。
+const minGenWindow = 200 * time.Millisecond
+
+// tokensPerSecond 计算生成吞吐（tok/s）。total<=0 或 token 为负哨兵 → ok=false；
+// ttfb>0 且 total-ttfb >= minGenWindow 时用净生成窗口，否则退回端到端。
+func tokensPerSecond(completionTokens int64, total, ttfb time.Duration) (float64, bool) {
+	if completionTokens < 0 || total <= 0 {
+		return 0, false
+	}
+	gen := total
+	if ttfb > 0 {
+		if g := total - ttfb; g >= minGenWindow {
+			gen = g
+		}
+	}
+	return float64(completionTokens) / gen.Seconds(), true
+}
+
+// isUpstreamTimeout 判定错误是否属于「上游超时」：net.Error 超时、显式 deadline、
+// 或客户端仍在而 ctx 被取消（空闲看门狗掐流）。客户端真断连（clientGone）不算，
+// 避免把用户取消误判为上游问题而给健康号喂连败计数。
+func isUpstreamTimeout(err error, clientGone bool) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	return !clientGone && errors.Is(err, context.Canceled)
 }

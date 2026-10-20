@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
+	"strconv"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -76,6 +77,9 @@ func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups 
 		if !healthyOf(e) {
 			continue
 		}
+		if p.floorBlockedForRealmModel(e, reqModel, realm, now) {
+			continue // 积分保底：触底号不接实测收费模型（免费/未知不受限）
+		}
 		if p.effectiveWeight(e) == 0 {
 			continue // weight=0：只读备用，不参与自动轮转（v0.1.3 throttle）
 		}
@@ -87,7 +91,7 @@ func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups 
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLockedScoped(tried, now, realm, groups)
+		return p.pickEarliestExpiryLockedScoped(tried, now, realm, groups, reqModel)
 	}
 	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿
 	// 根本进不了短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -260,7 +264,7 @@ func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups 
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
 // 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
 func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm string) *auth.Auth {
-	return p.pickEarliestExpiryLockedScoped(tried, now, realm, nil)
+	return p.pickEarliestExpiryLockedScoped(tried, now, realm, nil, "")
 }
 
 // pickEarliestExpiryLockedScoped 是全冷却兜底的完整实现，额外支持业务分组过滤。
@@ -269,7 +273,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 // 兜底不滤的话，当**本组账号全部进入冷却**时（正是业务高峰或上游风控期），网关会从
 // 其他组"借号"顶上——隔离恰好在本该最可靠的时候失效，且日志上只是一次正常的
 // fallback_earliest_expiry，看不出串组。故此处与 pickScoped 同口径过滤。
-func (p *Pool) pickEarliestExpiryLockedScoped(tried map[string]bool, now time.Time, realm string, groups []string) *auth.Auth {
+func (p *Pool) pickEarliestExpiryLockedScoped(tried map[string]bool, now time.Time, realm string, groups []string, model string) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -286,6 +290,9 @@ func (p *Pool) pickEarliestExpiryLockedScoped(tried map[string]bool, now time.Ti
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
+		}
+		if p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue // 积分保底：兑底是最后一道选号路径，在它之前挡不住等于没挡
 		}
 		if p.inFlightFull(e) {
 			continue
@@ -432,4 +439,33 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	// 真实成功率不敏感、成熟池退化为与默认值重合的常数 1.5、失败侧与熔断器
 	// 100% 同源——机制名存实亡且冗余，删除后 weightOf 为三因子。）
 	return w
+}
+
+// floorBlockedForModel 积分保底拦截判定（pick 普通轮换与粘性命中共用；realm 空 = 按空域键查）。
+func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool {
+	return p.floorBlockedForRealmModel(e, model, "", now)
+}
+
+// floorBlockedForRealmModel：账号触底（credits < creditFloor）且模型判定为收费时拦截：
+// 1) 本地实测台账（最权威）；2) 上游目录倍率兜底（modelRateOf 注入）。
+// floor<=0 / 模型为空 / 未触底 → 不拦；免费与未知倍率放行。
+func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time.Time) bool {
+	if p.creditFloor <= 0 || model == "" || e.credits >= p.creditFloor {
+		return false
+	}
+	if mc, ok := e.modelCostOf(model, now); ok {
+		return mc.CostPer1k > 0
+	}
+	if p.modelRateOf == nil {
+		return false
+	}
+	rate := p.modelRateOf(realm, model)
+	if rate == "" {
+		return false
+	}
+	v, err := strconv.ParseFloat(rate, 64)
+	if err != nil {
+		return false
+	}
+	return v > 0
 }

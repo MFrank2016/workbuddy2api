@@ -12,15 +12,14 @@ import (
 	"encoding/json"
 
 	"fmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"net/http"
+	"workbuddy2api/internal/auth"
 )
 
 // streakRedeemPath / lottery 路径（growth 域，growthJSON 走 www.workbuddy.cn）。
 const (
 	streakRedeemPath   = "/activity/growth/redeem"
 	lotterySummaryPath = "/activity/growth/lottery/summary"
-	lotteryDrawPath    = "/activity/growth/lottery/draw"
 )
 
 // clientToken 幂等令牌（前端 randomUUID 同款语义）。

@@ -210,7 +210,7 @@ func main() {
 	}
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
-	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	up.SanitizeFingerprints.Store(cfg.Features.SanitizeBlacklistFingerprints)
 	// 出站 UA（A 段）：非空才做显式覆盖，空 = 默认 WorkBuddy 三段式
 	// `WorkBuddy/<client_version> WorkBuddy/<client_version> CLI/<cli_version>`。
 	up.UserAgent = cfg.Upstream.UserAgent
@@ -234,6 +234,10 @@ func main() {
 		Attempts: cfg.Upstream.RetryAttempts,
 		Backoff:  time.Duration(cfg.Upstream.RetryBackoff * float64(time.Second)),
 	}
+
+	// 积分保底（panel）：触底号不接实测收费模型；目录倍率兑底堵「无观测=放行」。
+	p.SetCreditFloor(cfg.Pool.CreditFloor)
+	p.SetModelRateOf(up.ModelRate)
 
 	// 签到历史落盘（GET /v1/checkin/history 的数据源）。此前签到结果只活在
 	// POST /v1/checkin 的 HTTP 响应里——刷新页面即失忆，自动 9/21 那趟更是完全

@@ -90,3 +90,39 @@ func (p *Pool) setManualDisabledLocked(e *entry, disabled bool, reason string) {
 	}
 	p.dirty.Store(true)
 }
+
+// Pause 暂停选号（面板语义）：退出选号候选，但不动任何惩罚域；保号任务照常。
+func (p *Pool) Pause(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	p.pauseLocked(e)
+	return true
+}
+
+// Resume 解除暂停选号（幂等）。uid 不存在返回 false。
+func (p *Pool) Resume(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	p.resumeLocked(e)
+	return true
+}
+
+// pauseLocked 只置 paused 标志（不触碰冷却/熔断域）。调用方必须已持有 p.mu。
+func (p *Pool) pauseLocked(e *entry) {
+	e.paused = true
+	p.dirty.Store(true)
+}
+
+// resumeLocked 只清 paused 标志（幂等）。调用方必须已持有 p.mu。
+func (p *Pool) resumeLocked(e *entry) {
+	e.paused = false
+	p.dirty.Store(true)
+}

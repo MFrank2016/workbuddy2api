@@ -261,6 +261,9 @@ type Config struct {
 		// 顶满时本次选号返回 nil → handler 回 503（比 mirror 的忙等让渡更稳，
 		// 不进热路径忙等）。钳 [0,512]。
 		MaxTotalConcurrency int `json:"max_total_concurrency"`
+		// CreditFloor 积分保底：账号余额低于该值时，对实测收费模型不再参与选号
+		// （防止收费请求把余额打穿、连免费模型都冷却到次日签到）。0 = 关闭（默认）。
+		CreditFloor int64 `json:"credit_floor"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -363,6 +366,7 @@ func Default() *Config {
 	c.Pool.MaxConcurrencyDefault = 0
 	c.Pool.MinIntervalDefault = 0
 	c.Pool.MaxTotalConcurrency = 0
+	c.Pool.CreditFloor = 0
 	// 连续失败预警默认开启（阈值 3，镜像 mirror 的 account_fail_threshold=3）；
 	// 0 显式关闭。
 	c.Alerting.MinConsecutiveFails = 3
@@ -701,6 +705,9 @@ func (c *Config) normalize() error {
 	}
 	if c.Pool.WeightDefault > 1000 {
 		c.Pool.WeightDefault = 1000
+	}
+	if c.Pool.CreditFloor < 0 {
+		c.Pool.CreditFloor = 0
 	}
 	if c.Pool.MaxConcurrencyDefault < 0 {
 		c.Pool.MaxConcurrencyDefault = 0

@@ -4,6 +4,7 @@
 package pool
 
 import (
+	"log"
 	"strings"
 	"time"
 )
@@ -15,31 +16,46 @@ import (
 // bench 与 server 的 handler_test 等）；生产写余额全走 SetCreditsDetailed
 // （scheduler.go 签到时调用），本入口无生产调用方。保留是因为它是「总量更新」
 // 与「总量+分桶更新」的语义对照锚点（删掉则 expiring 的向后兼容行为失去断言）。
-func (p *Pool) SetCredits(uid string, credits int64) {
+func (p *Pool) SetCredits(uid string, credits int64, total ...int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = credits
+		if len(total) > 0 {
+			e.creditsTotal = total[0]
+		}
 		p.dirty.Store(true)
 	}
 }
 
-// SetCreditsDetailed 更新账号余额总量 + 快过架子集（签到时调用，供优先消耗快过期积分）。
-// expiring 会被钳到 [0, credits]：上游分桶异常时不污染权重。
-func (p *Pool) SetCreditsDetailed(uid string, credits, expiring int64) {
+// SetCreditsDetailed 更新账号余额/总额、快过架子集与最早到期批次（签到/余额刷新调用）。
+// expiring/earliestRemaining 钳到 [0, credits]；earliestAt 非未来则清空。
+func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, earliestAt time.Time, earliestRemaining int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
-		if expiring < 0 {
-			expiring = 0
-		}
-		if expiring > credits {
-			expiring = credits
-		}
-		e.credits = credits
-		e.creditsExpiring = expiring
-		p.dirty.Store(true)
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
 	}
+	if expiring < 0 {
+		expiring = 0
+	}
+	if expiring > credits {
+		expiring = credits
+	}
+	if earliestRemaining < 0 || earliestRemaining > credits {
+		earliestRemaining = 0
+	}
+	if earliestRemaining == 0 || earliestAt.IsZero() || !time.Now().Before(earliestAt) {
+		earliestAt = time.Time{}
+		earliestRemaining = 0
+	}
+	e.credits = credits
+	e.creditsTotal = total
+	e.creditsExpiring = expiring
+	e.creditsEarliestExpiry = earliestAt
+	e.creditsEarliestRemaining = earliestRemaining
+	p.dirty.Store(true)
 }
 
 // Cooldown 冷却账号至 now+d（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）。
@@ -316,3 +332,90 @@ func nextDay4AM(now time.Time) time.Time {
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却（余额恢复）。
 // 注意：不碰熔断器——熔断到期（breakerUntil 过期）或下次 chat 成功（NoteSuccess）才恢复。
 // reviveCoolingLocked 已迁至 transition.go（状态机迁移唯一权威实现）。
+
+// NoteCheckinDone 标记该账号「今日已签到」（本地日期，跨零点自然过期）。
+func (p *Pool) NoteCheckinDone(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		day := time.Now().Format("2006-01-02")
+		if e.lastCheckinDay != day {
+			e.lastCheckinDay = day
+			p.dirty.Store(true)
+		}
+	}
+}
+
+// SetNickname 更新账号昵称（内存态 Auth 与面板展示；不落盘凭证）。值有变化返回 true。
+func (p *Pool) SetNickname(uid, nickname string) bool {
+	if uid == "" || nickname == "" {
+		return false
+	}
+	p.mu.RLock()
+	e, ok := p.byUID[uid]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	a := e.a
+	a.Lock()
+	changed := a.Nickname != nickname
+	if changed {
+		a.Nickname = nickname
+	}
+	a.Unlock()
+	if !changed {
+		return false
+	}
+	if err := a.SaveAtomic(); err != nil {
+		log.Printf("WARN: [pool] nickname save %s: %v", uid, err)
+		return false
+	}
+	return true
+}
+
+// ModelBlockStatus 模型级全池阻塞状态（/status model_locks 与 no_healthy_account 归因用）。
+type ModelBlockStatus struct {
+	Blocked bool      // true = 每个非禁用/非暂停账号都对该模型处于冷却中
+	Reason  string    // 冷却原因（通常为上游原文）
+	Until   time.Time // 最早解封时间（零值 = 上游未给重置时刻）
+	Count   int       // 因此被挡的账号数
+}
+
+// ModelBlocked 报告该模型是否在全池范围内被模型级冷却挡住（区分「号都在但对这个
+// 模型关闭」与「池子真没号」）。口径与选号一致：用 modelCooled（AuditOnly 不误报）；
+// 禁用/暂停号跳过；只要还有任一账号能服务该模型，返回 Blocked=false。
+func (p *Pool) ModelBlocked(model string) ModelBlockStatus {
+	if model == "" {
+		return ModelBlockStatus{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+
+	var st ModelBlockStatus
+	for _, e := range p.byUID {
+		if e.disabled || e.paused {
+			continue // 禁用/暂停号不参与：它们的不可用与模型无关
+		}
+		if !e.modelCooled(now, model) {
+			// 还有账号能服务这个模型 → 不是模型级阻塞。
+			return ModelBlockStatus{}
+		}
+		st.Count++
+		if mc, ok := e.modelCooldowns[model]; ok {
+			if st.Reason == "" {
+				st.Reason = mc.Reason
+			}
+			if !mc.Until.IsZero() && (st.Until.IsZero() || mc.Until.Before(st.Until)) {
+				st.Until = mc.Until
+			}
+		}
+	}
+	if st.Count == 0 {
+		// 池里压根没有非禁用账号：这是「真的没号」，不是模型问题。
+		return ModelBlockStatus{}
+	}
+	st.Blocked = true
+	return st
+}

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"workbuddy2api/internal/auth"
 )
 
 // sessionDeadFailsOf 曝露 entry.sessionDeadFails 供测试断言（包内私有 helper）。

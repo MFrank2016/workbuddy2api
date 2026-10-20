@@ -10,6 +10,7 @@ package upstream
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -91,8 +92,20 @@ type chatRequestEvent struct {
 // 后台按 growth 事件去重，不走 chat 后台的 X-Conversation-Request-ID 聚合——对齐
 // 官方 chat_request_send 事件形状（probe_active.py），刻意不复用聚合主键。
 func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID string) error {
+	return c.ReportChatActivityModel(a, conversationID, requestID, "deepseek-v4-flash", "DeepSeek V4 Flash")
+}
+
+// ReportChatActivityModel 同上，但可指定上报携带的模型：供「体验某模型」类任务
+// 对齐实际模型（如 Model_chat_GLM5.2 需 requestModelId=glm-5.2 与独立 requestID）。
+func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID, modelID, modelName string) error {
 	if requestID == "" {
 		requestID = conversationID
+	}
+	if modelID == "" {
+		modelID = "deepseek-v4-flash"
+	}
+	if modelName == "" {
+		modelName = modelID
 	}
 	now := time.Now().UnixMilli()
 	ev := chatRequestEvent{
@@ -103,8 +116,8 @@ func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID stri
 		ConversationID:        conversationID,
 		RequestID:             requestID,
 		InputLength:           12,
-		RequestModelID:        "deepseek-v4-flash",
-		RequestModelName:      "DeepSeek V4 Flash",
+		RequestModelID:        modelID,
+		RequestModelName:      modelName,
 		IsPlan:                false,
 		IsAutoExecuteTerminal: false,
 		IsAutoModify:          false,
@@ -127,7 +140,7 @@ func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID stri
 		FileURI:               "",
 		PresentAt:             now,
 		TraceID:               "",
-		RootRequestID:         conversationID,
+		RootRequestID:         requestID,
 		ParentConversationID:  conversationID,
 		AgentName:             "default",
 		AgentType:             "conversation",
@@ -138,5 +151,38 @@ func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID stri
 		return err
 	}
 	_, err = c.billingJSON(a, http.MethodPost, reportPath, json.RawMessage(raw))
+	return err
+}
+
+// billingRetryDelay 签到/余额等维护类计费调用瞬时错误重试的间隔基数。
+// 独立变量供测试缩短（生产固定 2s：第 1 次重试等 2s、第 2 次等 4s）。
+var billingRetryDelay = 2 * time.Second
+
+// isTransientBillingErr 报告 err 是否值得对计费维护类调用做有界重试：
+// 上游 5xx（ErrServer）或网络层错误（非 *Error 的传输失败）；业务错误不重试。
+func isTransientBillingErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ue *Error
+	if errors.As(err, &ue) {
+		return ue.Kind == ErrServer
+	}
+	return true
+}
+
+// retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试：
+// 最多补打 2 次（间隔 billingRetryDelay、2*billingRetryDelay），首次成功或非瞬时错误立即返回。
+func (c *Client) retryBillingTransient(fn func() error) error {
+	err := fn()
+	if err == nil || !isTransientBillingErr(err) {
+		return err
+	}
+	for i := 1; i <= 2; i++ {
+		time.Sleep(time.Duration(i) * billingRetryDelay)
+		if err = fn(); err == nil || !isTransientBillingErr(err) {
+			return err
+		}
+	}
 	return err
 }

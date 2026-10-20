@@ -418,6 +418,8 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// credit_floor 积分保底（panel）：账号触底后不接实测收费模型；0 = 关闭。显式写出。
+		"credit_floor": h.cfg.Pool.CreditFloor(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,
@@ -1169,7 +1171,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 与成本账本同源同口径（都读末帧 usage），故此处一并带出，避免二次解析。
 			st.hasUsage = hasUsage
 			st.prompt = stats.PromptTokens()
-			st.cacheHit, st.cacheMiss, st.cacheWr = stats.CacheTokens()
+			st.cacheHit, st.cacheMiss, st.cacheWr, _ = stats.CacheTotals()
+			cacheMissWarn.noteCacheTokens(bareModel, int64(st.prompt), int64(st.cacheHit), int64(st.cacheMiss))
 			if credit, ok := stats.Credit(); ok {
 				st.credit = credit
 				st.hasCredit = true

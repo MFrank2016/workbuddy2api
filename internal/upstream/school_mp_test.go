@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"workbuddy2api/internal/auth"
 )
 
 func TestMPEventBase(t *testing.T) {
@@ -34,4 +34,3 @@ func TestSchoolChatTimesEvents(t *testing.T) {
 		t.Error("agentName missing")
 	}
 }
-

@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -708,7 +709,7 @@ type Client struct {
 	globalModels fetchGlobalModelsCache
 
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
-	SanitizeFingerprints bool
+	SanitizeFingerprints atomic.Bool
 
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认 WorkBuddy
 	// 三段式与 billingUA 单段式）。空 = 默认官方形态：chat/refresh/FetchModels 走
@@ -753,6 +754,9 @@ type Client struct {
 	ChatBaseCN    string
 	BillingBaseCN string
 
+	// WebBaseCN 官网域基址（任务领奖类接口走 www.workbuddy.cn；空 = 内置默认）。
+	WebBaseCN string
+
 	// ChatBaseGlobal / BillingBaseGlobal 国际版（global realm）上游 base。
 	// 空 = 缺省默认 https://www.workbuddy.ai（D5）。
 	ChatBaseGlobal    string
@@ -765,19 +769,22 @@ type Client struct {
 	// Retry 聊天 SSE 的同账号瞬时重试配置（见 retry.go）。零值 = 关闭，
 	// 行为与现状逐字一致（5xx/传输失败直接换号轮转）。wiring 从 config 注入。
 	Retry RetryConfig
+	// modelRates 各 realm 的模型生效倍率原文缓存（panel 模型视图用；与 efforts 共用锁）。
+	modelRates map[string]map[string]string
 }
 
 // New 生产默认值。Transport 由 newTransport() 集中构造（连接层加固：禁 h2 /
 // TLS 握手超时 / 短 keepalive 探测，参数见 transport.go）。
 func New() *Client {
 	tr := newTransport()
-	return &Client{
-		HTTP:                 &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP:             &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
-		SanitizeFingerprints: true,
-		ChatBaseCN:           "https://copilot.tencent.com",
-		BillingBaseCN:        "https://www.codebuddy.cn",
+	c := &Client{
+		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		ChatHTTP:      &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		ChatBaseCN:    "https://copilot.tencent.com",
+		BillingBaseCN: "https://www.codebuddy.cn",
 	}
+	c.SanitizeFingerprints.Store(true)
+	return c
 }
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。
@@ -832,7 +839,7 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 		// （issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
-	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints, efforts, defs)
+	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
@@ -913,6 +920,18 @@ func (c *Client) billingBase(a *auth.Auth) string {
 		return c.globalBillingBase()
 	}
 	return c.BillingBaseCN
+}
+
+// webBase 返回官网域（任务领奖类接口；未注入时回落默认）。
+// realm 感知：global 账号切国际站 workbuddy.ai，CN 用 workbuddy.cn。
+func (c *Client) webBase(a *auth.Auth) string {
+	if c.globalOn(a) {
+		return defaultGlobalBase
+	}
+	if c.WebBaseCN != "" {
+		return c.WebBaseCN
+	}
+	return "https://www.workbuddy.cn"
 }
 
 // billing 域端点路径（billingBase + path）。balance/checkin 与 report（report.go）同域，
@@ -1214,17 +1233,24 @@ type ModelInfo struct {
 	SupportsImages bool     // 顶层 supportsImages（多模态能力，透出到 /v1/models）
 
 	// 以下为模型目录全字段补齐（任务书 models-full-fields）：
-	Description       string   // descriptionZh 中文描述
-	Credits           string   // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
-	Tags              []string // tags 模型标签（含 badge:限时免费 等）
-	Vendor            string   // vendor 厂商标识
-	IsDefault         bool     // isDefault 是否默认模型
-	SupportsReasoning bool     // supportsReasoning 是否支持推理
-	SupportsToolCall  bool     // supportsToolCall 是否支持工具调用
-	OnlyReasoning     bool     // onlyReasoning 是否纯推理模型
-	MaxAllowedSize    int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
-	ReasoningEffort   string   // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
-	ReasoningSummary  string   // reasoning.summary 推理摘要模式（如 "auto"）
+	Description        string   // descriptionZh 中文描述
+	Credits            string   // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
+	Tags               []string // tags 模型标签（含 badge:限时免费 等）
+	Vendor             string   // vendor 厂商标识
+	IsDefault          bool     // isDefault 是否默认模型
+	SupportsReasoning  bool     // supportsReasoning 是否支持推理
+	SupportsToolCall   bool     // supportsToolCall 是否支持工具调用
+	OnlyReasoning      bool     // onlyReasoning 是否纯推理模型
+	MaxAllowedSize     int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
+	ReasoningEffort    string   // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
+	ReasoningSummary   string   // reasoning.summary 推理摘要模式（如 "auto"）
+	CanDisableThinking bool     // reasoning.canDisableThinking：思考可关（off 档可用）
+
+	// 优惠（modelPromotions）：Credits 是牌价，Promo* 是当前生效优惠（面板展示用）。
+	PromoFactor  *float64 // 折扣系数（0=限时免费，0.5=五折）；nil=无
+	PromoCredits string   // 折扣后倍率原文（如 "0x" / "0.50x"）
+	PromoLabel   string   // 徽章文案（限时免费 / 夜间折扣 / 错峰使用）
+	PromoNote    string   // hover 说明原文（含时段/日期描述）
 }
 
 // dynModelEntry 上游模型目录（CN /console 与 global /v2 同构）的单条模型解析形态，
@@ -1247,10 +1273,11 @@ type dynModelEntry struct {
 	SupportsTool    bool     `json:"supportsToolCall"`
 	OnlyReasoning   bool     `json:"onlyReasoning"`
 	Reasoning       struct {
-		Effort           string   `json:"effort"`
-		Summary          string   `json:"summary"`
-		DefaultEffort    string   `json:"defaultEffort"`
-		SupportedEfforts []string `json:"supportedEfforts"`
+		Effort             string   `json:"effort"`
+		Summary            string   `json:"summary"`
+		DefaultEffort      string   `json:"defaultEffort"`
+		SupportedEfforts   []string `json:"supportedEfforts"`
+		CanDisableThinking bool     `json:"canDisableThinking"`
 	} `json:"reasoning"`
 }
 
@@ -1258,24 +1285,25 @@ type dynModelEntry struct {
 // CN FetchModels 与 global 探测共用，杜绝两域映射漂移）。
 func (m dynModelEntry) modelInfo() ModelInfo {
 	return ModelInfo{
-		ID:                m.ID,
-		Name:              m.Name,
-		ContextWindow:     m.MaxInputTokens,
-		MaxTokens:         m.MaxOutputTokens,
-		Efforts:           m.Reasoning.SupportedEfforts,
-		DefaultEffort:     m.Reasoning.DefaultEffort,
-		SupportsImages:    m.SupportsImages,
-		Description:       m.Description,
-		Credits:           m.Credits,
-		Tags:              m.Tags,
-		Vendor:            m.Vendor,
-		IsDefault:         m.IsDefault,
-		SupportsReasoning: m.SupportsReason,
-		SupportsToolCall:  m.SupportsTool,
-		OnlyReasoning:     m.OnlyReasoning,
-		MaxAllowedSize:    m.MaxAllowedSize,
-		ReasoningEffort:   m.Reasoning.Effort,
-		ReasoningSummary:  m.Reasoning.Summary,
+		ID:                 m.ID,
+		Name:               m.Name,
+		ContextWindow:      m.MaxInputTokens,
+		MaxTokens:          m.MaxOutputTokens,
+		Efforts:            m.Reasoning.SupportedEfforts,
+		DefaultEffort:      m.Reasoning.DefaultEffort,
+		SupportsImages:     m.SupportsImages,
+		Description:        m.Description,
+		Credits:            m.Credits,
+		Tags:               m.Tags,
+		Vendor:             m.Vendor,
+		IsDefault:          m.IsDefault,
+		SupportsReasoning:  m.SupportsReason,
+		SupportsToolCall:   m.SupportsTool,
+		OnlyReasoning:      m.OnlyReasoning,
+		MaxAllowedSize:     m.MaxAllowedSize,
+		ReasoningEffort:    m.Reasoning.Effort,
+		ReasoningSummary:   m.Reasoning.Summary,
+		CanDisableThinking: m.Reasoning.CanDisableThinking,
 	}
 }
 
@@ -1320,7 +1348,8 @@ func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 		return true
 	}
 	for _, t := range tags {
-		if t == "text-to-image" {
+		switch t {
+		case "text-to-image", "image-to-image", "text-to-video", "image-to-video":
 			return true
 		}
 	}
@@ -1708,6 +1737,16 @@ func (c *Client) ResourceSummary(a *auth.Auth) (remain, used, size int64, packs 
 	return remain, used, size, packs, nil
 }
 
+// UserResourceTotal 返回 (剩余, 总额)。总额取 ResourceSummary 的 size（套餐总量口径），
+// 供面板/导入流程展示与账面核对；请求路径请继续使用 2 返回值的 UserResource。
+func (c *Client) UserResourceTotal(a *auth.Auth) (remain, total int64, err error) {
+	remain, _, size, _, err := c.ResourceSummary(a)
+	if err != nil {
+		return 0, 0, err
+	}
+	return remain, size, nil
+}
+
 // respAccount 供 packageRemainUsed 解析的套餐字段（与 cmd/credit resourcePackage 同构）。
 type respAccount struct {
 	CapacityRemain      int64
@@ -1751,8 +1790,10 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
-	return err
+	return c.retryBillingTransient(func() error {
+		_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
+		return err
+	})
 }
 
 // IsAlreadyCheckin 报告 err 是否表示"今天已签到"（上游幂等拒绝重复签到）。
@@ -1768,4 +1809,322 @@ func IsAlreadyCheckin(err error) bool {
 
 func truncate(s string, n int) string {
 	return logfmt.Truncate(s, n)
+}
+
+// enterpriseUnlimitedRemain / enterpriseUnlimitedTotal 企业版「不限量」在池内的等价表示
+// （remain 给足够大的值让路由权重与 credit_floor 不构成限制；total=-1 表示不限量）。
+const (
+	enterpriseUnlimitedRemain int64 = 1 << 40
+	enterpriseUnlimitedTotal  int64 = -1
+)
+
+// enterpriseResource 企业版额度查询（get-enterprise-user-usage）：
+// credit 是本周期已用、limitNum 是分配额度，剩余 = limit - used（与个人口径「剩余」相反）。
+func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
+	data, err := c.billingJSON(a, http.MethodPost, "/v2/billing/meter/get-enterprise-user-usage", map[string]any{})
+	if err != nil {
+		return 0, 0, 0, time.Time{}, 0, err
+	}
+	// 兼容上游两套字段命名（桌面端两条解析路径分别读 camelCase 与 snake_case）。
+	var resp struct {
+		Credit         float64 `json:"credit"`
+		LimitNum       int64   `json:"limitNum"`
+		LimitNumSnake  int64   `json:"limit_num"`
+		UsedNum        float64 `json:"used_num"`
+		CycleEndTime   string  `json:"cycleEndTime"`
+		CycleResetTime string  `json:"cycleResetTime"`
+	}
+	if uerr := json.Unmarshal(data, &resp); uerr != nil {
+		return 0, 0, 0, time.Time{}, 0, fmt.Errorf("enterprise resource parse: %w", uerr)
+	}
+	limit := resp.LimitNum
+	if limit == 0 && resp.LimitNumSnake != 0 {
+		limit = resp.LimitNumSnake
+	}
+	used := resp.Credit
+	if used == 0 && resp.UsedNum != 0 {
+		used = resp.UsedNum
+	}
+	if limit < 0 {
+		return enterpriseUnlimitedRemain, enterpriseUnlimitedTotal, 0, time.Time{}, 0, nil
+	}
+	usedInt := int64(used)
+	if used-float64(usedInt) >= 0.5 {
+		usedInt++
+	}
+	remain = limit - usedInt
+	if remain < 0 {
+		remain = 0
+	}
+	total = limit
+	now := time.Now()
+	end, ok := parsePackageEndTime(resp.CycleEndTime)
+	if !ok {
+		end, ok = parsePackageEndTime(resp.CycleResetTime)
+	}
+	if ok && remain > 0 && end.After(now) {
+		earliestAt, earliestRemaining = end, remain
+		if soon > 0 && !end.After(now.Add(soon)) {
+			expiring = remain
+		}
+	}
+	return remain, total, expiring, earliestAt, earliestRemaining, nil
+}
+
+// UserResourceDetailedWithExpiry 返回 (剩余, 总额, 窗口内快过期, 最早到期时刻, 最早批次剩余)。
+// 企业版走 enterpriseResource 分流；个人版按套餐 CycleEndTime 聚合（与面板到期分布同口径）。
+func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
+	if a.IsEnterprise() {
+		return c.enterpriseResource(a, soon)
+	}
+	now := time.Now()
+	body := map[string]any{
+		"PageNumber":               1,
+		"PageSize":                 100,
+		"ProductCode":              "p_tcaca",
+		"Status":                   []int{0, 3},
+		"PackageEndTimeRangeBegin": now.Format(packageEndLayout),
+		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format(packageEndLayout),
+	}
+	var data json.RawMessage
+	if rerr := c.retryBillingTransient(func() error {
+		var e error
+		data, e = c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
+		return e
+	}); rerr != nil {
+		return 0, 0, 0, time.Time{}, 0, rerr
+	}
+	var resp struct {
+		Response struct {
+			Data struct {
+				Accounts []struct {
+					PackageName         string `json:"PackageName"`
+					CycleEndTime        string `json:"CycleEndTime"`
+					CapacitySize        int64  `json:"CapacitySize"`
+					CapacityRemain      int64  `json:"CapacityRemain"`
+					CapacityUsed        int64  `json:"CapacityUsed"`
+					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
+					CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
+					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
+				} `json:"Accounts"`
+			} `json:"Data"`
+		} `json:"Response"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, 0, 0, time.Time{}, 0, fmt.Errorf("resource parse: %w", err)
+	}
+	for _, acct := range resp.Response.Data.Accounts {
+		r, _, size := packageRemainUsed(respAccount{
+			CapacityRemain:      acct.CapacityRemain,
+			CapacityUsed:        acct.CapacityUsed,
+			CapacitySize:        acct.CapacitySize,
+			CycleCapacityRemain: acct.CycleCapacityRemain,
+			CycleCapacityUsed:   acct.CycleCapacityUsed,
+			CycleCapacitySize:   acct.CycleCapacitySize,
+		})
+		if r < 0 {
+			r = 0
+		}
+		if size < r {
+			size = r
+		}
+		remain += r
+		total += size
+		if r <= 0 {
+			continue
+		}
+		end, ok := parsePackageEndTime(acct.CycleEndTime)
+		if !ok || !end.After(now) {
+			continue
+		}
+		if earliestAt.IsZero() || end.Before(earliestAt) {
+			earliestAt = end
+			earliestRemaining = r
+		} else if end.Equal(earliestAt) {
+			earliestRemaining += r
+		}
+		if soon > 0 && !end.After(now.Add(soon)) {
+			expiring += r
+		}
+	}
+	return remain, total, expiring, earliestAt, earliestRemaining, nil
+}
+
+// CreditPackage 单个积分包（面板「积分构成/到期分布」用）。
+type CreditPackage struct {
+	Name           string `json:"name"`
+	Remain         int64  `json:"remain"`
+	Used           int64  `json:"used"`
+	Size           int64  `json:"size"`
+	EndTime        string `json:"end_time,omitempty"`
+	ExpiresAt      int64  `json:"expires_at,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	PackageCode    string `json:"package_code,omitempty"`
+	SubProductCode string `json:"sub_product_code,omitempty"`
+	SubProductName string `json:"sub_product_name,omitempty"`
+	Cycle          bool   `json:"cycle,omitempty"`
+}
+
+// CreditPackages 拉取账号积分包清单，返回 (包列表, 剩余合计, 面额合计)。
+func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, error) {
+	now := time.Now()
+	body := map[string]any{
+		"PageNumber":               1,
+		"PageSize":                 100,
+		"ProductCode":              "p_tcaca",
+		"Status":                   []int{0, 3},
+		"PackageEndTimeRangeBegin": now.Format(packageEndLayout),
+		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format(packageEndLayout),
+	}
+	data, err := c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	var resp struct {
+		Response struct {
+			Data struct {
+				Accounts []struct {
+					PackageName         string `json:"PackageName"`
+					CapacityRemain      int64  `json:"CapacityRemain"`
+					CapacityUsed        int64  `json:"CapacityUsed"`
+					CapacitySize        int64  `json:"CapacitySize"`
+					CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
+					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
+					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
+					ExpiredTime         string `json:"ExpiredTime"`
+					PackageEndTime      string `json:"PackageEndTime"`
+					CycleEndTime        string `json:"CycleEndTime"`
+					DeductionEndTime    int64  `json:"DeductionEndTime"`
+					CreateTime          int64  `json:"CreateTime"`
+					PackageCode         string `json:"PackageCode"`
+					SubProductCode      string `json:"SubProductCode"`
+					SubProductName      string `json:"SubProductName"`
+				} `json:"Accounts"`
+			} `json:"Data"`
+		} `json:"Response"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, 0, 0, fmt.Errorf("packages parse: %w", err)
+	}
+	packs := resp.Response.Data.Accounts
+	out := make([]CreditPackage, 0, len(packs))
+	var sumRemain, sumSize int64
+	for _, p := range packs {
+		cp := CreditPackage{
+			Name:           p.PackageName,
+			PackageCode:    p.PackageCode,
+			SubProductCode: p.SubProductCode,
+			SubProductName: p.SubProductName,
+		}
+		switch {
+		case p.DeductionEndTime > 0:
+			cp.EndTime = time.UnixMilli(p.DeductionEndTime).Format(time.RFC3339)
+			cp.ExpiresAt = p.DeductionEndTime
+		case p.ExpiredTime != "":
+			cp.EndTime = p.ExpiredTime
+		case p.PackageEndTime != "":
+			cp.EndTime = p.PackageEndTime
+		default:
+			cp.EndTime = p.CycleEndTime
+		}
+		if cp.ExpiresAt == 0 && cp.EndTime != "" {
+			if end, perr := time.ParseInLocation(packageEndLayout, cp.EndTime, softRateResetLoc); perr == nil {
+				cp.ExpiresAt = end.UnixMilli()
+			}
+		}
+		if p.CreateTime > 0 {
+			cp.CreatedAt = time.UnixMilli(p.CreateTime).Format(time.RFC3339)
+		}
+		if p.CycleCapacitySize > 0 {
+			cp.Cycle = true
+			cp.Remain, cp.Size = p.CycleCapacityRemain, p.CycleCapacitySize
+			cp.Used = cp.Size - cp.Remain
+			if p.CycleCapacityUsed > cp.Used {
+				cp.Used = p.CycleCapacityUsed
+				cp.Remain = cp.Size - cp.Used
+			}
+		} else {
+			cp.Remain, cp.Size, cp.Used = p.CapacityRemain, p.CapacitySize, p.CapacityUsed
+			if cp.Used == 0 && cp.Size > cp.Remain {
+				cp.Used = cp.Size - cp.Remain
+			}
+		}
+		if cp.Remain < 0 {
+			cp.Remain = 0
+		}
+		if cp.Size > 0 && cp.Remain > cp.Size {
+			cp.Remain = cp.Size
+		}
+		sumRemain += cp.Remain
+		sumSize += cp.Size
+		out = append(out, cp)
+	}
+	return out, sumRemain, sumSize, nil
+}
+
+// ModelRate 返回某 realm 下模型的生效倍率原文（panel 模型视图用；无缓存返回空串）。
+func (c *Client) ModelRate(realm, model string) string {
+	if c == nil || model == "" {
+		return ""
+	}
+	c.effortsMu.RLock()
+	defer c.effortsMu.RUnlock()
+	return c.modelRates[realmKey(realm)][model]
+}
+
+// storeModelRates 按 realm 整体替换模型倍率快照（FetchModels 刷新后调用）。
+func (c *Client) storeModelRates(realm string, infos []ModelInfo) {
+	rates := make(map[string]string, len(infos))
+	for _, mi := range infos {
+		if mi.ID == "" {
+			continue
+		}
+		if rate := effectiveModelRate(mi); rate != "" {
+			rates[mi.ID] = rate
+		}
+	}
+	c.effortsMu.Lock()
+	defer c.effortsMu.Unlock()
+	if c.modelRates == nil {
+		c.modelRates = make(map[string]map[string]string)
+	}
+	c.modelRates[realmKey(realm)] = rates
+}
+
+// effectiveModelRate 生效价：有促销且给出折扣倍率原文时用促销价，否则牌价。
+func effectiveModelRate(mi ModelInfo) string {
+	if mi.PromoFactor != nil && strings.TrimSpace(mi.PromoCredits) != "" {
+		return normalizeModelRate(mi.PromoCredits)
+	}
+	return normalizeModelRate(mi.Credits)
+}
+
+// normalizeModelRate 归一 fang 倍率原文（"x0.05" → "0.05"；"0x" → "0"）。
+func normalizeModelRate(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.HasSuffix(strings.ToLower(s), "credits") {
+		s = strings.TrimSpace(s[:len(s)-len("credits")])
+	}
+	low := strings.ToLower(s)
+	if strings.HasPrefix(low, "x") {
+		s = strings.TrimSpace(s[1:])
+	} else if strings.HasSuffix(low, "x") {
+		s = strings.TrimSpace(s[:len(s)-1])
+	}
+	return s
+}
+
+// parsePackageEndTime 解析上游套餐到期墙钟（UTC+8，格式见 packageEndLayout）。
+func parsePackageEndTime(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	t, err := time.ParseInLocation(packageEndLayout, raw, softRateResetLoc)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }

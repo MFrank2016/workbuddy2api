@@ -106,6 +106,10 @@ func (s *Scheduler) runTravel(ctx context.Context, trigger string) {
 			t.skipped++ // D4 门控：global 无猫猫旅行体系，不发起任何上游调用
 			continue
 		}
+		if a.IsEnterprise() {
+			t.skipped++ // 企业版无个人成长体系，不发起猫猫旅行
+			continue
+		}
 		if !first {
 			if !sleepCtx(ctx, s.accountGap(ctx, travelAccountDelay)) {
 				t.interrupted = true
