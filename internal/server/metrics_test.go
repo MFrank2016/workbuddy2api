@@ -146,3 +146,36 @@ func TestMetricsCapBounded(t *testing.T) {
 		t.Errorf("models=%d 超过上限 %d", len(snap.Models), metricsCap)
 	}
 }
+
+// TestGenSamplesAggregation：生成吞吐样本量（gen_samples）与 tokens_per_sec 同报，
+// 入选条件 = 成功 + hasUsage + 生成段为正（与 genSecSum 同一分支）。
+func TestGenSamplesAggregation(t *testing.T) {
+	resetMetricsForTest(t)
+
+	// 成功 + hasUsage + 生成段为正（ttfb<total）→ genSamples=1
+	recordChatMetric(&chatStat{
+		model: "m1", mode: "stream", status: 200, hasUsage: true,
+		toks: 100, ttfb: 10 * time.Millisecond,
+	}, 1000*time.Millisecond)
+	// 无 usage 观测的请求（hasUsage=false）→ 不进 gen_samples（与 genSecSum 同门槛）
+	recordChatMetric(&chatStat{
+		model: "m1", mode: "stream", status: 500, hasUsage: false,
+	}, 500*time.Millisecond)
+	// hasUsage 但生成段非正（ttfb>=total）→ 不进 gen_samples（与 genSecSum 同门槛）
+	recordChatMetric(&chatStat{
+		model: "m1", mode: "stream", status: 200, hasUsage: true, toks: 10,
+		ttfb: 2000 * time.Millisecond,
+	}, 1000*time.Millisecond)
+
+	snap := MetricsSnapshotOf()
+	if len(snap.Models) != 1 {
+		t.Fatalf("models = %d, want 1", len(snap.Models))
+	}
+	st := snap.Models[0]
+	if st.GenSamples != 1 {
+		t.Errorf("GenSamples = %d, want 1", st.GenSamples)
+	}
+	if st.TokensPerSec <= 0 {
+		t.Errorf("TokensPerSec = %v, want > 0", st.TokensPerSec)
+	}
+}

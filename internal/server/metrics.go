@@ -33,6 +33,7 @@ type modelMetrics struct {
 	ttfbCount  int64
 	latSumMS   float64 // 端到端耗时累计（全部请求）
 	genSecSum  float64 // 生成秒数累计（供 tokens/s）
+	genSamples int64   // 生成吞吐的观测样本量（与 genSecSum 同一入选条件，v0.1.3）
 	promptTok  int64
 	compTok    int64
 	cacheHit   int64
@@ -122,6 +123,7 @@ func recordChatMetric(s *chatStat, total time.Duration) {
 		}
 		if gen > 0 {
 			mm.genSecSum += gen / 1000.0
+			mm.genSamples++ // 样本量与速率同报（对齐 mirror gen_samples 纪律）
 		}
 	}
 	if s.hasCredit {
@@ -154,6 +156,9 @@ type ModelStatPayload struct {
 	AvgTTFBMS    float64 `json:"avg_ttfb_ms"`
 	AvgLatencyMS float64 `json:"avg_latency_ms"`
 	TokensPerSec float64 `json:"tokens_per_sec"`
+	// GenSamples 生成吞吐的观测样本量（与 tokens_per_sec 同报，v0.1.3 移植）。
+	// 只报速率不报样本量，2 次调用与千次调用的可信度无法区分。
+	GenSamples int `json:"gen_samples"`
 
 	PromptTokens     int64 `json:"prompt_tokens"`
 	CompletionTokens int64 `json:"completion_tokens"`
@@ -202,6 +207,7 @@ func MetricsSnapshotOf() MetricsSnapshot {
 		tot.ttfbCount += mm.ttfbCount
 		tot.latSumMS += mm.latSumMS
 		tot.genSecSum += mm.genSecSum
+		tot.genSamples += mm.genSamples
 		tot.promptTok += mm.promptTok
 		tot.compTok += mm.compTok
 		tot.cacheHit += mm.cacheHit
@@ -248,6 +254,9 @@ func deriveModelStat(name string, mm *modelMetrics) ModelStatPayload {
 	}
 	if mm.genSecSum > 0 {
 		p.TokensPerSec = float64(mm.compTok) / mm.genSecSum
+	}
+	if mm.genSamples > 0 {
+		p.GenSamples = int(mm.genSamples)
 	}
 	// 命中率分母 = 命中 + 未命中（不含 write：写入是「为后续命中付的费」，
 	// 计入分母会把首次请求的命中率压低，失真）。

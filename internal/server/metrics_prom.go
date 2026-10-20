@@ -300,9 +300,9 @@ func writePromMetrics(snap MetricsSnapshot, health []promRealmHealth, stickySess
 		w.sample("wb2api_model_avg_latency_seconds", m.AvgLatencyMS/1000, "model", m.Model)
 	}
 
-	w.family("wb2api_model_tokens_per_second", "按模型的生成吞吐（completion token / 纯生成秒数）。", "gauge")
+	w.family("wb2api_model_tokens_per_second", "按模型的生成吞吐（completion token / 纯生成秒数）；samples 为该速率的观测样本量（v0.1.3）。", "gauge")
 	for _, m := range models {
-		w.sample("wb2api_model_tokens_per_second", m.TokensPerSec, "model", m.Model)
+		w.sample("wb2api_model_tokens_per_second", m.TokensPerSec, "model", m.Model, "samples", strconv.Itoa(m.GenSamples))
 	}
 
 	// ---------- 账号凭证健康（P0-1，逐账号） ----------
