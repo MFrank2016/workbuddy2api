@@ -282,6 +282,7 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 func (p *Pool) Acquire(uid string) bool {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
+	var limit int
 	if ok {
 		// 全池总闸（权威）：pick 入口的预筛只是快速路径，这里才是真正的闸——
 		// 并发下多个 pick 可能同时通过预筛，只有 CAS 成功者能占位。
@@ -289,12 +290,17 @@ func (p *Pool) Acquire(uid string) bool {
 			ok = false
 		}
 	}
+	if ok {
+		// 单号上限在 RLock 内读（inFlightLimit 读 e.a.Realm()/e.maxConcurrency，
+		// 热加载并发时锁外读是新竞态窗口）——与旧实现持锁读 limit 同口径。
+		limit = p.inFlightLimit(e)
+	}
 	p.mu.RUnlock()
 	if !ok {
 		return false
 	}
 	// 单号在途 CAS：per-account 上限（含 per-account max_concurrency 生效值）。
-	if !p.acquireInFlight(e) {
+	if !p.acquireInFlight(e, limit) {
 		// 单号名额被并发抢走：回滚总闸占位（若未占则防御性不扣）。
 		if p.maxTotalConcurrency > 0 {
 			for {
@@ -312,10 +318,9 @@ func (p *Pool) Acquire(uid string) bool {
 	return true
 }
 
-// acquireInFlight 单账号在途名额 CAS（既有语义原样抽出）。per-account max_concurrency
-// 已含在 inFlightLimit 的返回值里。
-func (p *Pool) acquireInFlight(e *entry) bool {
-	limit := p.inFlightLimit(e)
+// acquireInFlight 单账号在途名额 CAS（limit 由调用方在 RLock 内算好传入）。
+// per-account max_concurrency 已含在 limit 里。
+func (p *Pool) acquireInFlight(e *entry, limit int) bool {
 	if limit <= 0 {
 		e.inFlight.Add(1)
 		return true

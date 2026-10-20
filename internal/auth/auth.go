@@ -497,6 +497,20 @@ func (a *Auth) SaveAtomic() error {
 	if len(a.Groups) > 0 {
 		doc["groups"] = a.Groups
 	}
+	// 账号级流量整形（v0.1.3）：与 device_token/groups 同策略——只在显式配置时
+	// 写回，不给旧文件引入空键。★ 必须写回 ★ 本函数固定字段集整体重写，漏掉
+	// weight/max_concurrency/min_interval 就等于在每次 token 刷新时把用户配的
+	// 整形旋钮静默删掉（weight=0 的只读备用号会「自己复活」参与轮转）。
+	// weight 用指针：非 nil 才写（保留「显式 0 = 只读备用」语义，区别于未配置）。
+	if a.Weight != nil {
+		doc["weight"] = *a.Weight
+	}
+	if a.MaxConcurrency != 0 {
+		doc["max_concurrency"] = a.MaxConcurrency
+	}
+	if a.MinInterval != 0 {
+		doc["min_interval"] = a.MinInterval
+	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err

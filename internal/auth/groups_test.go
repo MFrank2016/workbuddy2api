@@ -165,3 +165,53 @@ func TestLoadDirKeepsGroups(t *testing.T) {
 		t.Errorf("LoadDir 后 Groups=%#v want [internal]", list[0].Groups)
 	}
 }
+
+// TestSaveAtomicKeepsThrottle 是**账号级流量整形最关键的防回归用例**。
+//
+// 与 groups 同源风险：SaveAtomic 用固定字段集整体重写文件，漏写
+// weight/max_concurrency/min_interval 就等于每次 token 刷新都静默抹掉用户
+// 配的整形旋钮 —— weight=0 的「只读备用」号会自己复活参与轮转。
+func TestSaveAtomicKeepsThrottle(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-u1.json")
+	w := 0.0 // 显式 0 = 只读备用，必须保留（区别于未配置）
+	a := &Auth{AccessToken: "at", RefreshToken: "rt", UID: "u1", FilePath: fp,
+		Weight: &w, MaxConcurrency: 3, MinInterval: 12.5}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	b, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	wv, ok := b.WeightValue()
+	if !ok || wv != 0 {
+		t.Errorf("SaveAtomic 后 weight 丢失（显式 0 必须保留）: ok=%v val=%v\nraw=%s", ok, wv, raw)
+	}
+	if b.MaxConcurrencyValue() != 3 {
+		t.Errorf("SaveAtomic 后 max_concurrency 丢失: %d\nraw=%s", b.MaxConcurrencyValue(), raw)
+	}
+	if b.MinIntervalValue() != 12.5 {
+		t.Errorf("SaveAtomic 后 min_interval 丢失: %v\nraw=%s", b.MinIntervalValue(), raw)
+	}
+}
+
+// TestSaveAtomicOmitsUnsetThrottle 未配置时不写这三个键（不给存量文件引入空键）。
+func TestSaveAtomicOmitsUnsetThrottle(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-u2.json")
+	a := &Auth{AccessToken: "at", UID: "u2", FilePath: fp}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, _ := os.ReadFile(fp)
+	for _, k := range []string{"weight", "max_concurrency", "min_interval"} {
+		if strings.Contains(string(raw), `"`+k+`"`) {
+			t.Errorf("未配置 %s 不该写回该键: %s", k, raw)
+		}
+	}
+}
