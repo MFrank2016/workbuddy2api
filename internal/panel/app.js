@@ -2800,6 +2800,7 @@ if ($('pkSort')) {
 async function loadPackages(force) {
   if (!force && lastPackages) {
     renderPackages(lastPackages, lastDetailLimit);
+    renderGrants(lastPackages);
     const ageMin = Math.floor((Date.now() - lastPackagesAt) / 60000);
     if (ageMin > 0) $('pkNote').textContent = lastPackages.accounts.length + ' 个账号 · ' + ageMin + ' 分钟前的数据，点「刷新」更新';
     return;
@@ -2816,10 +2817,47 @@ async function loadPackages(force) {
     lastPackagesAt = Date.now();
     lastDetailLimit = pkDetailLimit(c && c.config);
     renderPackages(d, lastDetailLimit);
+    renderGrants(d);
   } catch (e) {
     $('pkSummary').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
     $('pkExpiry').innerHTML = '<div class="pk-expiry-empty">读取失败：' + esc(e.message) + '</div>';
+    $('pkGrantsNote').textContent = '—';
+    $('pkGrantsBody').innerHTML = '<tr><td colspan="9" class="empty">读取失败：' + esc(e.message) + '</td></tr>';
   }
+}
+
+// renderGrants 积分获取历史（吸收自 hub）：把各账号的积分包摊平成一张表，
+// 新的在前；状态按「过期 > 用完 > 可用」归类（上游无 in_usage 字段，不虚构）。
+function renderGrants(d) {
+  const now = Date.now();
+  const rows = [];
+  for (const acc of (d && d.accounts) || []) {
+    for (const p of acc.packages || []) {
+      rows.push({ acc, p });
+    }
+  }
+  rows.sort((a, b) => {
+    const ta = Date.parse(a.p.created_at || '') || 0;
+    const tb = Date.parse(b.p.created_at || '') || 0;
+    return tb - ta;
+  });
+  const totalSize = rows.reduce((s, r) => s + Number(r.p.size || 0), 0);
+  const totalRemain = rows.reduce((s, r) => s + Number(r.p.remain || 0), 0);
+  $('pkGrantsNote').textContent = rows.length + ' 笔 · 面额 ' + totalSize + ' · 剩余 ' + totalRemain +
+    ' · 快照 ' + new Date().toLocaleTimeString();
+  $('pkGrantsBody').innerHTML = rows.map(({ acc, p }) => {
+    const remain = Number(p.remain || 0);
+    const expMs = pkExpiryMs(p);
+    const status = (expMs && expMs <= now) ? '已过期' : (remain <= 0 ? '已用完' : '可用');
+    const created = p.created_at ? new Date(p.created_at).toLocaleString() : '—';
+    const expire = expMs ? new Date(expMs).toLocaleDateString() : '不过期';
+    const src = p.sub_product_name || p.sub_product_code || p.package_code || '';
+    return '<tr><td>' + esc(created) + '</td>' +
+      '<td>' + esc((acc.nickname || '') + ' ' + String(acc.uid || '').slice(0, 8)) + '</td>' +
+      '<td>' + esc(acc.realm || '') + '</td><td>' + esc(p.name || '') + '</td><td>' + esc(src) + '</td>' +
+      '<td class="num">' + Number(p.size || 0) + '</td><td class="num">' + remain + '</td>' +
+      '<td>' + esc(expire) + '</td><td>' + esc(status) + '</td></tr>';
+  }).join('') || '<tr><td colspan="9" class="empty">暂无数据</td></tr>';
 }
 
 /* ── 积分到期提醒（首页卡片）────────────────────────────────────────── */

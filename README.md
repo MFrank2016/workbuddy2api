@@ -49,6 +49,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 - **在线改配置（热生效）**：`api_key` / `soft_rate` / 指纹脱敏开关 / 池参数 / 排程 / 积分保底 / 余额刷新间隔立即生效；`listen` / `auth_dir` / `state_file` / `server.read_timeout` / `upstream.*` / `upstash` / 会话 TTL / 归档策略需重启（保存后面板会列出）。
 - **逐请求用量与请求指标**：按账号 / 模型 / 域统计 token、缓存命中、积分、延迟与吞吐；请求归档（JSONL，脱敏、可关、按天保留）。
 - **运行日志环形缓冲**：网关 `log` 输出与请求流水行经 `io.MultiWriter` 镜像进面板「运行日志」页（有界缓冲，不额外占盘）。
+- **积分获取历史**：各账号积分包按发放时间摊平（面额/剩余/到期/状态），与「积分构成」共用同一份上游快照。
 - **成长任务中心**：全账号扫描 → 队列执行（账号内串行 / 账号间并发）→ 自动领奖；一键完成成长任务；开学季与小程序口径任务；连登管家（兑换 + 抽奖）。
 - **积分保底 `credit_floor`**：账号余额低于阈值时不再接**实测收费**模型（本地成本台账 + 上游目录倍率双判据），免费/未知模型不受限；全池触底时选号返回 503 而非打穿余额。
 - **暂停选号 `paused`**：运维临时让位——退出选号但签到/活跃/保活/余额刷新照常（与 `disabled` 正交）。
@@ -165,6 +166,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 - 手动签到：`./signin.sh`（批量、幂等不重复计）
 - 账号停用 / 恢复：`./acct.sh list | disable <uid> [原因] | enable <uid> | revive <uid>`（需 `admin.enabled`，走网关管理端点）
 - 手动补跑排程任务：`./acct.sh task <任务名>`（异步受理，同任务在跑时回 409；需 `admin.enabled`）
+- 智能体一键配置：`go run ./cmd/agentcfg -client <claude-code|codex|opencode|crush|zcode> -base-url <url> -api-key <key> -model <id>`（写入前备份，`-restore` 还原，`-dry-run` 只预览；状态目录 `~/.wb-agent-config`）
 - 领养联动 / 任务查询：`scripts/task_runner.py`（成长任务一体机，默认 dry-run）
 - 个性化提示词：`prompt.file` 指向自定义提示词文件即整体替换内置默认（`custom`/`append` 模式生效）
 
