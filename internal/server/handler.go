@@ -1379,7 +1379,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 两条路径对坏号都立刻换号（同一请求轮转出池），只是后续可恢复性不同。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
-		if strings.Contains(strings.ToLower(body), "request illegal") {
+		// 纵深防御（根因修复，实测 8 个 global 号被误禁）：渠道校验失败与 11140 的
+		// msg 同为 "request illegal"，但渠道失败 body 含 "channel verification" 标记。
+		// Classify 已在 ErrAccountFault 之前按该标记分流为 ErrBadParams，正常走不到本
+		// 分支；此处再挡一次，防未来 Classify 规则序被改回时健康账号被误 Disable。
+		bodyLower := strings.ToLower(body)
+		if strings.Contains(bodyLower, "request illegal") && !strings.Contains(bodyLower, "channel verification") {
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
 			return
 		}

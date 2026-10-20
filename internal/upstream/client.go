@@ -219,6 +219,29 @@ var alreadyCheckinRule = errorRule{mode: matchFold, patterns: []string{"已签�
 // is rate-limiting requests."），那种场景必须保持 ErrSoftRate（上方 softRateRule
 // 先命中）。故此处只收 msg 关键词 "request illegal"（auth_forbidden 的真实文案），
 // 120 与 private 均落同一分类。14017 文案唯一（无软限流歧义），可安全收录。
+// channelVerificationMarker 上游「渠道校验失败」的稳定标记（出现在 displayTips 文案）。
+//
+// 根因（实测）：渠道校验失败与账号封禁（11140）的 msg **同为** "request illegal"，
+// 但渠道校验失败是**请求侧**问题（网关缺会话头族/缺 system，可修复），其
+// displayTips 含这句稳定英文；账号封禁 body 不含此句。只按 msg "request illegal"
+// 匹配会把渠道失败误归 ErrAccountFault → handler 按 "request illegal" 把**健康账号
+// Disable**（实测 8 个 global 号因此被误禁）。故在 accountFaultRule 之前按此标记分流。
+const channelVerificationMarker = "channel verification"
+
+// accountFaultRule 账号级授权/配额故障关键词（大小写不敏感子串匹配）。
+//
+// 定位：这类错误是**账号本身状态**决定的本机故障，不是请求格式、不是临时限流、
+// 也不是内容误报——继续重试只会反复刷上游风控/配额检查，必须把该账号冷却轮换。
+//   - "request illegal"（code 11140）→ 上游 auth/auth_forbidden，账号级授权风控
+//     （实测 global 账号：同一规范化请求 A1 403/11140 vs A2 429/14017，差异全由账号
+//     数据决定）。需重新 OAuth 登录才能恢复，短冷却只能阻止继续送死。
+//   - code 14017（"trial not activated" / "The trial version is not yet activated"）→
+//     上游 quota/quota_not_activated，register 未完成的试用未激活账号，同样账号级。
+//
+// 注意 11140 **不能**按 code 判定：该 code 也承载模型级限流文案（"The model provider
+// is rate-limiting requests."），那种场景必须保持 ErrSoftRate（上方 softRateRule
+// 先命中）。故此处只收 msg 关键词 "request illegal"（auth_forbidden 的真实文案），
+// 120 与 private 均落同一分类。14017 文案唯一（无软限流歧义），可安全收录。
 var accountFaultRule = errorRule{kind: ErrAccountFault, mode: matchFold, patterns: []string{
 	"request illegal",
 	"trial not activated",
@@ -562,6 +585,16 @@ func Classify(status int, body string) ErrKind {
 	// （429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须 sessionDead）。
 	if sessionDeadRule.hit(body, lower) {
 		return ErrSessionDead
+	}
+	// 渠道校验失败先于 accountFaultRule（根因修复，实测 8 个 global 号被误禁）：
+	// 上游「渠道校验失败」与「账号封禁」（11140）的 msg **同为** "request illegal"，
+	// 但渠道失败是**请求侧**问题（网关缺会话头族/缺 system，可修复），其 displayTips
+	// 含稳定标记 channelVerificationMarker；账号封禁 body 不含。若不先分流，渠道失败
+	// 会被 accountFaultRule 按 msg 归 ErrAccountFault → handler 按 "request illegal"
+	// 把健康账号 Disable。归 ErrBadParams（请求级：不罚号不熔断不喂连败，但仍轮转
+	// ——换号可能换到不同模型权限，值得再试）。
+	if strings.Contains(lower, channelVerificationMarker) {
+		return ErrBadParams
 	}
 	if accountFaultRule.hit(body, lower) {
 		return ErrAccountFault

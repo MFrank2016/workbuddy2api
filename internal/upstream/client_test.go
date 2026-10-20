@@ -1040,3 +1040,32 @@ func TestRefreshTokenExpiresInWithinCapApplied(t *testing.T) {
 		t.Errorf("ExpiresAt=%d want ~%d (60d 正常推进)", a.ExpiresAt, want)
 	}
 }
+
+
+// TestClassifyChannelVerificationNotAccountFault 锁定根因修复（实测 8 个 global 号
+// 被误禁）：上游「渠道校验失败」与「账号封禁」的 msg 同为 "request illegal"，但前者
+// 的 displayTips 含稳定 ASCII 标记 "failed channel verification"——它是请求侧问题
+// （网关缺会话头/缺 system，可修复），**不得**归 ErrAccountFault，否则 handler 会按
+// "request illegal" 把健康账号 Disable。
+func TestClassifyChannelVerificationNotAccountFault(t *testing.T) {
+	// 渠道校验失败：msg=request illegal + displayTips 含 channel verification 标记。
+	channel := `{"code":11-128,"msg":"request illegal","displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client. Please resend from the official client."}}`
+	if got := Classify(400, channel); got == ErrAccountFault {
+		t.Fatalf("渠道校验失败被归 ErrAccountFault（会误禁健康账号）: got=%v", got)
+	} else if got != ErrBadParams {
+		t.Fatalf("渠道校验失败 = %v, want ErrBadParams（请求级、不罚号）", got)
+	}
+	// 变体：msg=first message is not system prompt（同属渠道校验）也应请求级。
+	channel2 := `{"code":11-128,"msg":"first message is not system prompt","displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client."}}`
+	if got := Classify(400, channel2); got == ErrAccountFault {
+		t.Fatalf("渠道校验变体被归 ErrAccountFault: got=%v", got)
+	}
+	// 对照 1：真账号封禁（11140，无渠道标记）仍是 ErrAccountFault。
+	if got := Classify(403, `{"code":11140,"msg":"request illegal"}`); got != ErrAccountFault {
+		t.Fatalf("11140 = %v, want ErrAccountFault", got)
+	}
+	// 对照 2：裸 "request illegal"（无渠道标记）维持 ErrAccountFault（既有语义不回归）。
+	if got := Classify(403, `request illegal`); got != ErrAccountFault {
+		t.Fatalf("bare request illegal = %v, want ErrAccountFault", got)
+	}
+}
