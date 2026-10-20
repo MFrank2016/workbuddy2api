@@ -24,6 +24,17 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
+// errTruncatedStream 上游流「中途断掉」：转发过有效帧，但既没有 finish_reason
+// 也没有 data: [DONE] 就 EOF（服务端流超时、限流后直接关 TCP 等）。
+// 与 errEmptyStream 分开：那是「一帧都没有」，这是「有内容但没正常收尾」——
+// 两种上游缺陷在日志里应能区分。
+var errTruncatedStream = errors.New("upstream stream ended before completion")
+
+// IsTruncatedStreamError 报告错误是否为「上游截断」——供 handler 在流式路径把
+// 截断记为失败观测（HTTP 头已发出只能 200，但日志/状态不应留下成功）。
+// 告知客户端的义务由 StreamHint 在 [DONE] 之前插入的 error 帧承担。
+func IsTruncatedStreamError(err error) bool { return errors.Is(err, errTruncatedStream) }
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
@@ -674,6 +685,13 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		return out
 	}
 
+	// 收尾判据（**独立于 ReasoningFallback 开关**，关掉时也要生效）：
+	// 上游是否显式发过 data: [DONE]、是否出现过带 finish_reason 的帧。
+	// 两者皆无而流已结束 = 中途断掉，不是「模型说完了」。
+	// 必须声明在 writeFrame 闭包之前：闭包里要写 sawFinish。
+	sawDone := false
+	sawFinish := false
+
 	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
 	// 仅 JSON 解析成功时计数记为一次有效转发（JSON 解析失败照常降级原样写出，但不计数）。
 	writeFrame := func(payload string) (int, error) {
@@ -689,6 +707,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
 		// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
+		// 收尾观测：出现过 finish_reason 即算上游正常收了尾（与开关无关）。
+		if frameHasFinishReason(obj) {
+			sawFinish = true
+		}
 		if _, hasErr := obj["error"]; hasErr {
 			// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
 			if o.onErrorFrame != nil {
@@ -717,6 +739,7 @@ readLoop:
 		case strings.HasPrefix(trimmed, "data: [DONE]"):
 			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
 			// [DONE] 统一在循环结束后写出，保证恰好一个。
+			sawDone = true
 			break readLoop
 		case strings.HasPrefix(trimmed, "data: "):
 			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
@@ -768,8 +791,23 @@ readLoop:
 	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。
 	// 网关本地空流兜底帧走 hintFn=nil 的直写路径：该形态未覆盖（不编造 hint），
 	// 且 writeRaw 的 hintFn 闭包在空流路径下可能携带上一帧的上下文造成误配。
+	// 截断判定：转发过有效帧，但上游既没给 finish_reason、也没给 [DONE] 就结束
+	// —— 连接中断（流超时 / 限流后直接关 TCP），不是「模型说完了」。
+	//
+	// 为什么保留 [DONE] 兜底而不换掉它：管理端 responses 转换层依赖 chat 流以
+	// [DONE] 收尾来补齐推理事件，去掉会让 /v1/responses 的思考内容显示不全
+	// （实测回归过、已回退）。所以收尾契约不动，只在 [DONE] **之前**插一条 error
+	// 帧：客户端优先识别 error → 判失败 / 可续跑，不再把半截回答当成完成；
+	// 管理端 responses.py 也会把无 choices 的 error 帧转成 response.failed。
+	//
+	// 判据与非流式 Aggregate 同构：那边同样以 !sawDone 认定「未正常收尾」。
+	// 空流（validFrames == 0）走上方的 errEmptyStream 分支，不重复判定。
+	truncated := validFrames > 0 && !sawDone && !sawFinish
 	if validFrames == 0 {
 		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+	} else if truncated {
+		// 本地判定帧：不是上游错误，不编造 hint。
+		_ = writeRaw(`{"error":{"message":"upstream stream ended before completion","type":"upstream_error","code":"upstream_truncated"}}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
@@ -780,6 +818,9 @@ readLoop:
 	}
 	if validFrames == 0 {
 		return errEmptyStream
+	}
+	if truncated {
+		return errTruncatedStream
 	}
 	return nil
 }
@@ -889,4 +930,20 @@ func finishOnlyFrame(src map[string]any, finish string) map[string]any {
 		}
 	}
 	return frame
+}
+
+// frameHasFinishReason 只读判定：帧里是否出现过非空 finish_reason。
+// 与 takeFinishReason 的区别：那个会**删除**字段（用于改写路径），这里只观测。
+func frameHasFinishReason(obj map[string]any) bool {
+	chs, _ := obj["choices"].([]any)
+	for _, ci := range chs {
+		c, _ := ci.(map[string]any)
+		if c == nil {
+			continue
+		}
+		if v, ok := c["finish_reason"].(string); ok && v != "" {
+			return true
+		}
+	}
+	return false
 }

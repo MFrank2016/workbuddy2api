@@ -765,15 +765,20 @@ func TestStreamNoIdFallsBackToSentinel(t *testing.T) {
 }
 
 func TestStreamDoneFallback(t *testing.T) {
-	// 上游流在无 [DONE] 时 EOF，Stream 必须兜底写一个 [DONE]
+	// 上游流在无 [DONE] 时 EOF：Stream 仍兜底写一个 [DONE]（收尾契约不变），
+	// 但自 0014 起**同时**判定为截断（返回 errTruncatedStream 并在 [DONE] 前插
+	// 一条 error 帧）—— 否则半截回答会被客户端当成「模型说完了」。
 	rec := httptest.NewRecorder()
 	err := Stream(rec, strings.NewReader("data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
-	if err != nil {
-		t.Fatal(err)
+	if !IsTruncatedStreamError(err) {
+		t.Fatalf("无 finish_reason/[DONE] 的流应判为截断，实际 err=%v", err)
 	}
 	body := rec.Body.String()
 	if !strings.HasSuffix(strings.TrimRight(body, "\n"), "data: [DONE]") {
 		t.Errorf("missing [DONE] fallback: %q", body)
+	}
+	if !strings.Contains(body, "upstream_truncated") {
+		t.Errorf("截断流缺少 upstream_truncated 错误帧: %q", body)
 	}
 
 	// 已有 [DONE] 时只写一次，不重复
@@ -990,7 +995,8 @@ func TestStreamNormalPassthroughRegression(t *testing.T) {
 		raw  string
 	}{
 		{"带 DONE 的正常流", sseFixture},
-		{"漏发 DONE 自动补", "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"},
+		// 漏发 [DONE] 但**给了 finish_reason** = 上游正常收尾，不算截断（0014 判据）。
+		{"漏发 DONE 但有 finish_reason", "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
