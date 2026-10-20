@@ -37,6 +37,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "no auth files in %s\n", dir)
 		os.Exit(1)
 	}
+	upstream.ConfigureProxiesFromConfigFile("")
 	up := upstream.New()
 	// 允许按 realm 路由：global 账号的签到/余额会打到 global base（workbuddy.ai），
 	// 由幂等码兜底为「未开启/不适用」，而不是误打到 CN base 产生签到成功的假象。

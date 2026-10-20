@@ -116,6 +116,7 @@ func main() {
 // 但 GlobalEnabled=false 会把工具自造的 global 账号请求路由到 CN base（codebuddy.cn）而必然失败。
 // 与 cmd/signin、cmd/credit、cmd/trial 同风格：显式接线，避免 Producer 误读成「未适配」。
 func newUpstream(c *cfgFile) *upstream.Client {
+	upstream.ConfigureProxiesFromConfigFile("")
 	up := upstream.New()
 	up.GlobalEnabled = true
 	if c.Upstream.TimeoutSeconds > 0 {

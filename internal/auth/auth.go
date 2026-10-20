@@ -37,6 +37,19 @@ type Auth struct {
 	Nickname     string
 	FilePath     string // 来源文件；refresh 后原子写回此处
 
+	// ProxyName 账号级出口线路**名**（不是地址），来源 auth 文件顶层 `proxy` 字段，
+	// 由面板的「出口线路」功能写入；线路名 → 代理地址的映射在上游 config.json 的
+	// `proxies` 里。空 = 跟随进程级代理（WB_HTTP_PROXY / 环境变量）。
+	//
+	// 为什么存在这个字段：面板早就能给账号绑线路，但上游此前完全不读它 —— 于是
+	// 「每个号一条出口」只是界面上看起来生效，真正的对话流量还是全池共用宿主出口
+	// （多号同 IP 容易被平台关联）。现在上游按它选 transport（见 upstream.TransportFor）。
+	ProxyName string
+
+	// ProxySession 旧版 `{account}` 线路模板用的会话名（auth 文件顶层 proxy_session）。
+	// 面板存下来是为了「之后改昵称不换出口 IP」；为空时按昵称/uid 现算（见 SessionName）。
+	ProxySession string
+
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
@@ -419,6 +432,11 @@ func Parse(raw []byte) (*Auth, error) {
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用）。
 			// 放在 auth 段之外，手写时无需嵌进 auth 对象，降低配置门槛。
 			DeviceToken string `json:"device_token"`
+			// Proxy 顶层 proxy（线路名，面板写入；见 Auth.ProxyName）。
+			Proxy string `json:"proxy"`
+			// ProxySession 顶层 proxy_session：旧版 `{account}` 模板用的会话名。
+			// 面板存下来就为了「之后改昵称不换出口 IP」，所以优先用它渲染。
+			ProxySession string `json:"proxy_session"`
 			// Groups 顶层 groups（嵌套形与扁平形共用）：账号业务分组标签。
 			Groups []string `json:"groups"`
 			// 账号级流量整形（v0.1.3 移植）：顶层 weight/max_concurrency/min_interval。
@@ -441,6 +459,8 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID:   n.Account.EnterpriseID,
 			Nickname:       n.Account.Nickname,
 			DeviceToken:    n.DeviceToken,
+			ProxyName:      strings.TrimSpace(n.Proxy),
+			ProxySession:   strings.TrimSpace(n.ProxySession),
 			Groups:         normalizeGroups(n.Groups),
 			Weight:         n.Weight,
 			MaxConcurrency: n.MaxConcurrency,
@@ -458,6 +478,8 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID   string   `json:"enterpriseId"`
 			Nickname       string   `json:"nickname"`
 			DeviceToken    string   `json:"device_token"`
+			Proxy          string   `json:"proxy"`
+			ProxySession   string   `json:"proxy_session"`
 			Groups         []string `json:"groups"`
 			Weight         *float64 `json:"weight"`
 			MaxConcurrency int      `json:"max_concurrency"`
@@ -477,6 +499,8 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID:   f.EnterpriseID,
 			Nickname:       f.Nickname,
 			DeviceToken:    f.DeviceToken,
+			ProxyName:      strings.TrimSpace(f.Proxy),
+			ProxySession:   strings.TrimSpace(f.ProxySession),
 			Groups:         normalizeGroups(f.Groups),
 			Weight:         f.Weight,
 			MaxConcurrency: f.MaxConcurrency,
@@ -520,6 +544,12 @@ func (a *Auth) SaveAtomic() error {
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
+	}
+	// ProxyName 同理非空才写回：**刷新 token 会整份重建文件**，不保留就等于把面板
+	// 绑好的出口线路静默解绑（出口随之改变，而这类变化没人会发现）。空值不写，
+	// 避免在没绑线路的文件里引入空键。
+	if a.ProxyName != "" {
+		doc["proxy"] = a.ProxyName
 	}
 	// Groups 非空才写回顶层 groups（与 device_token 同策略：不给无该字段的旧文件引入空键）。
 	//
@@ -649,4 +679,48 @@ func normalizeModels(in []string) []string {
 		}
 	}
 	return out
+}
+
+// SessionName 这个账号在 `{account}` 线路模板里使用的会话名。
+//
+// 与面板 `config.route_session_name` 同一套规则（两边各有一份是因为跑在不同进程里）：
+//  1. 优先用存下来的 proxy_session（改昵称不会悄悄换掉出口 IP）；
+//  2. 否则按昵称生成 slug：只留 ASCII 字母数字、其余换 '-'、折叠连续 '-'、截断 24；
+//  3. slug 不足 3 个字符时退回 uid 前 8 位，再不行用 "acct"。
+//
+// 为什么必须有它：线路地址里的 `{account}` 是**模板**，`url.Parse` 会直接拒绝花括号
+// （invalid userinfo）。上游必须自己把它渲染成具体会话名再交给 http.Transport。
+func (a *Auth) SessionName() string {
+	if a == nil {
+		return "acct"
+	}
+	if s := strings.TrimSpace(a.ProxySession); s != "" {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range strings.ToLower(a.Nickname) {
+		if r < 128 && (r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	slug := b.String()
+	for strings.Contains(slug, "--") {
+		slug = strings.ReplaceAll(slug, "--", "-")
+	}
+	slug = strings.Trim(slug, "-")
+	if len(slug) > 24 {
+		slug = slug[:24]
+	}
+	if len(slug) >= 3 {
+		return slug
+	}
+	if uid := strings.TrimSpace(a.UID); uid != "" {
+		if len(uid) > 8 {
+			return uid[:8]
+		}
+		return uid
+	}
+	return "acct"
 }

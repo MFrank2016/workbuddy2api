@@ -231,6 +231,14 @@ func main() {
 	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
 		tr.ResponseHeaderTimeout = up.HeaderTimeout
 	}
+	// 账号级出口线路表（config.json 的 proxies 段 / WB2A_PROXIES）：
+	// 账号文件顶层的 `proxy` 写线路名，这里注入「线路名 → 代理地址」映射。
+	// 未绑线路的账号行为不变；绑了未配置的线路名时明确报错，不静默直连。
+	upstream.ConfigureProxies(cfg.Proxies)
+	if names := upstream.RouteNames(); len(names) > 0 {
+		log.Printf("出口线路已加载：%d 条（%s）—— 账号绑定的线路名按它解析",
+			len(names), strings.Join(names, ", "))
+	}
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints.Store(cfg.Features.SanitizeBlacklistFingerprints)

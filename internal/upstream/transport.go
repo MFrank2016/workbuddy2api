@@ -7,8 +7,13 @@ package upstream
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -85,6 +90,157 @@ func newTransport() *http.Transport {
 		IdleConnTimeout:       idleConnTimeout,
 		ResponseHeaderTimeout: responseHeaderTimeout,
 	}
+}
+
+// DirectRouteName 是账号级「强制直连」的保留线路名（issue #223）。
+//
+// 账号文件里的 proxy 为空表示「默认出口」= 可能走进程级环境代理；要表达
+// 「这个号绝不走代理」，需要显式写入 __direct__。保留名不能同时在 config.json
+// 的 proxies 里使用（ConfigureProxies 会忽略它），避免语义歧义。
+const DirectRouteName = "__direct__"
+
+var directTransport = sync.OnceValue(func() *http.Transport {
+	tr := newTransport()
+	// newTransport 默认跟随 HTTP(S)_PROXY；直连必须显式清空。空闲连接池与
+	// 其它线路分开（每个 Transport 自带池），不会把代理连接复用给直连。
+	tr.Proxy = nil
+	return tr
+})
+
+// ── 账号级出口线路（issue #210）──────────────────────────────────
+//
+// 面板早就能给账号绑一条命名线路（`auths/*.json` 顶层的 `proxy` 字段），但上游
+// 此前**完全不读**它：出站只有 `ProxyFromEnvironment`（进程级），于是所有账号共用
+// 宿主出口 IP —— 界面上看起来已经隔离，实际没有。多号同 IP 正是平台最容易关联的
+// 特征，所以这里按线路名构造并**分开缓存** Transport（连接池必须分开：共用一份会把
+// A 线路的空闲连接复用给 B 线路，出口照样会串）。
+//
+// 线路表来自 `config.json` 的 `proxies` 段（线路名 → 代理地址）。线路名查不到时
+// **明确报错、不静默直连** —— 静默直连会给出「以为隔离了其实没隔离」这个最坏结果。
+var routes = struct {
+	mu    sync.RWMutex
+	table map[string]string
+	cache map[string]*http.Transport
+}{table: map[string]string{}, cache: map[string]*http.Transport{}}
+
+// ConfigureProxies 注入「线路名 → 代理地址」表（main 启动时调用一次；传 nil 清空）。
+func ConfigureProxies(table map[string]string) {
+	routes.mu.Lock()
+	defer routes.mu.Unlock()
+	routes.table = map[string]string{}
+	// 清缓存：地址改了必须重建连接池，否则旧代理连接会继续用
+	routes.cache = map[string]*http.Transport{}
+	for name, addr := range table {
+		n := strings.TrimSpace(name)
+		v := strings.TrimSpace(addr)
+		// 保留名由 TransportFor 直接处理，不能出现在线路表里（否则一个名为
+		// __direct__ 的代理线路会被静默忽略，排障时找不到原因）。
+		if n != "" && n != DirectRouteName && v != "" {
+			routes.table[n] = v
+		}
+	}
+}
+
+// RouteNames 已配置的线路名（升序；供启动日志与排障）。
+func RouteNames() []string {
+	routes.mu.RLock()
+	defer routes.mu.RUnlock()
+	out := make([]string, 0, len(routes.table))
+	for name := range routes.table {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// normalizeProxyURL 归一化代理地址：`socks5h://` 与 `socks5://` 等价（Go 的 socks5
+// 拨号本身把域名交给代理解析），统一成 `socks5://`；其余 scheme 原样。
+func normalizeProxyURL(raw string) (*url.URL, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return nil, fmt.Errorf("empty proxy address")
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy address: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "socks5h":
+		u.Scheme = "socks5"
+	case "socks5", "http", "https":
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme %q (want http/https/socks5/socks5h)", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("proxy address has no host: %q", v)
+	}
+	return u, nil
+}
+
+// SessionPlaceholder 线路地址里的会话模板占位符（面板语义）。
+const SessionPlaceholder = "{account}"
+
+// TransportFor 返回线路名对应的出站 Transport：
+//   - 空名 → 默认（进程级环境代理，见 newTransport）
+//   - 已配置 → 该线路专属 Transport（按「线路名 + 会话名」缓存，连接池与默认分开）
+//   - 未配置 → error（不静默直连；错误里带线路名，便于对照 config.json）
+//
+// `session` 用于渲染地址里的 `{account}`：住宅代理把会话写进用户名，一个会话名粘一个
+// 出口 IP。地址里没有占位符时 session 被忽略（= 所有绑定账号共用一条出口）。
+//
+// 缓存键必须带上 session：同一个 `{account}` 线路对不同账号是不同的出口，共用一份
+// Transport 会把 A 号的空闲连接复用给 B 号，出口就串了。
+func TransportFor(name, session string) (*http.Transport, error) {
+	name = strings.TrimSpace(name)
+	if name == DirectRouteName {
+		// 强制直连：Proxy=nil，连接池独立缓存（sync.OnceValue）。
+		return directTransport(), nil
+	}
+	if name == "" {
+		return newTransport(), nil
+	}
+	routes.mu.RLock()
+	addr, ok := routes.table[name]
+	known := len(routes.table)
+	routes.mu.RUnlock()
+	if !ok {
+		if known == 0 {
+			return nil, fmt.Errorf("账号绑定了出口线路 %q，但上游没有配置任何线路"+
+				"（config.json 的 proxies 段）", name)
+		}
+		return nil, fmt.Errorf("未知的出口线路 %q（config.json 的 proxies 里没有它）", name)
+	}
+
+	rendered := addr
+	if strings.Contains(rendered, SessionPlaceholder) {
+		s := strings.TrimSpace(session)
+		if s == "" {
+			s = "acct"
+		}
+		rendered = strings.ReplaceAll(rendered, SessionPlaceholder, s)
+	}
+	key := name + "\x00" + rendered
+
+	routes.mu.RLock()
+	cached := routes.cache[key]
+	routes.mu.RUnlock()
+	if cached != nil {
+		return cached, nil
+	}
+
+	u, err := normalizeProxyURL(rendered)
+	if err != nil {
+		return nil, fmt.Errorf("出口线路 %q 的地址无效：%w", name, err)
+	}
+	tr := newTransport()
+	tr.Proxy = http.ProxyURL(u)
+	routes.mu.Lock()
+	if routes.cache == nil {
+		routes.cache = map[string]*http.Transport{}
+	}
+	routes.cache[key] = tr
+	routes.mu.Unlock()
+	return tr, nil
 }
 
 // closeIdler 实现该接口的 RoundTripper 支持清空空闲连接池（*http.Transport、

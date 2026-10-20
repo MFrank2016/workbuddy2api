@@ -41,6 +41,13 @@ type Config struct {
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 
+	// Proxies 账号级出口线路表：线路名 → 代理地址（http / https / socks5 / socks5h）。
+	//
+	// 面板会给账号绑一条线路（auths/*.json 顶层 `proxy` 写的是**线路名**），这个名字
+	// 在这里解析成地址；线路名查不到时上游**明确报错、不静默直连**（静默直连等于
+	// 「以为隔离了其实没隔离」，见 upstream.TransportFor）。
+	Proxies map[string]string `json:"proxies"`
+
 	// APIKeys 分组密钥表：每把密钥可绑定若干**业务分组**，请求命中该密钥时只在与
 	// 这些分组有交集的账号中选号。
 	//
@@ -536,6 +543,12 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_CREDIT_EXHAUSTED"); v != "" {
 		c.Pool.CreditExhausted = v
 	}
+	if v := strings.TrimSpace(os.Getenv("WB2A_PROXIES")); v != "" {
+		var table map[string]string
+		if err := json.Unmarshal([]byte(v), &table); err == nil {
+			c.Proxies = table
+		}
+	}
 	if v := os.Getenv("WB2A_ADMIN_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Admin.Enabled = b
@@ -663,6 +676,37 @@ func (c *Config) normalize() error {
 	}
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
+	}
+	// 出口线路表：名字与地址都去空白；scheme 只认 http/https/socks5/socks5h。
+	// 这里**启动即校验**：地址写错时让上游起不来（带明确提示），比跑起来以后每个
+	// 请求都失败容易发现得多；线路名查不到（账号引用了不存在的名字）则在用时明确报错。
+	if len(c.Proxies) > 0 {
+		clean := make(map[string]string, len(c.Proxies))
+		for name, addr := range c.Proxies {
+			n := strings.TrimSpace(name)
+			v := strings.TrimSpace(addr)
+			if n == "" || v == "" {
+				continue
+			}
+			// `{account}` 是会话模板占位符（面板支持），url.Parse 会因花括号报
+			// "invalid userinfo"。校验时先换成固定示例会话名，真实地址在
+			// TransportFor 里按账号渲染。
+			probe := strings.ReplaceAll(v, "{account}", "probe")
+			u, err := url.Parse(probe)
+			if err != nil {
+				return fmt.Errorf("proxies[%s]: %w", n, err)
+			}
+			switch strings.ToLower(u.Scheme) {
+			case "http", "https", "socks5", "socks5h":
+			default:
+				return fmt.Errorf("proxies[%s]: 不支持的协议 %q（只能是 http/https/socks5/socks5h）", n, u.Scheme)
+			}
+			if u.Host == "" {
+				return fmt.Errorf("proxies[%s]: 地址缺少主机名（%q）", n, v)
+			}
+			clean[n] = v
+		}
+		c.Proxies = clean
 	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)

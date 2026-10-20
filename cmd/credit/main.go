@@ -42,6 +42,7 @@ func main() {
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		authDir = v
 	}
+	upstream.ConfigureProxiesFromConfigFile("")
 	up := upstream.New()
 	up.GlobalEnabled = true // 允许按 realm 路由：global 账查积分走 workbuddy.ai
 	accounts := collect(authDir, up)
