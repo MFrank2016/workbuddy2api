@@ -75,6 +75,7 @@ func TestNextWakeCatSlot(t *testing.T) {
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
 		CatHours:          []int{1},
+		GrowthDisabled:    true, // 本测试聚焦 cat 槽位；growth 同点默认 [1] 会并入并集
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 14, 23, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 15, 1, 0, 0, 0, time.Local); !at.Equal(want) {

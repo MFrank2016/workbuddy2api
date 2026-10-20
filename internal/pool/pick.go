@@ -418,7 +418,8 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	// 不用就作废。creditsExpiring 占总量比例越高，越应优先被消耗——把"快过期
 	// 占比"作为一个独立的强权重项（×expiringWeight），让快过期积分多的号优先选。
 	// 与成本分层（costTier 优先免费）正交：那是按"实测扣费"分层，这是按"过期紧迫度"。
-	if e.credits > 0 && e.creditsExpiring > 0 {
+	// prefer_expiring=false（SetPreferExpiring，panel 开关）时不叠此项，退回普通权重。
+	if p.preferExpiring && e.credits > 0 && e.creditsExpiring > 0 {
 		w += float64(e.creditsExpiring) / float64(e.credits) * expiringWeight
 	}
 	// 2. 闲置补偿。

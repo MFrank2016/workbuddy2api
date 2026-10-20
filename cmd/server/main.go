@@ -172,6 +172,7 @@ func main() {
 	// 「硬冷却到次日 04:00」旧行为；配了就只退出这一小段再回候选池。
 	p.SetCreditExhausted(cfg.CreditExhaustedDur)
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
+	p.SetPreferExpiring(cfg.Pool.PreferExpiring)         // 最早到期优先路由（panel prefer_expiring，默认 true）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	// 账号级流量整形 + 全池并发闸（config pool.weight_default 等，默认无此功能）。
 	// 必须与既有 entry 重算生效值（SetThrottleDefaults 内部遍历 byUID 重算）。
@@ -268,6 +269,7 @@ func main() {
 		KeepaliveHours:      cfg.Schedule.KeepaliveHours,
 		SchoolHours:         cfg.Schedule.SchoolHours,
 		CatHours:            cfg.Schedule.CatHours,
+		GrowthHours:         cfg.Schedule.GrowthHours,
 		ActivityReportCount: cfg.Schedule.ActivityReportCount,
 		// 触发时刻抖动窗口（schedule.jitter_minutes，0 = 精确整点 = 旧行为）。
 		JitterMinutes: cfg.Schedule.JitterMinutes,
@@ -290,6 +292,7 @@ func main() {
 		KeepaliveDisabled: !cfg.Schedule.KeepaliveEnabled,
 		SchoolDisabled:    !cfg.Schedule.SchoolEnabled,
 		CatDisabled:       !cfg.Schedule.CatEnabled,
+		GrowthDisabled:    !cfg.Schedule.GrowthEnabled,
 		// 保号类任务是否覆盖禁用账号（panel 语义：禁用只关选号，不停保号）。
 		IncludeDisabledInTasks: cfg.Schedule.IncludeDisabledInTasks,
 		// 签到结束即落盘：手动入口与定时排程都走 CheckinAll，挂钩一处两条路径全覆盖。
@@ -416,7 +419,8 @@ func main() {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
 		},
 	})
-	// 签到完成后自动执行成长任务队列（面板任务中心同管线；异步，不阻塞签到）。
+	// 成长任务队列（面板任务中心同管线）：独立排程（schedule.growth_hours，默认
+	// 01:00），到点由 scheduler.dispatch 调用；回调内部异步启动，不等执行完。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 
 	h := server.NewHandler(server.Config{
@@ -617,6 +621,16 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetThrottleDefaults(newCfg.Pool.WeightDefault, newCfg.Pool.MaxConcurrencyDefault, newCfg.Pool.MinIntervalDefault, newCfg.Pool.MaxTotalConcurrency)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
+	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
+	sch.Reconfigure(
+		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours, newCfg.Schedule.ActivityHours,
+		newCfg.Schedule.KeepaliveHours, newCfg.Schedule.SchoolHours, newCfg.Schedule.CatHours,
+		newCfg.Schedule.GrowthHours,
+		!newCfg.Schedule.CheckinEnabled, !newCfg.Schedule.TravelEnabled, !newCfg.Schedule.ActivityEnabled,
+		!newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.SchoolEnabled, !newCfg.Schedule.CatEnabled,
+		!newCfg.Schedule.GrowthEnabled,
+	)
+	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.SetBalanceInterval(balanceIntervalFor(newCfg))
 	return restartRequiredFields(), nil
 }

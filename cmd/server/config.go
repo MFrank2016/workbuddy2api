@@ -244,6 +244,9 @@ type Config struct {
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
 		// 的积分被标记为"快过期"，选号优先消耗（issue:积分过期）。空/0 = 禁用分桶。
 		ExpiringSoon string `json:"expiring_soon"`
+		// PreferExpiring 最早到期优先路由开关（panel prefer_expiring，默认 true）：
+		// 开启时账号的"快过期积分占比"参与选号权重加成；false = 关闭加成（普通权重）。
+		PreferExpiring bool `json:"prefer_expiring"`
 		// CreditExhausted 积分耗尽后的冷却时长（如 "10m"）。空 = 旧行为：硬冷却到次日 04:00
 		// （等签到恢复）。配了就只退出这一小段，到期回到候选池（issue #78）。
 		CreditExhausted string `json:"credit_exhausted"`
@@ -338,6 +341,7 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
+	c.Pool.PreferExpiring = true // 缺省开启：奖励积分优先在过期前消耗
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
 	c.SessionSticky.Enabled = true

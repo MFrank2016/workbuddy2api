@@ -19,7 +19,7 @@ func onlyCheckin(hours []int, jitter int) *Scheduler {
 	return New(Config{
 		CheckinHours: hours, JitterMinutes: jitter,
 		TravelDisabled: true, ActivityDisabled: true, KeepaliveDisabled: true,
-		SchoolDisabled: true, CatDisabled: true,
+		SchoolDisabled: true, CatDisabled: true, GrowthDisabled: true,
 	})
 }
 

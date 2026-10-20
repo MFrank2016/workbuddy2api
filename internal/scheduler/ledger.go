@@ -92,12 +92,17 @@ func kindByName(name string) (taskKind, bool) {
 		return taskSchool, true
 	case "cat":
 		return taskCat, true
+	case "growth":
+		return taskGrowth, true
 	}
 	return 0, false
 }
 
-// kindDisabled 该类任务是否已被显式禁用。
+// kindDisabled 该类任务是否已被显式禁用（排程参数可被 Reconfigure 热改，
+// 读取在 schedMu 下快照；调用方 nextWake 不持锁，无重入）。
 func (s *Scheduler) kindDisabled(k taskKind) bool {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
 	switch k {
 	case taskCheckin:
 		return s.cfg.CheckinDisabled
@@ -111,6 +116,8 @@ func (s *Scheduler) kindDisabled(k taskKind) bool {
 		return s.cfg.SchoolDisabled
 	case taskCat:
 		return s.cfg.CatDisabled
+	case taskGrowth:
+		return s.cfg.GrowthDisabled
 	}
 	return true
 }

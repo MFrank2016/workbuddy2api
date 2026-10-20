@@ -54,6 +54,9 @@ type Pool struct {
 	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
+	// preferExpiring 最早到期优先路由开关（SetPreferExpiring 注入；缺省 true）。
+	// 关闭时 weightOf 不再叠加快过期积分占比项（选号退回普通权重）。
+	preferExpiring bool
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
@@ -102,6 +105,7 @@ func New(stateFp string) *Pool {
 		breakerCooldownMax: defaultBreakerCooldownMax,
 		idleWeightPerHour:  defaultIdleWeightPerHour,
 		idleWeightMax:      defaultIdleWeightMax,
+		preferExpiring:     true,
 		degradeThreshold:   defaultDegradeThreshold,
 		degradeCooldown:    defaultDegradeCooldown,
 		degradeCooldownMax: defaultDegradeCooldownMax,
@@ -207,6 +211,14 @@ func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
 	if idleMax > 0 {
 		p.idleWeightMax = idleMax
 	}
+}
+
+// SetPreferExpiring 注入最早到期优先路由开关（main 从 config 解析后调用）：
+// 关闭后 weightOf 不再叠加快过期积分占比项，选号退回普通权重。
+func (p *Pool) SetPreferExpiring(enabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.preferExpiring = enabled
 }
 
 // SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。

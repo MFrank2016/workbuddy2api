@@ -69,6 +69,7 @@ func TestNextWakeSameInstantFiresAll(t *testing.T) {
 		ActivityDisabled: true,
 		SchoolDisabled:   true,
 		CatDisabled:      true,
+		GrowthDisabled:   true,
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
@@ -123,7 +124,7 @@ func TestNextWakeKeepaliveDisabled(t *testing.T) {
 	}
 }
 
-// TestNextWakeBothDisabledNothingScheduled 六类任务都显式禁用 → 无可唤醒时点。
+// TestNextWakeBothDisabledNothingScheduled 七类任务都显式禁用 → 无可唤醒时点。
 func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	s := New(Config{
 		CheckinDisabled:   true,
@@ -132,6 +133,7 @@ func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 		KeepaliveDisabled: true,
 		SchoolDisabled:    true,
 		CatDisabled:       true,
+		GrowthDisabled:    true,
 		CheckinHours:      []int{9, 21},
 		KeepaliveHours:    []int{22},
 	})
@@ -141,7 +143,7 @@ func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	}
 }
 
-// TestRunAllDisabledNoSpinNoCalls 六类任务全禁用：Run 不空转（只等退出信号），
+// TestRunAllDisabledNoSpinNoCalls 全部任务禁用：Run 不空转（只等退出信号），
 // 且不能触发任何上游请求。
 func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
 	var calls atomic.Int32
@@ -167,6 +169,7 @@ func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
 		KeepaliveDisabled: true,
 		SchoolDisabled:    true,
 		CatDisabled:       true,
+		GrowthDisabled:    true,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
@@ -176,13 +179,36 @@ func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if calls.Load() != 0 {
-		t.Errorf("upstream calls=%d want 0（六类全禁用）", calls.Load())
+		t.Errorf("upstream calls=%d want 0（全部任务禁用）", calls.Load())
 	}
 	if elapsed < 200*time.Millisecond {
 		t.Errorf("Run returned after %v, before ctx done（不应提前返回）", elapsed)
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("Run took %v（不应空转/忙等）", elapsed)
+	}
+}
+
+// TestNextWakeGrowthSlot growth 排程进候选 + 禁用退场（每日自动执行成长任务队列）。
+func TestNextWakeGrowthSlot(t *testing.T) {
+	s := New(Config{GrowthHours: []int{1}})
+	at, kinds := s.nextWake(time.Date(2026, 9, 27, 0, 10, 0, 0, time.Local))
+	hasGrowth := false
+	for _, k := range kinds {
+		if k == taskGrowth {
+			hasGrowth = true
+		}
+	}
+	if !hasGrowth || at.Hour() != 1 || at.Day() != 27 {
+		t.Fatalf("growth 槽位: at=%v kinds=%v（期望 09-27 01:00 含 taskGrowth）", at, kinds)
+	}
+	// 禁用后不进候选（其它任务类不受影响）。
+	s2 := New(Config{GrowthHours: []int{1}, GrowthDisabled: true})
+	_, kinds2 := s2.nextWake(time.Date(2026, 9, 27, 0, 10, 0, 0, time.Local))
+	for _, k := range kinds2 {
+		if k == taskGrowth {
+			t.Fatal("禁用后 growth 仍在候选")
+		}
 	}
 }
 

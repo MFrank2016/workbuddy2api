@@ -81,6 +81,19 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 	}
 }
 
+// ClearExpiringSnapshots 清空所有账号的快过期/最早到期缓存。配置窗口改变时调用，
+// 避免在新快照写入前继续使用旧窗口得到的路由数据；下一次签到或余额刷新会重建。
+func (p *Pool) ClearExpiringSnapshots() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, e := range p.byUID {
+		e.creditsExpiring = 0
+		e.creditsEarliestExpiry = time.Time{}
+		e.creditsEarliestRemaining = 0
+	}
+	p.dirty.Store(true)
+}
+
 // CooldownSoftForModel 429 的**模型级**软冷却入口（issue #31）：把该模型的冷却截止
 // 精确对齐到上游重置墙钟（不做指数堆加、不做 softStreak 计数）。
 //
