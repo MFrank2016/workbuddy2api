@@ -872,3 +872,35 @@ func (r *Recorder) AccountModelUsage(w Window) []AccountModelUsage {
 	})
 	return out
 }
+
+// AccountCredit 返回窗口内每个账号的 usage.credit 累计（账号日限额判定用）。
+func (r *Recorder) AccountCredit(w Window) map[string]float64 {
+	if r == nil {
+		return nil
+	}
+	from, to := w.bounds()
+	r.mu.Lock()
+	bs := make([]bucket, 0, len(r.buckets))
+	for _, b := range r.buckets {
+		bs = append(bs, *b)
+	}
+	r.mu.Unlock()
+	out := map[string]float64{}
+	for i := range bs {
+		b := &bs[i]
+		if !from.IsZero() || !to.IsZero() {
+			ts, ok := bucketTime(b.Scope)
+			if !ok {
+				continue
+			}
+			if !from.IsZero() && ts.Before(from) {
+				continue
+			}
+			if !to.IsZero() && ts.After(to) {
+				continue
+			}
+		}
+		out[b.UID] += b.CR
+	}
+	return out
+}

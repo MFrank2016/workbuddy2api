@@ -388,3 +388,14 @@ func TestAccountModelUsage(t *testing.T) {
 		t.Fatalf("byUID=%v", byUID)
 	}
 }
+
+func TestAccountCredit(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "m", Delta{Credit: 1.5, HasCredit: true, TotalTokens: 10, HasTotal: true}, true)
+	r.Add(now, "cn", "u1", "m", Delta{Credit: 2.5, HasCredit: true, TotalTokens: 10, HasTotal: true}, true)
+	got := r.AccountCredit(Window{Hours: 24})
+	if got["u1"] != 4.0 {
+		t.Fatalf("account credit=%v want u1=4", got)
+	}
+}

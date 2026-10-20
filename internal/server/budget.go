@@ -36,6 +36,12 @@ var cstZone = time.FixedZone("CST", 8*60*60)
 // cstDay 返回 t 落在哪个 CST 自然日（"2006-01-02"），用作计数器的归属日。
 func cstDay(t time.Time) string { return t.In(cstZone).Format("2006-01-02") }
 
+// cstDayStart 返回 t 所在 CST 自然日的 00:00（账号日限额的当日起点）。
+func cstDayStart(t time.Time) time.Time {
+	t = t.In(cstZone)
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, cstZone)
+}
+
 // dailyBudget 当日积分预算闸。并发安全（对话请求会并发读它）。
 type dailyBudget struct {
 	mu       sync.Mutex

@@ -20,6 +20,7 @@ import (
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/usage"
 )
 
 // TestMain 默认关闭聊天表格日志（chatLogEnabled=false），消除 go test 期间的 stdout 噪音。
@@ -2945,5 +2946,54 @@ func TestChatModelEntitlement11158(t *testing.T) {
 	h.ServeHTTP(rec2, httptest.NewRequest("GET", "/status", nil))
 	if !strings.Contains(rec2.Body.String(), "model_entitlements") {
 		t.Fatalf("/status 应包含 model_entitlements: %s", rec2.Body)
+	}
+}
+
+// TestChatAccountDailyCreditLimitSkipsBlocked 账号当日 credit 触顶 → 本轮跳过该账号。
+func TestChatAccountDailyCreditLimitSkipsBlocked(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at-u1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at-u2", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("u1", 2000)
+	p.SetCredits("u2", 1000)
+	rec := usage.New("")
+	rec.Add(time.Now(), "cn", "u1", "glm-5.2", usage.Delta{Credit: 100, HasCredit: true, TotalTokens: 10, HasTotal: true}, true)
+	h := NewHandler(Config{Pool: p, Upstream: up, Usage: rec, AccountDailyCreditLimit: 100})
+
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec2.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec2.Code, rec2.Body)
+	}
+	if calls["Bearer at-u1"] != 0 || calls["Bearer at-u2"] != 1 {
+		t.Fatalf("calls=%v want u1=0 u2=1", calls)
+	}
+}
+
+// TestChatAccountDailyLimitAllBlocked 全部账号触顶 → 429 daily_limit_exceeded，零上游。
+func TestChatAccountDailyLimitAllBlocked(t *testing.T) {
+	var calls atomic.Int32
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls.Add(1)
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	rec := usage.New("")
+	rec.Add(time.Now(), "cn", "u1", "glm-5.2", usage.Delta{Credit: 50, HasCredit: true, TotalTokens: 5, HasTotal: true}, true)
+	h := NewHandler(Config{Pool: p, Upstream: up, Usage: rec, AccountDailyCreditLimit: 50})
+
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec2.Code != http.StatusTooManyRequests || !strings.Contains(rec2.Body.String(), "daily_limit_exceeded") {
+		t.Fatalf("code=%d body=%s", rec2.Code, rec2.Body)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("触顶请求不应触达上游: calls=%d", calls.Load())
 	}
 }

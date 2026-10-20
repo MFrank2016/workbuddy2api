@@ -74,6 +74,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 | `api_keys[].models` / `api_keys[].realm` | 空 | 密钥级模型白名单（`*` 通配）与域绑定；不匹配本地 400 |
 | `auth.disabled_models`（auth 文件） | 空 | 账号级禁用模型（`*` 通配），选号跳过 |
 | `pool.account_fault_hold` / `account_fault_disable_after` | `"24h"` / `3` | 11140 风控处置：长冷却后自动重试，连续 N 次升级禁用；`"0"` = 立即禁用 |
+| `pool.account_daily_credit_limit` | `0` | 单账号当日 credit 上限；`0` = 关闭（达到后当日不参与选号） |
 
 ### 其他社区前端面板
 

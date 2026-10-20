@@ -130,6 +130,10 @@ type Config struct {
 	// 由 main 在启动期构造（NewAuditLog 会做可写性预检并 fail-fast）。
 	Audit *AuditLog
 
+	// AccountDailyCreditLimit 单账号当日 credit 上限（pool.account_daily_credit_limit）；
+	// <=0 = 关闭。达到上限的账号当日不再参与选号（吸收自 hub 的账号限额护栏）。
+	AccountDailyCreditLimit float64
+
 	// BudgetLimit 当日累计 credit 上限（config budget.daily_credit_limit）。
 	// <=0 = 关闭该闸（不限），行为与引入前逐字一致。计数按 CST 自然日重置、
 	// 进程内不落盘（见 budget.go）。
@@ -502,6 +506,8 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// 账号日限额（pool.account_daily_credit_limit，0 = 关闭）：面板/运维可见。
+		"account_daily_credit_limit": h.cfg.AccountDailyCreditLimit,
 		// credit_floor 积分保底（panel）：账号触底后不接实测收费模型；0 = 关闭。显式写出。
 		"credit_floor": h.cfg.Pool.CreditFloor(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
@@ -922,6 +928,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tried := map[string]bool{}
+	// 账号日限额（pool.account_daily_credit_limit，0 = 关闭）：当日 credit 已达上限的
+	// 账号本轮不参与选号；全部触顶时末端回 429 daily_limit_exceeded。
+	var dailyLimited bool
+	blockedByDaily := 0
+	if h.cfg.AccountDailyCreditLimit > 0 && h.cfg.Usage != nil {
+		used := h.cfg.Usage.AccountCredit(usage.Window{From: cstDayStart(time.Now())})
+		for uid, c := range used {
+			if c >= h.cfg.AccountDailyCreditLimit {
+				tried[uid] = true
+				blockedByDaily++
+			}
+		}
+	}
 	var lastErr error
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
@@ -986,6 +1005,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.cfg.Session.Unbind(stickyKey)
 			stickyUID = ""
 		}
+	}
+	// 粘性号若已触达当日限额（tried 预置），解绑避免钉死。
+	if stickyUID != "" && tried[stickyUID] {
+		unbindSticky()
 	}
 	// fail 在轮转失败分支统一：释放租约 + 若失败号正是粘性号则解绑（下次请求重新分配）。
 	fail := func(uid string) {
@@ -1170,6 +1193,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
+			if blockedByDaily > 0 {
+				dailyLimited = true
+			}
 			// 记下"是不是模型级阻塞"。选号返回 nil 有两种完全不同的成因：
 			//   (a) 池子真的没有可用号（账号级冷却/在途占满/积分保底）；
 			//   (b) 号都在，但每个号都对这个模型处于模型级冷却（11102/6004）。
@@ -1555,6 +1581,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(lastErr, errUpstreamTimeout) {
 		code = "upstream_timeout"
 		msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
+	}
+	if lastErr == nil && dailyLimited {
+		status = http.StatusTooManyRequests
+		code = "daily_limit_exceeded"
+		msg = "all accounts reached their daily credit limit (pool.account_daily_credit_limit); retry after the CST daily reset"
 	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定（11133/11135
 	// 在 hint 层自带形态判定，ErrClient 家族也能带上 hint）；本地调度类错误

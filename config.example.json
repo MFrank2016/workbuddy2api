@@ -135,6 +135,7 @@
     "idle_weight_max": 5.0,
     "expiring_soon": "168h",
     "prefer_expiring": true,
+    "account_daily_credit_limit": 0,
     "account_fault_hold": "24h",
     "account_fault_disable_after": 3,
     "cost_explore_interval": "30m",

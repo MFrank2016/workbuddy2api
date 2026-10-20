@@ -299,6 +299,9 @@ type Config struct {
 		// CreditFloor 积分保底：账号余额低于该值时，对实测收费模型不再参与选号
 		// （防止收费请求把余额打穿、连免费模型都冷却到次日签到）。0 = 关闭（默认）。
 		CreditFloor int64 `json:"credit_floor"`
+		// AccountDailyCreditLimit 单账号当日 credit 上限（0 = 关闭）：达到上限的账号
+		// 当日不再参与选号（吸收自 hub 的账号限额护栏）。
+		AccountDailyCreditLimit float64 `json:"account_daily_credit_limit"`
 		// AccountFaultHold 11140 账号级风控处置：长冷却时长（默认 "24h"）；
 		// "0" = 立即永久禁用（旧行为）。
 		AccountFaultHold string `json:"account_fault_hold"`
@@ -728,6 +731,9 @@ func (c *Config) normalize() error {
 	}
 	if c.Panel.SessionHours <= 0 {
 		c.Panel.SessionHours = 24
+	}
+	if c.Pool.AccountDailyCreditLimit < 0 {
+		c.Pool.AccountDailyCreditLimit = 0 // 负值视为关闭
 	}
 	// 国内版对话上游覆盖：空 = 内置默认；非空必须是 http(s) URL。
 	if v := strings.TrimSpace(c.Upstream.CNChatBase); v != "" {
