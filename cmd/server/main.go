@@ -225,6 +225,12 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	up.GlobalEnabled = cfg.Global.Enabled
+	// 聊天 SSE 同账号瞬时重试（upstream.retry_*，默认关 = 行为逐字一致）。
+	up.Retry = upstream.RetryConfig{
+		Enabled:  cfg.Upstream.RetryEnabled,
+		Attempts: cfg.Upstream.RetryAttempts,
+		Backoff:  time.Duration(cfg.Upstream.RetryBackoff * float64(time.Second)),
+	}
 
 	// 签到历史落盘（GET /v1/checkin/history 的数据源）。此前签到结果只活在
 	// POST /v1/checkin 的 HTTP 响应里——刷新页面即失忆，自动 9/21 那趟更是完全
