@@ -595,6 +595,18 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			}
 			oc.Status, oc.Detail = CheckinSkipped, "global"
 			skipN++
+			// 签到仍然跳过（global 没有签到体系），但**只读**余额必须刷新：
+			// 否则 pool 里的 credits 恒 0，weightOf 的「余额 / 快过期」两个
+			// 因子对 global 完全失效，选号退化成纯轮询（issue #228）。
+			// UserResourceDetailedWithExpiry 只调 billing/meter 只读接口，
+			// 不碰签到，风控语义与 D4 门控一致。
+			if remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, s.cfg.ExpiringSoonWindow); err != nil {
+				log.Printf("user-resource(global) %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+			} else {
+				s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
+				s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
+				oc.Credits = &remain
+			}
 			out = append(out, oc)
 			continue
 		}

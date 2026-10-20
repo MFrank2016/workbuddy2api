@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -53,14 +54,16 @@ func TestGlobalAccountSkippedListedWithStatus(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		http.Error(w, "no upstream call expected for global", 404)
+		w.Header().Set("Content-Type", "application/json")
+		// 只读余额查询要成功，避免 404 触发 /v2 → fallback 的第二次请求。
+		_, _ = io.WriteString(w, `{"Response":{"Data":{"Accounts":[{"CapacityRemain":100}]}}}`)
 	}))
 	defer srv.Close()
 
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
 		Domain: "www.workbuddy.ai"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, BillingBaseGlobal: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 
 	out, err := s.CheckinAll()
@@ -76,8 +79,10 @@ func TestGlobalAccountSkippedListedWithStatus(t *testing.T) {
 	if out[0].Detail != "global" {
 		t.Errorf("detail=%q want global", out[0].Detail)
 	}
-	if calls.Load() != 0 {
-		t.Errorf("upstream calls=%d want 0", calls.Load())
+	// issue #228：global 不签到、不旅行，但会做**一次只读余额查询**
+	// （否则 pool credits 恒 0，权重里的余额因子失效）。
+	if calls.Load() != 1 {
+		t.Errorf("upstream calls=%d want 1（仅只读余额查询）", calls.Load())
 	}
 }
 
