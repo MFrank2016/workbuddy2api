@@ -58,3 +58,10 @@ docs/
 *.zip
 server.exe
 .DS_Store
+
+# 本地源码构建产物（`go build ./...` 不带 -o 时落在仓库根，体积大且不可复现）
+/server
+/agentcfg
+
+# 编码代理（oh-my-opencode）的运行时状态
+/.omo/
