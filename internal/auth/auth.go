@@ -60,6 +60,20 @@ type Auth struct {
 	// *Auth 指针，而不是改这个字段），故不纳入 a.mu 保护 —— 与 realm 不同
 	// （realm 会被 RefreshToken 在锁内改写）。
 	Groups []string
+	// Weight 账号级选号权重显式值（乘子）。**指针语义**：nil = 未配置，回落
+	// pool.weight_default（默认 1.0 = 等价纯三因子权重，行为逐字一致）；
+	// 显式 0 = 只读备用（不参与自动轮转）。json.Unmarshal 缺键 → nil，
+	// 显式 0 → 非 nil 指针——这是「未配置」与「显式停用」的唯一可靠区分。
+	// 与 Groups 同生命周期：仅 Parse/LoadDir 赋值一次，其后只读，不纳入 a.mu。
+	Weight *float64 `json:"weight"`
+	// MaxConcurrency 账号级并发上限显式值。0/缺键 = 未配置，回落
+	// pool.max_concurrency_default（默认 0 = 不限）。0 本身就是「不限」，
+	// 无歧义，用 flat 零值。生命周期同 Weight。
+	MaxConcurrency int `json:"max_concurrency"`
+	// MinInterval 账号级最小请求间隔显式值（秒）。0/缺键 = 未配置，回落
+	// pool.min_interval_default（默认 0 = 不限）。软约束：全部被限住时回落
+	// LRU 兜底，不报「暂无可用账号」。生命周期同 Weight。
+	MinInterval float64 `json:"min_interval"`
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -248,6 +262,36 @@ func (a *Auth) GroupsValue() []string {
 	return out
 }
 
+// WeightValue 返回账号权重显式值与其「已配置」标志：configured=false 时
+// 调用方（pool）应回落池级默认。weight 只在 Parse 赋值一次、其后只读，
+// 与 GroupsValue 同生命周期（不纳入 a.mu），读指针值无需加锁。
+func (a *Auth) WeightValue() (float64, bool) {
+	if a == nil || a.Weight == nil {
+		return 0, false
+	}
+	return *a.Weight, true
+}
+
+// MaxConcurrencyValue 返回账号并发上限显式值（0 = 未配置，回落池级默认）。
+func (a *Auth) MaxConcurrencyValue() int {
+	if a == nil {
+		return 0
+	}
+	return a.MaxConcurrency
+}
+
+// MinIntervalValue 返回账号最小间隔显式值（秒，0 = 未配置，回落池级默认）。
+func (a *Auth) MinIntervalValue() float64 {
+	if a == nil {
+		return 0
+	}
+	return a.MinInterval
+}
+
+// MatchesGroups 报告本账号对「允许分组」是否可见：
+//
+//	want 为空    → 恒 true（不限分组：主密钥 / 未配置 groups 的密钥语义）
+
 // MatchesGroups 报告本账号对「允许分组」是否可见：
 //
 //	want 为空    → 恒 true（不限分组：主密钥 / 未配置 groups 的密钥语义）
@@ -348,49 +392,63 @@ func Parse(raw []byte) (*Auth, error) {
 			DeviceToken string `json:"device_token"`
 			// Groups 顶层 groups（嵌套形与扁平形共用）：账号业务分组标签。
 			Groups []string `json:"groups"`
+			// 账号级流量整形（v0.1.3 移植）：顶层 weight/max_concurrency/min_interval。
+			// weight 用 *float64：缺键 nil = 回落池级默认，显式 0 = 只读备用。
+			Weight         *float64 `json:"weight"`
+			MaxConcurrency int      `json:"max_concurrency"`
+			MinInterval    float64  `json:"min_interval"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
 		}
 		a = Auth{
-			AccessToken:  n.Auth.AccessToken,
-			RefreshToken: n.Auth.RefreshToken,
-			ExpiresAt:    n.Auth.ExpiresAt,
-			Domain:       n.Auth.Domain,
-			realm:        n.Auth.Realm,
-			UID:          n.Account.UID,
-			EnterpriseID: n.Account.EnterpriseID,
-			Nickname:     n.Account.Nickname,
-			DeviceToken:  n.DeviceToken,
-			Groups:       normalizeGroups(n.Groups),
+			AccessToken:    n.Auth.AccessToken,
+			RefreshToken:   n.Auth.RefreshToken,
+			ExpiresAt:      n.Auth.ExpiresAt,
+			Domain:         n.Auth.Domain,
+			realm:          n.Auth.Realm,
+			UID:            n.Account.UID,
+			EnterpriseID:   n.Account.EnterpriseID,
+			Nickname:       n.Account.Nickname,
+			DeviceToken:    n.DeviceToken,
+			Groups:         normalizeGroups(n.Groups),
+			Weight:         n.Weight,
+			MaxConcurrency: n.MaxConcurrency,
+			MinInterval:    n.MinInterval,
 		}
 	} else {
 		var f struct {
-			AccessToken  string   `json:"accessToken"`
-			RefreshToken string   `json:"refreshToken"`
-			ExpiresAt    int64    `json:"expiresAt"`
-			Domain       string   `json:"domain"`
-			Realm        string   `json:"realm"`
-			UID          string   `json:"uid"`
-			EnterpriseID string   `json:"enterpriseId"`
-			Nickname     string   `json:"nickname"`
-			DeviceToken  string   `json:"device_token"`
-			Groups       []string `json:"groups"`
+			AccessToken    string   `json:"accessToken"`
+			RefreshToken   string   `json:"refreshToken"`
+			ExpiresAt      int64    `json:"expiresAt"`
+			Domain         string   `json:"domain"`
+			Realm          string   `json:"realm"`
+			UID            string   `json:"uid"`
+			EnterpriseID   string   `json:"enterpriseId"`
+			Nickname       string   `json:"nickname"`
+			DeviceToken    string   `json:"device_token"`
+			Groups         []string `json:"groups"`
+			Weight         *float64 `json:"weight"`
+			MaxConcurrency int      `json:"max_concurrency"`
+			MinInterval    float64  `json:"min_interval"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
 		}
 		a = Auth{
-			AccessToken:  f.AccessToken,
-			RefreshToken: f.RefreshToken,
-			ExpiresAt:    f.ExpiresAt,
-			Domain:       f.Domain,
-			realm:        f.Realm,
-			UID:          f.UID,
-			EnterpriseID: f.EnterpriseID,
-			Nickname:     f.Nickname,
-			DeviceToken:  f.DeviceToken,
-			Groups:       normalizeGroups(f.Groups),
+			AccessToken:    f.AccessToken,
+			RefreshToken:   f.RefreshToken,
+			ExpiresAt:      f.ExpiresAt,
+			Domain:         f.Domain,
+			realm:          f.Realm,
+			UID:            f.UID,
+			EnterpriseID:   f.EnterpriseID,
+			Nickname:       f.Nickname,
+			DeviceToken:    f.DeviceToken,
+			Groups:         normalizeGroups(f.Groups),
+			Weight:         f.Weight,
+			MaxConcurrency: f.MaxConcurrency,
+			MinInterval:    f.MinInterval,
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {

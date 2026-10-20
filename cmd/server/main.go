@@ -167,6 +167,9 @@ func main() {
 	p.SetCreditExhausted(cfg.CreditExhaustedDur)
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
+	// 账号级流量整形 + 全池并发闸（config pool.weight_default 等，默认无此功能）。
+	// 必须与既有 entry 重算生效值（SetThrottleDefaults 内部遍历 byUID 重算）。
+	p.SetThrottleDefaults(cfg.Pool.WeightDefault, cfg.Pool.MaxConcurrencyDefault, cfg.Pool.MinIntervalDefault, cfg.Pool.MaxTotalConcurrency)
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router

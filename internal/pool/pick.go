@@ -51,6 +51,11 @@ func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
+	// 全池并发闸快速预筛：顶满时本次选号直接放弃（handler 回 503）。权威判定
+	// 在 Acquire（CAS），这里只是避免无谓轮转。maxTotalConcurrency==0 恒通过。
+	if p.maxTotalConcurrency > 0 && p.totalInFlight.Load() >= int64(p.maxTotalConcurrency) {
+		return nil
+	}
 	// 惰性清理过期的 6004 模型级冷却与成本台账（两者的 map 都不无限膨胀；
 	// status 只读遍历天然跳过过期项，但内存条目必须在此真正删除）。
 	for _, e := range p.byUID {
@@ -70,6 +75,9 @@ func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups 
 		}
 		if !healthyOf(e) {
 			continue
+		}
+		if p.effectiveWeight(e) == 0 {
+			continue // weight=0：只读备用，不参与自动轮转（v0.1.3 throttle）
 		}
 		if p.inFlightFull(e) {
 			continue // 在途占满：跳过（max=0 不限时不触发）
@@ -154,7 +162,9 @@ func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups 
 	for _, e := range cands {
 		ti, ci := costTier(e)
 		if ti == bestTier {
-			ws = append(ws, weighted{e: e, w: p.weightOf(e, maxCredits, now), tier: ti, cost1k: ci})
+			// weightMul（账号级流量整形，v0.1.3）：手动旋钮乘三因子权重。
+			// 默认 1.0 时 = weightOf 逐字一致；0 已在候选收集阶段被排除。
+			ws = append(ws, weighted{e: e, w: p.weightOf(e, maxCredits, now) * p.effectiveWeight(e), tier: ti, cost1k: ci})
 		}
 	}
 	// 等权重洗牌：仅当存在权重并列（epsilon 比较，防浮点微差让洗牌静默失效）且
@@ -204,8 +214,15 @@ func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups 
 	// 关键：lastUsed 在锁内赋值，使时间窗口判定在并发下可重入（此前 Acquire 在锁外，
 	// 多个 goroutine 在窗口内同时通过校验造成惊群，TestPickAntiThunderingHerd 实证）。
 	// 注意：先截断后过滤（截断边界内被挤出的号不回填）——与旧实现语义严格一致。
+	// min_interval（v0.1.3 软约束）叠加在此：窗口内的号不进 eligible，全被限住时
+	// eligible 为空 → 回落下方 LRU 兜底（选 usedSeq 最旧者 = 离上次使用最远者 =
+	// 「超出最少」者），**不落入全冷却兜底**（min_interval 限住 ≠ 账号冷却）。
 	eligible := make([]weighted, 0, len(cands))
 	for _, we := range ws[:min(len(ws), 5)] {
+		if mi := p.effectiveMinInterval(we.e); mi > 0 &&
+			now.Sub(we.e.lastUsed) < time.Duration(mi*float64(time.Second)) {
+			continue // 该号在最小间隔窗口内 = 被限住（软约束，见注释）
+		}
 		if now.Sub(we.e.lastUsed) >= minPickGap {
 			eligible = append(eligible, we)
 		}

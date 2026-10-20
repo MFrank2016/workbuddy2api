@@ -54,6 +54,17 @@ type Pool struct {
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
 	// WAF 风控更紧，压低并发）；0 = 未设置，回落 maxInFlight（不分档，零回归）。
 	maxInFlightGlobal int
+	// ---- 账号级流量整形（v0.1.3 移植，SetThrottleDefaults 注入）----
+	// weightDefault 选号权重乘子默认值；0 = 只读备用（全池不参与轮转的极端配置）。
+	weightDefault float64
+	// maxConcDefault 账号级并发上限默认值；0 = 不限（回落既有 maxInFlight 分档）。
+	maxConcDefault int
+	// minIntervalDefault 账号级最小请求间隔默认值（秒）；0 = 不限。
+	minIntervalDefault float64
+	// maxTotalConcurrency 全池总并发上限；0 = 不限。
+	maxTotalConcurrency int
+	// totalInFlight 全池在途计数（Acquire/Release 权威增减，原子）。
+	totalInFlight atomic.Int64
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -93,6 +104,9 @@ func New(stateFp string) *Pool {
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
 		exploreLast:         map[string]time.Time{},
+		// 账号级流量整形默认值：weight=1.0（等价纯三因子，行为逐字一致）、
+		// 限额 0 = 不限。cmd/activity 不调 SetThrottleDefaults 也能正确组组装。
+		weightDefault: 1.0,
 	}
 	if stateFp != "" {
 		p.load()
@@ -209,9 +223,45 @@ func (p *Pool) SetMaxInFlightGlobal(n int) {
 	}
 }
 
+// SetThrottleDefaults 注入账号级流量整形的池级默认值（config pool.*_default）。
+// weightDefault 钳 (0,1000]；其余 <0 保留默认。零值权重语义：weightDefault=0
+// 等价「全局只读（全池不参与轮转）」的极端配置，交给调用方决定。
+func (p *Pool) SetThrottleDefaults(weightDefault float64, maxConcDefault int, minIntervalDefault float64, maxTotal int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if weightDefault > 0 && weightDefault <= 1000 {
+		p.weightDefault = weightDefault
+	}
+	if maxConcDefault >= 0 && maxConcDefault <= 256 {
+		p.maxConcDefault = maxConcDefault
+	}
+	if minIntervalDefault >= 0 && minIntervalDefault <= 3600 {
+		p.minIntervalDefault = minIntervalDefault
+	}
+	if maxTotal >= 0 && maxTotal <= 512 {
+		p.maxTotalConcurrency = maxTotal
+	}
+	// 重算所有既有 entry 的生效值：Set* 注入可能晚于 load()/SyncToDir 建 entry
+	// （恢复的 placeholder entry 与已建 entry 都需按新默认重算，否则 weightMul
+	// 停在 0 会被误当只读备用排除）。幂等，重复调用安全。
+	for _, e := range p.byUID {
+		e.refreshThrottleLocked(p.weightDefault, p.maxConcDefault, p.minIntervalDefault)
+	}
+}
+
+// effectiveWeight 返回账号的生效权重乘子（0 = 只读备用，不参与轮转）。
+// 由 entry 组装时算好（weightMul），读侧纯只读，无需持锁（同 entry 其他生效值）。
+func (p *Pool) effectiveWeight(e *entry) float64 { return e.weightMul }
+
+// effectiveMinInterval 返回账号的生效最小间隔（秒；0 = 不限）。只读，无需持锁。
+func (p *Pool) effectiveMinInterval(e *entry) float64 { return e.minInterval }
+
 // inFlightLimit 报告账号的生效在途上限（global 分档优先，回落 maxInFlight）；
 // 0 = 不限。调用方需已持 p.mu（或快照过 limit，见 Acquire 注释）。
 func (p *Pool) inFlightLimit(e *entry) int {
+	if e.maxConcurrency > 0 {
+		return e.maxConcurrency // 账号显式并发上限（v0.1.3），优先于 realm 分档
+	}
 	if p.maxInFlightGlobal > 0 && e.a.Realm() == "global" {
 		return p.maxInFlightGlobal
 	}
@@ -232,14 +282,41 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 func (p *Pool) Acquire(uid string) bool {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
+	if ok {
+		// 全池总闸（权威）：pick 入口的预筛只是快速路径，这里才是真正的闸——
+		// 并发下多个 pick 可能同时通过预筛，只有 CAS 成功者能占位。
+		if p.maxTotalConcurrency > 0 && !p.totalInFlightGate() {
+			ok = false
+		}
+	}
+	p.mu.RUnlock()
 	if !ok {
-		p.mu.RUnlock()
 		return false
 	}
+	// 单号在途 CAS：per-account 上限（含 per-account max_concurrency 生效值）。
+	if !p.acquireInFlight(e) {
+		// 单号名额被并发抢走：回滚总闸占位（若未占则防御性不扣）。
+		if p.maxTotalConcurrency > 0 {
+			for {
+				cur := p.totalInFlight.Load()
+				if cur <= 0 {
+					break
+				}
+				if p.totalInFlight.CompareAndSwap(cur, cur-1) {
+					break
+				}
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// acquireInFlight 单账号在途名额 CAS（既有语义原样抽出）。per-account max_concurrency
+// 已含在 inFlightLimit 的返回值里。
+func (p *Pool) acquireInFlight(e *entry) bool {
 	limit := p.inFlightLimit(e)
-	p.mu.RUnlock()
 	if limit <= 0 {
-		// 不限：计数仍累加（供状态观测），但永不拒绝。
 		e.inFlight.Add(1)
 		return true
 	}
@@ -249,6 +326,23 @@ func (p *Pool) Acquire(uid string) bool {
 			return false
 		}
 		if e.inFlight.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
+}
+
+// totalInFlightGate 全池并发闸 CAS：未达上限则 totalInFlight+1 返回 true，
+// 达上限返回 false。maxTotalConcurrency<=0 = 不限，直接返回 true。
+func (p *Pool) totalInFlightGate() bool {
+	if p.maxTotalConcurrency <= 0 {
+		return true
+	}
+	for {
+		cur := p.totalInFlight.Load()
+		if cur >= int64(p.maxTotalConcurrency) {
+			return false
+		}
+		if p.totalInFlight.CompareAndSwap(cur, cur+1) {
 			return true
 		}
 	}
@@ -268,6 +362,18 @@ func (p *Pool) Release(uid string) {
 			return
 		}
 		if e.inFlight.CompareAndSwap(cur, cur-1) {
+			// 单号名额已释放：同步扣减全池计数（与 Acquire 的 gate 成功占位配对）。
+			if p.maxTotalConcurrency > 0 {
+				for {
+					tot := p.totalInFlight.Load()
+					if tot <= 0 {
+						break
+					}
+					if p.totalInFlight.CompareAndSwap(tot, tot-1) {
+						break
+					}
+				}
+			}
 			return
 		}
 	}
@@ -315,7 +421,10 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 func (p *Pool) upsertLocked(a *auth.Auth) {
 	if e, ok := p.byUID[a.UID]; ok {
 		e.a = a // 保留 credits/cooling 状态
+		e.refreshThrottleLocked(p.weightDefault, p.maxConcDefault, p.minIntervalDefault)
 		return
 	}
-	p.byUID[a.UID] = &entry{a: a}
+	e := &entry{a: a}
+	e.refreshThrottleLocked(p.weightDefault, p.maxConcDefault, p.minIntervalDefault)
+	p.byUID[a.UID] = e
 }
