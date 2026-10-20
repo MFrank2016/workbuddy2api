@@ -38,11 +38,33 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 ### 本项目不做什么
 
 - **只做上游网关，不做下游协议转换** — 本项目仅负责对接上游 ```CodeBuddy``` 并暴露 OpenAI Chat 协议；Anthropic Messages、Gemini 等其他协议的适配应由下游网关负责；
-- **不内嵌 Web 管理面板** — 网关核心保持精简，可视化面板作为独立项目维护，数据直取上游接口，不增加网关适配负担。
+- **内嵌 Web 管理面板（本分支新增）** — 吸收社区项目 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的能力：内置 `/panel/` 管理面板（账号池 / 用量 / 积分构成 / 任务中心 / 模型与档位 / 在线改配置 / 运行日志），与网关同二进制、`go:embed` 内嵌、Bearer 鉴权。
 
-### 社区前端面板
+### 内嵌管理面板（吸收自社区项目）
 
-需要 Web 管理面板的用户，可部署以下符合本理念的社区项目（独立维护，与网关解耦）：
+本分支已把社区面板项目 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（MIT）的能力整体并入：
+
+- **Web 管理面板**：启动后打开 `http://127.0.0.1:7863/panel/`，用 `api_key` 登录；七个视图（账号池 / 用量 / 积分构成 / 任务中心 / 模型与档位 / 配置 / 运行日志），明暗主题。
+- **面板内 OAuth 添加账号**：浏览器完成设备授权 → 凭证落盘 → **热加载进池（免重启）**。
+- **在线改配置（热生效）**：`api_key` / `soft_rate` / 指纹脱敏开关 / 池参数 / 排程 / 积分保底 / 余额刷新间隔立即生效；`listen` / `auth_dir` / `state_file` / `upstream.*` / `upstash` / 会话 TTL / 归档策略需重启（保存后面板会列出）。
+- **逐请求用量与请求指标**：按账号 / 模型 / 域统计 token、缓存命中、积分、延迟与吞吐；请求归档（JSONL，脱敏、可关、按天保留）。
+- **成长任务中心**：全账号扫描 → 队列执行（账号内串行 / 账号间并发）→ 自动领奖；一键完成成长任务；开学季与小程序口径任务；连登管家（兑换 + 抽奖）。
+- **积分保底 `credit_floor`**：账号余额低于阈值时不再接**实测收费**模型（本地成本台账 + 上游目录倍率双判据），免费/未知模型不受限；全池触底时选号返回 503 而非打穿余额。
+- **暂停选号 `paused`**：运维临时让位——退出选号但签到/活跃/保活/余额刷新照常（与 `disabled` 正交）。
+- **模型锁池视图**、**DSML 原生工具调用还原**、**企业号识别与额度口径**、**余额后台刷新**、**模型倍率/优惠到期展示**。
+- **保留本地原有能力**：Prometheus `/metrics`、阈值告警、当日积分预算闸、账号级流量整形与全池并发闸、同号瞬时重试、任务台账/抖动/补跑、多密钥与分组、管理审计、AI 治理工作流。
+
+新增配置面（缺省即关闭/保持原行为）：
+
+| 配置 | 缺省 | 说明 |
+| --- | --- | --- |
+| `pool.credit_floor` | `0` | 积分保底；`0` = 关闭 |
+| `schedule.include_disabled_in_tasks` | `false` | 保号任务是否覆盖已禁用账号 |
+| `schedule.balance_refresh_enabled` / `balance_refresh_minutes` | `true` / `5` | 余额后台刷新周期 |
+| `logging.request_archive_enabled` / `request_retention_days` / `request_archive_max_mb` | `false` / `7` / `100` | 请求 JSONL 归档与保留策略 |
+| `logging.request_client_info` | `false` | 请求日志是否记录来源 IP/UA |
+
+### 其他社区前端面板
 
 - [workbuddy2api-gui](https://github.com/287775856/workbuddy2api-gui) — 账号池状态可视化面板
 - [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) — 账号管理工具
@@ -309,6 +331,16 @@ curl -s http://localhost:7863/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
+
+## 致谢与出处（本分支新增能力）
+
+本分支的以下能力吸收自社区项目 **[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)**（MIT License，原始版权声明见其仓库 LICENSE）：
+
+- `internal/panel`（Web 管理面板）、`internal/usage`（用量统计）、`internal/reqlog`（请求指标与归档）、`internal/livecfg`（运行期配置快照）、`internal/httpauth`（常量时间鉴权）；
+- 上游增强：成长任务链（`tasks.go` / `desktop.go` / `streak.go` / `school.go` / `blackcat.go` / `profile.go`）、DSML 工具调用还原（`dsml.go`）、企业号额度（`enterprise` 口径）、模型倍率与优惠、签到/余额瞬时重试；
+- 池与调度增强：`paused` 暂停选号、`credit_floor` 积分保底、模型锁池视图、连登管家、余额后台刷新、`include_disabled_in_tasks`、企业号门控。
+
+按 MIT 协议，再分发（源码或二进制形式）时须保留原仓库的 MIT 版权声明与许可声明。
 
 ## 贡献与 PR 要求
 

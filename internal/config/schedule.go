@@ -85,8 +85,13 @@ type Schedule struct {
 	// RetryMaxPerDay 每类任务每日最多重试次数（CST 自然日）。仅
 	// RetryDelayMinutes>0 时生效；**0 = 不允许重试**（哨兵值，normalize 不回落）。
 	RetryMaxPerDay int `json:"retry_max_per_day"`
-	// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
-	// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
+	// BalanceRefreshEnabled / BalanceRefreshMinutes 余额后台刷新（panel 语义）：
+	// 每 N 分钟并发刷新全池余额与到期快照，供面板展示与积分保底判定；缺省 true / 5。
+	BalanceRefreshEnabled bool `json:"balance_refresh_enabled"`
+	BalanceRefreshMinutes int  `json:"balance_refresh_minutes"`
+	// IncludeDisabledInTasks 让保号类任务（签到/活跃/保活/余额刷新）对已禁用账号也执行
+	// （panel 语义：禁用只关选号，不停保号）。缺省 false 保持现状。
+	IncludeDisabledInTasks bool `json:"include_disabled_in_tasks"`
 }
 
 // DefaultSchedule 返回排程段的默认值。
@@ -102,20 +107,22 @@ type Schedule struct {
 // LedgerFile 默认空 = 不落盘（老部署不该被动多出一个文件）。
 func DefaultSchedule() Schedule {
 	return Schedule{
-		CheckinHours:        []int{9, 21},
-		TravelHours:         []int{9, 21},
-		ActivityHours:       []int{10},
-		KeepaliveHours:      []int{22},
-		SchoolHours:         []int{12},
-		CatHours:            []int{1},
-		CheckinEnabled:      true,
-		TravelEnabled:       true,
-		ActivityEnabled:     true,
-		KeepaliveEnabled:    true,
-		SchoolEnabled:       true,
-		CatEnabled:          true,
-		ActivityReportCount: 5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
-		RetryMaxPerDay:      1, // 只写了 retry_delay_minutes 时的保守默认：每天补跑一次
+		CheckinHours:          []int{9, 21},
+		TravelHours:           []int{9, 21},
+		ActivityHours:         []int{10},
+		KeepaliveHours:        []int{22},
+		SchoolHours:           []int{12},
+		CatHours:              []int{1},
+		CheckinEnabled:        true,
+		TravelEnabled:         true,
+		ActivityEnabled:       true,
+		KeepaliveEnabled:      true,
+		SchoolEnabled:         true,
+		CatEnabled:            true,
+		ActivityReportCount:   5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		RetryMaxPerDay:        1, // 只写了 retry_delay_minutes 时的保守默认：每天补跑一次
+		BalanceRefreshEnabled: true,
+		BalanceRefreshMinutes: 5,
 	}
 }
 
@@ -188,6 +195,9 @@ func (s *Schedule) Normalize() error {
 	// 不回落、不报错；只有负值报错。缺省 1 由 DefaultSchedule 在 Unmarshal 前置入。
 	if s.RetryMaxPerDay < 0 {
 		return fmt.Errorf("schedule.retry_max_per_day: %d 不得为负；0 = 不允许重试（当日失败重试仍由 retry_delay_minutes 总开关控制）", s.RetryMaxPerDay)
+	}
+	if s.BalanceRefreshMinutes <= 0 {
+		s.BalanceRefreshMinutes = 5
 	}
 	return s.validateHours()
 }

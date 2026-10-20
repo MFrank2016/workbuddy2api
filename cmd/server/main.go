@@ -3,8 +3,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,6 +17,7 @@ import (
 
 	"workbuddy2api/internal/alert"
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/livecfg"
 	"workbuddy2api/internal/panel"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
@@ -287,6 +290,8 @@ func main() {
 		KeepaliveDisabled: !cfg.Schedule.KeepaliveEnabled,
 		SchoolDisabled:    !cfg.Schedule.SchoolEnabled,
 		CatDisabled:       !cfg.Schedule.CatEnabled,
+		// 保号类任务是否覆盖禁用账号（panel 语义：禁用只关选号，不停保号）。
+		IncludeDisabledInTasks: cfg.Schedule.IncludeDisabledInTasks,
 		// 签到结束即落盘：手动入口与定时排程都走 CheckinAll，挂钩一处两条路径全覆盖。
 		// 映射成 HTTP 口径复用 buildCheckinReport —— 保证「即时回执」与「历史回放」
 		// 永远是同一份数据，不会出现两套计数口径。
@@ -376,14 +381,22 @@ func main() {
 	usageRec.Start()
 	defer usageRec.Stop()
 
-	// 请求指标 + 脱敏 JSONL 归档（默认只开指标；归档开关接通后写入 request-logs/）。
+	// 请求指标 + 脱敏 JSONL 归档（logging.*；归档默认关闭，只跑进程内指标）。
 	requestLog := reqlog.New(reqlog.Config{
 		Dir:           stateSibling(cfg.StateFile, "request-logs"),
-		Enabled:       false,
-		RetentionDays: 7,
-		MaxBytes:      100 << 20,
+		Enabled:       cfg.Logging.RequestArchiveEnabled,
+		RetentionDays: cfg.Logging.RequestRetentionDays,
+		MaxBytes:      int64(cfg.Logging.RequestArchiveMaxMB) << 20,
 	})
 	defer requestLog.Close()
+
+	// 运行期可变配置快照（面板在线改 api_key / soft_rate / 脱敏 / 来源记录时热生效）。
+	live := livecfg.New(livecfg.Snapshot{
+		APIKey:               cfg.APIKey,
+		SoftCooldown:         cfg.SoftRateDur,
+		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
+		RecordClientInfo:     cfg.Logging.RequestClientInfo,
+	})
 
 	pn := panel.New(panel.Config{
 		Pool:        p,
@@ -396,7 +409,15 @@ func main() {
 		Usage:       usageRec,
 		RequestLog:  requestLog,
 		ProbeFile:   stateSibling(cfg.StateFile, "output_probes.json"),
+		Live:        live,
+		ConfigPath:  *cfgPath,
+		LoadConfig:  func() (any, error) { return Load(*cfgPath) },
+		SaveConfig: func(raw []byte) ([]string, error) {
+			return saveConfig(raw, *cfgPath, live, p, up, sch)
+		},
 	})
+	// 签到完成后自动执行成长任务队列（面板任务中心同管线；异步，不阻塞签到）。
+	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 
 	h := server.NewHandler(server.Config{
 		Pool:         p,
@@ -415,6 +436,9 @@ func main() {
 		Panel:      pn,
 		Usage:      usageRec,
 		RequestLog: requestLog,
+		Live:       live,
+		// 请求日志是否记录调用来源（IP/UA）；经 livecfg 热生效，静态值供 Live 为 nil 的裸用路径。
+		RecordClientInfo: cfg.Logging.RequestClientInfo,
 		// 运维管理端点开关（config admin.enabled，默认 false）。
 		AdminEnabled: cfg.Admin.Enabled,
 		// Prometheus 指标端点开关（config metrics.enabled，默认 false）。
@@ -443,6 +467,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	sch.StartBalanceRefresh(ctx, balanceIntervalFor(cfg)) // 余额后台刷新（schedule.balance_refresh_*）
 
 	// 可用性阈值告警（config alerting.enabled，默认关闭）：独立 ticker 评估只读健康
 	// 快照，越界时 POST 到运维自备的 webhook。与请求路径完全隔离，且从不调用上游。
@@ -520,4 +545,101 @@ func stateSibling(stateFile, name string) string {
 		return name
 	}
 	return filepath.Join(dir, name)
+}
+
+// balanceIntervalFor 由 schedule.balance_refresh_* 推出余额后台刷新间隔（0 = 关闭）。
+func balanceIntervalFor(c *Config) time.Duration {
+	if !c.Schedule.BalanceRefreshEnabled {
+		return 0
+	}
+	m := c.Schedule.BalanceRefreshMinutes
+	if m <= 0 {
+		m = 5
+	}
+	return time.Duration(m) * time.Minute
+}
+
+// restartRequiredFields 返回无法热生效、需重启进程的字段名（面板据此提示）。
+func restartRequiredFields() []string {
+	return []string{
+		"listen", "auth_dir", "state_file",
+		"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
+		"upstream.user_agent",
+		"upstash", "session_sticky.ttl", "session_sticky.gc_interval",
+		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
+	}
+}
+
+// saveConfig 面板保存配置：深合并 → 校验 → 原子落盘 → 热应用，返回需重启字段清单。
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+	oldRaw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read current config: %w", err)
+	}
+	var cur, incoming map[string]any
+	if err := json.Unmarshal(oldRaw, &cur); err != nil {
+		cur = map[string]any{}
+	}
+	if err := json.Unmarshal(raw, &incoming); err != nil {
+		return nil, fmt.Errorf("parse submitted config: %w", err)
+	}
+	merged := mergeConfigMaps(cur, incoming)
+	newCfg, err := ParseConfig(mergedJSON(merged))
+	if err != nil {
+		return nil, err
+	}
+	out, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return nil, fmt.Errorf("write config: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return nil, fmt.Errorf("replace config: %w", err)
+	}
+	// 热应用（能立即生效的字段全部应用）。
+	live.Store(livecfg.Snapshot{
+		APIKey:               newCfg.APIKey,
+		SoftCooldown:         newCfg.SoftRateDur,
+		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
+		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
+	})
+	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
+	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
+	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
+	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
+	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
+	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur)
+	p.SetCreditFloor(newCfg.Pool.CreditFloor)
+	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
+	p.SetThrottleDefaults(newCfg.Pool.WeightDefault, newCfg.Pool.MaxConcurrencyDefault, newCfg.Pool.MinIntervalDefault, newCfg.Pool.MaxTotalConcurrency)
+	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
+	sch.SetBalanceInterval(balanceIntervalFor(newCfg))
+	return restartRequiredFields(), nil
+}
+
+// mergeConfigMaps 把 incoming 深合并进 cur（只覆盖提交的键，保留手写未知键）。
+func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
+	for k, v := range incoming {
+		if inMap, ok := v.(map[string]any); ok {
+			if curMap, ok := cur[k].(map[string]any); ok {
+				cur[k] = mergeConfigMaps(curMap, inMap)
+				continue
+			}
+		}
+		cur[k] = v
+	}
+	return cur
+}
+
+// mergedJSON 把合并后的 map 序列化回 JSON（供 ParseConfig 校验）。
+func mergedJSON(m map[string]any) []byte {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
 }

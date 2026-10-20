@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/reqlog"
+	"workbuddy2api/internal/upstream"
 )
 
 // chatSeq 进程级请求序号。
@@ -387,3 +390,124 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 	}
 	return !clientGone && errors.Is(err, context.Canceled)
 }
+
+// maxUserAgentLen 记录到请求日志/归档的 UA 上限（超出截断，避免日志列被长 UA 挤没）。
+const maxUserAgentLen = 200
+
+type requestTraceKey struct{}
+
+// requestTrace 在一次 chat 请求内共享标识与最终统计，ServeHTTP 出口统一记账。
+type requestTrace struct {
+	id    string
+	start time.Time
+	stat  *chatStat // chatCompletions 回填（nil 时不带 token 维度）
+	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
+	clientIP  string
+	userAgent string
+}
+
+// captureClientInfo 采集调用来源（客户端 IP + 截断后的 UA）。开关关闭时保持空串：
+// 来源信息比 token 计数敏感，是否落盘由 logging.request_client_info 决定。
+func (t *requestTrace) captureClientInfo(r *http.Request) {
+	if t == nil || r == nil {
+		return
+	}
+	t.clientIP = clientIPForLog(r)
+	t.userAgent = logfmt.Truncate(r.UserAgent(), maxUserAgentLen)
+}
+
+// clientIPForLog 提取用于日志展示的客户端 IP：代理头优先（反代后拿真实客户端），
+// 直连时回落 RemoteAddr（否则面板里所有来源都显示 "-"）。
+func clientIPForLog(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if ip := upstream.ExtractClientIP(r); ip != "" {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
+}
+
+// requestTraceFrom 取出请求上下文中的 trace（未启用 reqlog 时为 nil）。
+func requestTraceFrom(r *http.Request) *requestTrace {
+	if r == nil {
+		return nil
+	}
+	tr, _ := r.Context().Value(requestTraceKey{}).(*requestTrace)
+	return tr
+}
+
+// event 把 trace + 最终状态码组装为 reqlog 事件（不含提示词/凭证）。
+func (t *requestTrace) event(status int) reqlog.Event {
+	e := reqlog.Event{
+		Time:      t.start,
+		RequestID: t.id,
+		Path:      "/v1/chat/completions",
+		Status:    status,
+	}
+	e.DurationMs = time.Since(t.start).Milliseconds()
+	if e.DurationMs < 1 {
+		e.DurationMs = 1
+	}
+	if s := t.stat; s != nil {
+		e.Account = logfmt.Label(s.uid, s.nick)
+		e.Model = s.model
+		e.TTFBMs = s.ttfb.Milliseconds()
+		e.PromptTokens = int64(s.prompt)
+		if s.toks > 0 {
+			e.CompletionTokens = int64(s.toks)
+		}
+		e.TotalTokens = int64(s.prompt)
+		if s.toks > 0 {
+			e.TotalTokens += int64(s.toks)
+		}
+		e.Credit = s.credit
+		e.HasCredit = s.hasCredit
+		e.CacheHitTokens = int64(s.cacheHit)
+		e.CacheMissTokens = int64(s.cacheMiss)
+	}
+	e.ClientIP = t.clientIP
+	e.UserAgent = t.userAgent
+	if status >= 200 && status < 300 {
+		e.Outcome = reqlog.OutcomeSuccess
+		e.OK = true
+	} else {
+		e.Outcome = reqlog.OutcomeHTTPError
+	}
+	return e
+}
+
+// responseObserver 捕获 handler 实际写出的 HTTP 状态，同时保留 Flusher/Unwrap，
+// 避免破坏 SSE 逐帧刷新。
+type responseObserver struct {
+	http.ResponseWriter
+	status int
+}
+
+func (o *responseObserver) WriteHeader(code int) {
+	if o.status == 0 {
+		o.status = code
+	}
+	o.ResponseWriter.WriteHeader(code)
+}
+
+func (o *responseObserver) Write(p []byte) (int, error) {
+	if o.status == 0 {
+		o.status = http.StatusOK
+	}
+	return o.ResponseWriter.Write(p)
+}
+
+// Flush 透传 Flusher（SSE 依赖逐帧刷新）。
+func (o *responseObserver) Flush() {
+	if f, ok := o.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap 供 http.ResponseController 等按需取回原始 writer。
+func (o *responseObserver) Unwrap() http.ResponseWriter { return o.ResponseWriter }

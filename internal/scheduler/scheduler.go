@@ -9,6 +9,7 @@ import (
 	"hash/fnv"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -125,6 +126,13 @@ type Scheduler struct {
 	ledger *taskledger.Store
 	// rearmSchedule 「排程已变，立即重算」通知（Reconfigure 时 poke）：Run 消费。
 	rearmSchedule chan struct{}
+	// rearmBalance 「余额刷新间隔已变，立即重算」通知：StartBalanceRefresh 循环消费。
+	rearmBalance chan struct{}
+	// balanceNanos 余额后台刷新间隔（纳秒；0 = 暂停）。原子读写供在线热改。
+	balanceNanos atomic.Int64
+	// hotMu 保护热改字段（growthHook / IncludeDisabledInTasks），面板在线改配置用。
+	hotMu      sync.Mutex
+	growthHook func()
 }
 
 // Ledger 返回任务执行台账（只读视图），供 server 的 /status 与 /metrics 渲染。
@@ -160,6 +168,7 @@ func New(cfg Config) *Scheduler {
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
 		rearmSchedule: make(chan struct{}, 1),
+		rearmBalance:  make(chan struct{}, 1),
 		rewardClaimed: make(map[string]string),
 		ledger:        taskledger.New(cfg.LedgerFile),
 	}
@@ -634,6 +643,10 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	if s.cfg.OnCheckinDone != nil {
 		s.cfg.OnCheckinDone(out, started, time.Now())
 	}
+	// 签到完成后触发成长任务队列（panel 任务中心）：异步执行，不阻塞签到返回。
+	if fn := s.growthHookFn(); fn != nil {
+		go fn()
+	}
 	return out, nil
 }
 
@@ -1004,7 +1017,11 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 }
 
 // includeDisabledInTasks 保号任务是否覆盖已禁用账号（panel 语义）。
-func (s *Scheduler) includeDisabledInTasks() bool { return s.cfg.IncludeDisabledInTasks }
+func (s *Scheduler) includeDisabledInTasks() bool {
+	s.hotMu.Lock()
+	defer s.hotMu.Unlock()
+	return s.cfg.IncludeDisabledInTasks
+}
 
 // wallclockCheckStep 墙钟校验段长：等待槽位时单次 timer 的最大时长，每段醒来用
 // 墙钟重判（睡眠冻结单调时钟时，至多一段后即到点补跑）。
@@ -1050,4 +1067,66 @@ func poke(ch chan struct{}) {
 	case ch <- struct{}{}:
 	default:
 	}
+}
+
+// SetGrowthHook 挂载/替换成长任务队列回调（panel 构造晚于 scheduler，事后接线）。
+func (s *Scheduler) SetGrowthHook(fn func()) {
+	s.hotMu.Lock()
+	s.growthHook = fn
+	s.hotMu.Unlock()
+}
+
+// growthHookFn 读取当前成长任务回调（无则 nil，到点跳过）。
+func (s *Scheduler) growthHookFn() func() {
+	s.hotMu.Lock()
+	defer s.hotMu.Unlock()
+	return s.growthHook
+}
+
+// SetIncludeDisabledInTasks 热改「保号类任务是否覆盖已禁用账号」（面板配置页）。
+func (s *Scheduler) SetIncludeDisabledInTasks(v bool) {
+	s.hotMu.Lock()
+	s.cfg.IncludeDisabledInTasks = v
+	s.hotMu.Unlock()
+}
+
+// SetBalanceInterval 热改余额后台刷新间隔（<=0 = 暂停）。
+func (s *Scheduler) SetBalanceInterval(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	s.balanceNanos.Store(int64(d))
+	poke(s.rearmBalance)
+}
+
+// StartBalanceRefresh 启动余额后台刷新循环（每 interval 并发刷新全池余额与到期快照）。
+// interval <= 0 = 不启动（缺省关闭）；热改 SetBalanceInterval 可暂停/重启。
+func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	s.balanceNanos.Store(int64(interval))
+	go func() {
+		for {
+			cur := time.Duration(s.balanceNanos.Load())
+			if cur <= 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.rearmBalance:
+					continue
+				}
+			}
+			timer := time.NewTimer(cur)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-s.rearmBalance:
+				timer.Stop()
+			case <-timer.C:
+				s.RunBalanceRefreshNow()
+			}
+		}
+	}()
 }

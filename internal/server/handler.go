@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/livecfg"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
@@ -76,6 +77,13 @@ type Config struct {
 
 	// RequestLog 请求指标与 JSONL 归档（可选；nil = 不记录）。
 	RequestLog *reqlog.Recorder
+
+	// Live 运行期可变配置（面板在线改 api_key / soft_rate / 脱敏 / 来源记录时热生效）。
+	// nil 时回退静态字段（测试与裸用场景）。
+	Live *livecfg.Holder
+
+	// RecordClientInfo 请求日志是否记录调用来源（IP/UA）；Live 非空时以 Live 快照为准。
+	RecordClientInfo bool
 
 	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
 	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
@@ -300,7 +308,50 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
+		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
+		if h.loadLive().RecordClientInfo {
+			trace.captureClientInfo(r)
+		}
+		r = r.WithContext(context.WithValue(r.Context(), requestTraceKey{}, trace))
+		obs := &responseObserver{ResponseWriter: w}
+		w.Header().Set("X-Request-Id", trace.id)
+		h.cfg.RequestLog.Begin()
+		defer func() {
+			status := obs.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			h.cfg.RequestLog.Record(trace.event(status))
+		}()
+		h.mux.ServeHTTP(obs, r)
+		return
+	}
 	h.mux.ServeHTTP(w, r)
+}
+
+// loadLive 返回当前生效的 livecfg 快照；Live 未接线时回落静态字段（零值安全）。
+func (h *Handler) loadLive() livecfg.Snapshot {
+	if h.cfg.Live != nil {
+		return h.cfg.Live.Load()
+	}
+	return livecfg.Snapshot{
+		APIKey:               h.cfg.APIKey,
+		SoftCooldown:         h.cfg.SoftCooldown,
+		SanitizeFingerprints: true,
+		RecordClientInfo:     h.cfg.RecordClientInfo,
+	}
+}
+
+// softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认 600s）。
+func (h *Handler) softCooldown() time.Duration {
+	if d := h.loadLive().SoftCooldown; d > 0 {
+		return d
+	}
+	if h.cfg.SoftCooldown > 0 {
+		return h.cfg.SoftCooldown
+	}
+	return 600 * time.Second
 }
 
 // authKeyTable 返回生效的鉴权密钥表：
@@ -360,7 +411,14 @@ func authKeyFrom(ctx context.Context) *AuthKey {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if keys := h.authKeyTable(); len(keys) > 0 {
+		keys := h.authKeyTable()
+		if len(keys) == 0 {
+			// 单密钥部署：api_key 经 livecfg 热生效（面板在线改密钥即刻生效）。
+			if k := h.loadLive().APIKey; k != "" {
+				keys = []AuthKey{{Key: k}}
+			}
+		}
+		if len(keys) > 0 {
 			// 常量时间比较（发现 7）：!= 短路时序随前缀长度变化，公网暴露下
 			// 理论上可逐字节探测 key 前缀；ConstantTimeCompare 消除该信号。
 			// 多密钥遍历的时序约束见 matchAuthKey 注释。
@@ -797,6 +855,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream, h.budget)
+	if tr := requestTraceFrom(r); tr != nil {
+		tr.stat = st
+	}
 	defer st.done()
 
 	tried := map[string]bool{}
@@ -1384,10 +1445,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     （普通账号级限流不该因切模型绕过）。
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
 			if upstream.IsModelRateLimit(body) {
-				h.cfg.Pool.CooldownSoftForModel(uid, h.cfg.SoftCooldown, resetAt, model, "6004 model rate limit")
+				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "6004 model rate limit")
 				return
 			}
-			h.cfg.Pool.CooldownSoftRate(uid, h.cfg.SoftCooldown, resetAt, "429 rate limit")
+			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
 			return
 		}
 		// P1-2：body 无重置文案但带 Retry-After 头 → 冷却到该时刻（不做指数堆加，
@@ -1395,12 +1456,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// （上方已 return）——文案是上游更权威的口径（WAF 403 报告 §2.1：intl CLI
 		// 同序，Retry-After 也只在无重置文案时兜底）。
 		if uerr != nil && uerr.RetryAfter > 0 {
-			h.cfg.Pool.CooldownSoftRate(uid, h.cfg.SoftCooldown, time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
+			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
 			return
 		}
 		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶
 		// soft_rate_max）；已在冷却中的兜底探测不翻倍（见 CooldownSoftRate）。
-		h.cfg.Pool.CooldownSoftRate(uid, h.cfg.SoftCooldown, time.Time{}, "429 rate limit")
+		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
 	case upstream.ErrWafBlock:
 		// P0-1：WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族
 		// （不新建平行冷却系统）：基数 wafCooldownBase（60s，抖动后落 [45s,75s]）、
@@ -1435,7 +1496,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
 			return
 		}
-		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "account fault (14017)")
+		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)

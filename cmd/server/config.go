@@ -49,6 +49,14 @@ type Config struct {
 
 	Server struct{} `json:"server"` // 已退役段：max_body_mb 移除后无字段；旧配置该段下任意键因 JSON 未知字段而自然忽略
 
+	// Logging 请求归档与调用来源（吸收自 panel；归档默认关闭，来源默认关闭）。
+	Logging struct {
+		RequestArchiveEnabled bool `json:"request_archive_enabled"`
+		RequestRetentionDays  int  `json:"request_retention_days"`
+		RequestArchiveMaxMB   int  `json:"request_archive_max_mb"`
+		RequestClientInfo     bool `json:"request_client_info"`
+	} `json:"logging"`
+
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
 		// 硬冷却固定为次日 04:00（CooldownUntilTomorrow4AM），连续错误语义并入熔断器。
@@ -370,6 +378,9 @@ func Default() *Config {
 	// 连续失败预警默认开启（阈值 3，镜像 mirror 的 account_fail_threshold=3）；
 	// 0 显式关闭。
 	c.Alerting.MinConsecutiveFails = 3
+	// 请求归档保留策略默认（归档本身默认关闭）。
+	c.Logging.RequestRetentionDays = 7
+	c.Logging.RequestArchiveMaxMB = 100
 	return c
 }
 
@@ -770,6 +781,12 @@ func (c *Config) normalize() error {
 	if err := c.normalizeAPIKeys(); err != nil {
 		return err
 	}
+	if c.Logging.RequestRetentionDays <= 0 {
+		c.Logging.RequestRetentionDays = 7
+	}
+	if c.Logging.RequestArchiveMaxMB <= 0 {
+		c.Logging.RequestArchiveMaxMB = 100
+	}
 	return c.normalizePrompt()
 }
 
@@ -970,4 +987,19 @@ func (c *Config) normalizePrompt() error {
 		c.PromptText = text
 	}
 	return nil
+}
+
+// ParseConfig 从 JSON 字节解析配置（Default + Unmarshal + normalize），供面板保存配置时校验：
+// 不读环境变量（避免 env 覆盖面板提交值），不写盘。
+func ParseConfig(raw []byte) (*Config, error) {
+	c := Default()
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, c); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
+	}
+	if err := c.normalize(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
