@@ -24,3 +24,28 @@ func resolveModel(model string) (realm, bare string) {
 
 // ResolveModel 是 resolveModel 的导出面（跨包调用）。
 func ResolveModel(model string) (realm, bare string) { return resolveModel(model) }
+
+// matchModelAlias 在 aliases 中为 model 找重定向目标：先精确匹配，再按后缀 "*"
+// 通配匹配（取最长前缀 = 最具体者）；无匹配返回 ""（不启用）。
+func matchModelAlias(aliases map[string]string, model string) string {
+	if len(aliases) == 0 || model == "" {
+		return ""
+	}
+	if v, ok := aliases[model]; ok {
+		return v
+	}
+	bestPrefix, best := "", ""
+	for pat, v := range aliases {
+		if !strings.HasSuffix(pat, "*") {
+			continue
+		}
+		prefix := strings.TrimSuffix(pat, "*")
+		if prefix == "" || !strings.HasPrefix(model, prefix) {
+			continue
+		}
+		if len(prefix) > len(bestPrefix) {
+			bestPrefix, best = prefix, v
+		}
+	}
+	return best
+}

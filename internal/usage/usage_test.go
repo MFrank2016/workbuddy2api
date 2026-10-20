@@ -353,3 +353,19 @@ func TestCacheTokensPersistRoundtrip(t *testing.T) {
 		t.Fatalf("恢复后 cache_hit_rate=%v want 75", snap.CreditByModel[0].CacheHitRate)
 	}
 }
+
+func TestSnapshotByKey(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.AddKeyed(now, "cn", "u1", "m", "alpha", Delta{TotalTokens: 10, HasTotal: true}, true)
+	r.AddKeyed(now, "cn", "u1", "m", "beta", Delta{TotalTokens: 20, HasTotal: true}, true)
+	r.AddKeyed(now, "cn", "u1", "m", "", Delta{TotalTokens: 5, HasTotal: true}, true)
+	snap := r.Snapshot(0, nil)
+	got := map[string]int64{}
+	for _, k := range snap.ByKey {
+		got[k.Key] = k.TotalTokens
+	}
+	if len(snap.ByKey) != 2 || got["alpha"] != 10 || got["beta"] != 20 {
+		t.Fatalf("by_key=%+v（空 key 不应计入）", snap.ByKey)
+	}
+}

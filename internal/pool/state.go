@@ -130,6 +130,7 @@ func (p *Pool) ReviveDisabled(uid string) bool {
 	e.disabled = false
 	e.reason = ""
 	e.sessionDeadFails = 0
+	e.accountFaultHolds = 0
 	p.dirty.Store(true)
 	return true
 }
@@ -359,8 +360,47 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.sessionDeadFails = 0
 		e.consecutiveFails = 0
 		e.degradeUntil = time.Time{}
+		e.accountFaultHolds = 0 // 账号被证明恢复 → 风控连续计数清零
 		p.dirty.Store(true)
 	}
+}
+
+// NoteAccountFault 记录一次账号级风控/授权故障（ErrAccountFault 的 11140 分支）。
+// 默认策略（SetAccountFaultPolicy）：长冷却 hold 后自动重试——上游风控通常 1–3 个
+// 工作日自动解除，永久禁用会白丢容量；连续 disableAfter 次才升级永久禁用。
+// hold <= 0 = 立即永久禁用（旧行为）。计数在 NoteSuccess / Revive 时清零
+// （账号被证明恢复即重置；进程内计数，重启归零可接受）。返回是否已永久禁用。
+func (p *Pool) NoteAccountFault(uid, reason string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	if p.accountFaultHold <= 0 {
+		e.disabled = true
+		e.reason = reason + ", re-login required"
+		e.until = time.Time{}
+		e.coolKind = 0
+		p.dirty.Store(true)
+		return true
+	}
+	e.accountFaultHolds++
+	if p.accountFaultDisableAfter > 0 && e.accountFaultHolds >= p.accountFaultDisableAfter {
+		e.disabled = true
+		e.reason = reason + " (repeated; upstream risk control)"
+		e.until = time.Time{}
+		e.coolKind = 0
+		p.dirty.Store(true)
+		return true
+	}
+	if until := time.Now().Add(p.accountFaultHold); until.After(e.until) {
+		e.until = until
+	}
+	e.coolKind = CoolSoft
+	e.reason = reason + " (upstream risk control; auto-retry after hold)"
+	p.dirty.Store(true)
+	return false
 }
 
 // Status 查询单账号状态。
@@ -551,6 +591,7 @@ func (p *Pool) Revive(uid string) bool {
 	e.degradeUntil = time.Time{}
 	e.consecutiveFails = 0
 	e.sessionDeadFails = 0
+	e.accountFaultHolds = 0
 	p.dirty.Store(true)
 	return true
 }
@@ -730,6 +771,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
 		Reason:                   reason,
 		Disabled:                 e.disabled,
+		AccountFaultHolds:        e.accountFaultHolds,
 		ManualDisabled:           e.manualDisabled,
 		Paused:                   e.paused,
 		CreditsTotal:             e.creditsTotal,

@@ -314,8 +314,18 @@ function formatRate(rate) {
   return n.toFixed(1) + 'tok/s';
 }
 
-/* ── 密钥门 ───────────────────────────────────────────────────────── */
-function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
+/* ── 登录门（面板密码 / api_key）──────────────────────────────────── */
+let authMode = { password: false };
+fetch('/panel/api/auth_mode').then(r => r.json()).then(d => {
+  authMode = d || {};
+  if (authMode.password) { $('pwdRow').hidden = false; $('btnPwd').hidden = false; }
+}).catch(() => {});
+
+function openKey() {
+  $('keyVeil').classList.add('on');
+  const el = authMode.password ? $('pwdInput') : $('keyInput');
+  setTimeout(() => el.focus(), 60);
+}
 $('btnKey').onclick = async () => {
   const v = $('keyInput').value.trim();
   if (!v) return;
@@ -325,9 +335,23 @@ $('btnKey').onclick = async () => {
     $('keyErr').hidden = true;
     $('keyVeil').classList.remove('on');
     start();
-  } catch (e) { $('keyErr').hidden = false; }
+  } catch (e) { $('keyErr').hidden = false; $('keyErr').textContent = '密钥不正确，请重试。'; }
 };
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
+$('btnPwd').onclick = async () => {
+  const v = $('pwdInput').value;
+  if (!v) return;
+  try {
+    const r = await fetch('/panel/api/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: v }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    location.reload();
+  } catch (e) { $('keyErr').hidden = false; $('keyErr').textContent = '密码不正确，请重试。'; }
+};
+$('pwdInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnPwd').click(); });
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
 /* 积分包明细共享缓存：「积分构成」视图与首页「积分到期提醒」卡片共用同一份
@@ -1887,6 +1911,7 @@ const US_DIMS = {
   account: { key: 'by_account', title: '账号', withRealm: true, withPerf: true, span: 10 },
   model: { key: 'by_model', title: '模型', withRealm: false, withPerf: false, span: 7 },
   realm: { key: 'by_realm', title: 'realm', withRealm: false, withPerf: false, span: 7 },
+  key: { key: 'by_key', title: 'Key', withRealm: false, withPerf: false, span: 7 },
 };
 
 // usSortRows 按当前排序字段降序（默认合计 Token，最大者最相关）。
@@ -1921,7 +1946,7 @@ function usTabsHtml(dims, active, counts) {
   }).join('');
 }
 
-const US_DIM_TABS = [['account', '按账号'], ['model', '按模型'], ['realm', '按域']];
+const US_DIM_TABS = [['account', '按账号'], ['model', '按模型'], ['realm', '按域'], ['key', '按 Key']];
 
 function renderUsageDim() {
   const d = usageData || {};
@@ -1931,6 +1956,7 @@ function renderUsageDim() {
     account: (d.by_account || []).length,
     model: (d.by_model || []).length,
     realm: (d.by_realm || []).length,
+    key: (d.by_key || []).length,
   });
   $('usDimHead').innerHTML = usDimHead(usDim);
   $('usDimBody').innerHTML = rows.map(x =>

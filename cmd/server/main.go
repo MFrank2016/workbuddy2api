@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -119,7 +120,12 @@ func checkinJSONPath(stateFile string) string {
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json")
+	hashPwd := flag.String("hash-password", "", "print PBKDF2 hash for panel.password_hash and exit")
 	flag.Parse()
+	if *hashPwd != "" {
+		fmt.Println(panel.HashPassword(*hashPwd))
+		return
+	}
 
 	cfg, err := Load(*cfgPath)
 	if err != nil {
@@ -178,6 +184,8 @@ func main() {
 	// 账号级流量整形 + 全池并发闸（config pool.weight_default 等，默认无此功能）。
 	// 必须与既有 entry 重算生效值（SetThrottleDefaults 内部遍历 byUID 重算）。
 	p.SetThrottleDefaults(cfg.Pool.WeightDefault, cfg.Pool.MaxConcurrencyDefault, cfg.Pool.MinIntervalDefault, cfg.Pool.MaxTotalConcurrency)
+	// 11140 账号级风控处置（pool.account_fault_hold / disable_after；默认 24h / 3 次）。
+	p.SetAccountFaultPolicy(cfg.AccountFaultHoldDur, cfg.Pool.AccountFaultDisableAfter)
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -413,9 +421,12 @@ func main() {
 		Usage:       usageRec,
 		RequestLog:  requestLog,
 		ProbeFile:   stateSibling(cfg.StateFile, "output_probes.json"),
-		Live:        live,
-		ConfigPath:  *cfgPath,
-		LoadConfig:  func() (any, error) { return Load(*cfgPath) },
+		// 面板独立密码（panel.password_hash，PBKDF2）+ 会话有效期。
+		PasswordHash: cfg.Panel.PasswordHash,
+		SessionTTL:   time.Duration(cfg.Panel.SessionHours) * time.Hour,
+		Live:         live,
+		ConfigPath:   *cfgPath,
+		LoadConfig:   func() (any, error) { return Load(*cfgPath) },
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
 		},
@@ -437,10 +448,14 @@ func main() {
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
+		// 单请求体上限（server.max_body_mb，默认 16MB；0 = 不限）。
+		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
+		// 模型别名/重定向（upstream.model_aliases，默认空 = 不启用）。
+		ModelAliases: cfg.Upstream.ModelAliases,
 		// panel 能力：管理面板（/panel/）+ 逐请求用量记录（吸收自 panel 分支）。
 		Panel:      pn,
 		Usage:      usageRec,
@@ -507,6 +522,8 @@ func main() {
 			cfg.Alerting.MinHealthyGlobal, cfg.Alerting.BreakerThreshold, cfg.Alerting.MinConsecutiveFails)
 	}
 
+	warnInsecureListen(cfg.Listen, cfg.APIKey)
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           h,
@@ -572,11 +589,12 @@ func balanceIntervalFor(c *Config) time.Duration {
 // restartRequiredFields 返回无法热生效、需重启进程的字段名（面板据此提示）。
 func restartRequiredFields() []string {
 	return []string{
-		"listen", "auth_dir", "state_file", "server.read_timeout",
+		"listen", "auth_dir", "state_file", "server.read_timeout", "server.max_body_mb",
 		"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
 		"upstream.user_agent",
 		"upstash", "session_sticky.ttl", "session_sticky.gc_interval",
 		"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
+		"panel.password_hash", "panel.session_hours",
 	}
 }
 
@@ -626,6 +644,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetCreditFloor(newCfg.Pool.CreditFloor)
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetThrottleDefaults(newCfg.Pool.WeightDefault, newCfg.Pool.MaxConcurrencyDefault, newCfg.Pool.MinIntervalDefault, newCfg.Pool.MaxTotalConcurrency)
+	p.SetAccountFaultPolicy(newCfg.AccountFaultHoldDur, newCfg.Pool.AccountFaultDisableAfter)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	sch.Reconfigure(
@@ -662,4 +681,32 @@ func mergedJSON(m map[string]any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// isLoopbackListen 判断监听地址是否只绑定回环（"127.0.0.1:7863" / "[::1]:7863" /
+// "localhost:7863"）。空 host（":7863"）表示所有接口 → 非回环。
+func isLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// warnInsecureListen 无 api_key 且非回环监听时告警：空 key = 不鉴权，任何可达方
+// 都能使用账号池（hub 会首次自动生成 key；本网关只告警，不擅自改用户配置）。
+func warnInsecureListen(addr, apiKey string) {
+	if apiKey != "" || isLoopbackListen(addr) {
+		return
+	}
+	log.Printf("WARN: api_key 为空且监听 %q 非回环——网关当前不鉴权，任何可达方都能使用账号池；请设置 api_key 或改为 127.0.0.1 监听", addr)
 }

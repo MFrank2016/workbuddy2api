@@ -495,6 +495,7 @@ func TestChatAccountFault11140Disables(t *testing.T) {
 	// 让 bad 积分更高被先选中（与 TestChatRotatesOnHardCredit 同一确定性手法）。
 	p.SetCredits("bad", 2000)
 	p.SetCredits("good", 1000)
+	p.SetAccountFaultPolicy(0, 0) // 旧策略：hold=0 立即禁用（本用例锁定该行为）
 	const cool = 90 * time.Second
 	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: cool})
 
@@ -528,6 +529,87 @@ func TestChatAccountFault11140Disables(t *testing.T) {
 	}
 	if calls["Bearer at-bad"] != before {
 		t.Errorf("禁用的账号不应被选中: calls=%v", calls)
+	}
+}
+
+// TestChatAccountFault11140HoldsByDefault 默认策略下 11140 走长冷却（不永久禁用）：
+// 上游风控通常 1–3 个工作日自动解除，长冷却后自动重试；连续 N 次才升级禁用。
+func TestChatAccountFault11140HoldsByDefault(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		if authz == "Bearer at-bad" {
+			return 403, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000)
+	p.SetCredits("good", 1000)
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: 90 * time.Second})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("bad")
+	if st.Disabled {
+		t.Fatalf("默认策略应长冷却而非禁用（11140 风控可自愈）: %+v", st)
+	}
+	if !st.Cooling || st.CoolKind != "soft_rate" {
+		t.Errorf("应进入 soft_rate 长冷却: %+v", st)
+	}
+	if st.AccountFaultHolds != 1 {
+		t.Errorf("account_fault_holds=%d want 1", st.AccountFaultHolds)
+	}
+	if !strings.Contains(st.Reason, "auto-retry") {
+		t.Errorf("reason=%q 应提示自动重试", st.Reason)
+	}
+	// hold 生效：冷却期内不再选中 bad。
+	before := calls["Bearer at-bad"]
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec2.Code != 200 {
+		t.Fatalf("second code=%d body=%s", rec2.Code, rec2.Body)
+	}
+	if calls["Bearer at-bad"] != before {
+		t.Errorf("冷却中的账号不应再次被选中: calls=%v", calls)
+	}
+}
+
+// TestChatBodyLimit413 请求体超过 server.max_body_mb 时在解析前 413，零上游请求。
+func TestChatBodyLimit413(t *testing.T) {
+	var calls atomic.Int32
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls.Add(1)
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxBodyBytes: 64})
+
+	big := `{"model":"glm-5.2","messages":[{"role":"user","content":"` + strings.Repeat("x", 200) + `"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(big)))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("code=%d want 413 body=%s", rec.Code, rec.Body)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("upstream calls=%d want 0（超限请求不应触达上游）", calls.Load())
+	}
+	var e struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatalf("resp not json: %v body=%s", err, rec.Body)
+	}
+	if e.Error.Code != "payload_too_large" {
+		t.Fatalf("want payload_too_large: %s", rec.Body)
 	}
 }
 
@@ -592,6 +674,7 @@ func TestApplyErrorPolicyAccountFaultSplit(t *testing.T) {
 	t.Run("11140 request illegal disables", func(t *testing.T) {
 		p := pool.New("")
 		p.Add(&auth.Auth{UID: "u1"})
+		p.SetAccountFaultPolicy(0, 0) // 旧策略：hold=0 立即禁用
 		h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
 
 		h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, "glm-5.2", nil)
@@ -2760,5 +2843,45 @@ func TestHandlerAppendTurnKeyStable(t *testing.T) {
 	}
 	if len(reqIDs) != 1 || reqIDs[0] != want {
 		t.Errorf("X-Conversation-Request-ID=%v want %q (derived from pre-rewrite body)", reqIDs, want)
+	}
+}
+
+// TestChatModelAliasRewritesBody 模型别名在选号前改写请求 model（支持后缀通配），
+// 上游收到的是目标模型。
+func TestChatModelAliasRewritesBody(t *testing.T) {
+	var mu sync.Mutex
+	var gotModel string
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			b, _ := io.ReadAll(r.Body)
+			var m struct {
+				Model string `json:"model"`
+			}
+			_ = json.Unmarshal(b, &m)
+			mu.Lock()
+			gotModel = m.Model
+			mu.Unlock()
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sseOK)),
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, ModelAliases: map[string]string{"gpt-5.6-*": "glm-5.2"}})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.6-luna","messages":[]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	mu.Lock()
+	got := gotModel
+	mu.Unlock()
+	if got != "glm-5.2" {
+		t.Fatalf("upstream model=%q want glm-5.2（别名未生效）", got)
 	}
 }

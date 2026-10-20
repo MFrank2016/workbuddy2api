@@ -49,6 +49,10 @@ type Pool struct {
 	// creditFloor 积分保底（SetCreditFloor 注入；0 = 关闭，缺省即现状）。
 	// 账号 credits < floor 时不再参与收费模型选号，防止收费请求把余额打穿。
 	creditFloor int64
+	// accountFaultHold / accountFaultDisableAfter 11140 账号级风控处置策略
+	// （SetAccountFaultPolicy 注入；默认 24h / 3 次）。hold<=0 = 立即永久禁用（旧行为）。
+	accountFaultHold         time.Duration
+	accountFaultDisableAfter int
 	// modelRateOf 按 (realm, 模型) 查上游目录倍率（SetModelRateOf 注入；nil = 不兜底）。
 	modelRateOf func(realm, model string) string
 	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
@@ -98,17 +102,19 @@ type Pool struct {
 // New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。
 func New(stateFp string) *Pool {
 	p := &Pool{
-		byUID:              map[string]*entry{},
-		stateFp:            stateFp,
-		breakerThreshold:   defaultBreakerThreshold,
-		breakerCooldown:    defaultBreakerCooldown,
-		breakerCooldownMax: defaultBreakerCooldownMax,
-		idleWeightPerHour:  defaultIdleWeightPerHour,
-		idleWeightMax:      defaultIdleWeightMax,
-		preferExpiring:     true,
-		degradeThreshold:   defaultDegradeThreshold,
-		degradeCooldown:    defaultDegradeCooldown,
-		degradeCooldownMax: defaultDegradeCooldownMax,
+		byUID:                    map[string]*entry{},
+		stateFp:                  stateFp,
+		breakerThreshold:         defaultBreakerThreshold,
+		breakerCooldown:          defaultBreakerCooldown,
+		breakerCooldownMax:       defaultBreakerCooldownMax,
+		idleWeightPerHour:        defaultIdleWeightPerHour,
+		idleWeightMax:            defaultIdleWeightMax,
+		preferExpiring:           true,
+		degradeThreshold:         defaultDegradeThreshold,
+		degradeCooldown:          defaultDegradeCooldown,
+		degradeCooldownMax:       defaultDegradeCooldownMax,
+		accountFaultHold:         24 * time.Hour,
+		accountFaultDisableAfter: 3,
 		// 探索缺省 30m：tier 0 垄断下的 tier 1 探索窗口（issue #136）。用户经
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
@@ -219,6 +225,15 @@ func (p *Pool) SetPreferExpiring(enabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.preferExpiring = enabled
+}
+
+// SetAccountFaultPolicy 注入 11140 账号级风控处置策略（main 从 config 解析后调用）：
+// hold > 0 = 长冷却后自动重试，连续 disableAfter 次才永久禁用；hold <= 0 = 立即禁用（旧行为）。
+func (p *Pool) SetAccountFaultPolicy(hold time.Duration, disableAfter int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.accountFaultHold = hold
+	p.accountFaultDisableAfter = disableAfter
 }
 
 // SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。

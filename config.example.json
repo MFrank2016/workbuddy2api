@@ -8,7 +8,12 @@
     "soft_rate_max": "2h"
   },
   "server": {
-    "read_timeout": "300s"
+    "read_timeout": "300s",
+    "max_body_mb": 16
+  },
+  "panel": {
+    "password_hash": "",
+    "session_hours": 24
   },
   "logging": {
     "request_archive_enabled": true,
@@ -99,6 +104,7 @@
     "device_token_file": "",
     "client_name": "WorkBuddy",
     "passthrough_ip": false,
+    "model_aliases": {},
     "retry_enabled": false,
     "retry_attempts": 1,
     "retry_backoff": 0.5
@@ -127,6 +133,8 @@
     "idle_weight_max": 5.0,
     "expiring_soon": "168h",
     "prefer_expiring": true,
+    "account_fault_hold": "24h",
+    "account_fault_disable_after": 3,
     "cost_explore_interval": "30m",
     "weight_default": 1.0,
     "max_concurrency_default": 0,

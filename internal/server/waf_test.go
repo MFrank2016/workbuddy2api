@@ -101,7 +101,8 @@ func TestChatWaf403HtmlBodySoftCools(t *testing.T) {
 }
 
 // TestChat403BusinessEnvelopeNotWaf 403 带业务信封（code/msg）不走 WAF 分支
-// （P0-1 约束：不劫持业务 403——11140 request illegal 维持 ErrAccountFault 禁用）。
+// （P0-1 约束：不劫持业务 403——11140 request illegal 维持 ErrAccountFault 处置；
+// 默认策略为长冷却，hold=0 时才立即禁用）。
 func TestChat403BusinessEnvelopeNotWaf(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 403, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, false
@@ -111,11 +112,15 @@ func TestChat403BusinessEnvelopeNotWaf(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	st, _ := p.Status("u1")
-	if !st.Disabled {
-		t.Fatalf("403+request illegal must disable (ErrAccountFault path), got %+v", st)
+	// 默认策略：11140 走 ErrAccountFault 长冷却（不是 WAF 分支，也不永久禁用）。
+	if st.Disabled {
+		t.Fatalf("默认策略不应永久禁用（11140 走长冷却）: %+v", st)
 	}
-	if st.Cooling {
-		t.Errorf("11140 disable must not stack cooling: %+v", st)
+	if !st.Cooling || st.CoolKind != "soft_rate" {
+		t.Fatalf("403+request illegal 应走 ErrAccountFault 长冷却: %+v", st)
+	}
+	if st.AccountFaultHolds != 1 {
+		t.Errorf("account_fault_holds=%d want 1", st.AccountFaultHolds)
 	}
 }
 

@@ -57,6 +57,9 @@ type Config struct {
 	RedisMode    string
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	// MaxBodyBytes 单请求体上限（字节；server.max_body_mb 换算）。0 = 不限制。
+	// 读 body 前用 http.MaxBytesReader 拦截，超限 413（防并发大 body 打爆内存）。
+	MaxBodyBytes int64
 
 	// PromptMode "passthrough"（默认，透传客户端原始 system）/ "custom"（网关替换）。
 	PromptMode string
@@ -68,6 +71,10 @@ type Config struct {
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
+	// ModelAliases 模型别名/重定向（upstream.model_aliases，默认空 = 不启用）：
+	// 键为源模型（支持后缀 "*" 通配），值为目标模型；命中后改写请求 model，
+	// 选号/账本/粘性按目标模型记账。
+	ModelAliases map[string]string
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权与内嵌静态资源，主路由只做转发。
 	Panel http.Handler
@@ -824,12 +831,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit))
 		return
 	}
-	// 请求体无大小上限（max_body_mb 已移除）：完整读入，超限类问题交由上游自然返回
-	// 错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断防御语义保留在
-	// 读错误路径——移除预拦截后，截断只可能来自客户端自己断流，读 body 出错就地 400，
-	// 不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
+	// 请求体上限（server.max_body_mb，默认 16MB；0 = 不限）：ReadAll 前先包
+	// MaxBytesReader——ReadTimeout 只防慢速，防不了大体积；并发大 body 会直接打爆
+	// 内存。超限 413 payload_too_large，不进入选号/轮转、零上游请求。
+	if h.cfg.MaxBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxBodyBytes)
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeOpenAIErrorHint(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				"request body exceeds the gateway limit (server.max_body_mb)",
+				"raise server.max_body_mb, or set it to 0 to disable the limit")
+			return
+		}
+		// #41 的截断防御语义：读 body 出错就地 400，不把半截 JSON 喂上游。
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
@@ -865,6 +882,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/账本/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+	// 模型别名/后台任务重定向（upstream.model_aliases，默认空 = 不启用）：桌面客户端
+	// 后台任务会硬编码付费模型，可在此改写到免费目标（省积分）。命中记日志；realm
+	// 前缀保持，选号/账本/粘性都用改写后的目标模型。
+	if target := matchModelAlias(h.cfg.ModelAliases, bareModel); target != "" && target != bareModel {
+		log.Printf("alias: model %s -> %s", bareModel, target)
+		bareModel = target
+	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream, h.budget)
@@ -947,6 +971,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 本次请求的密钥身份（多 Key 用量归因）：主密钥 = "main"，api_keys 条目用其
+	// Name（未命名条目回落 "unnamed"）。
+	keyName := "main"
+	if ki := authKeyFrom(r.Context()); ki != nil {
+		if ki.Name != "" {
+			keyName = ki.Name
+		} else {
+			keyName = "unnamed"
+		}
+	}
+
 	// ttfb 首 token 等待（仅流式有观测；非流式传 0 = 无观测，速率不扣减）。
 	// 显式入参而不是读 st.ttfb：后者在流式分支里是**调用之后**才赋值的，
 	// 靠顺序传递会让将来重排代码时静默把速率算回旧的错口径。
@@ -990,7 +1025,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if a, ok := h.cfg.Pool.Status(uid); ok && a.Realm != "" {
 				realm = a.Realm
 			}
-			h.cfg.Usage.Add(time.Now(), realm, uid, delta.Model, usage.Delta{
+			h.cfg.Usage.AddKeyed(time.Now(), realm, uid, delta.Model, keyName, usage.Delta{
 				PromptTokens:     delta.PromptTokens,
 				HasPromptTokens:  delta.HasPromptTokens,
 				CompletionTokens: delta.CompletionTokens,
@@ -1680,9 +1715,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
 	case upstream.ErrAccountFault:
 		// 账号级授权/配额故障按 msg 分野（口径与 Classify 的 accountFaultMarkers 一致）：
-		//   - "request illegal"（code 11140）→ 账号级**授权封禁**：软冷却到期也不会自动
-		//     恢复（需重新 OAuth 登录），到期后重新选号只会再撞 403 浪费一次轮换——
-		//     硬禁用（Disable），不再参与选号。/status 以 disabled + disabled_reason 呈现。
+		//   - "request illegal"（code 11140）→ 账号级风控/授权故障：默认按
+		//     pool.account_fault_hold（24h）长冷却后自动重试，连续
+		//     pool.account_fault_disable_after 次才升级永久禁用；hold=0 保持旧行为
+		//     （立即禁用）。上游风控通常 1–3 个工作日自动解除，永久禁用会白丢容量。
 		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 两条路径对坏号都立刻换号（同一请求轮转出池），只是后续可恢复性不同。
@@ -1693,7 +1729,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 分支；此处再挡一次，防未来 Classify 规则序被改回时健康账号被误 Disable。
 		bodyLower := strings.ToLower(body)
 		if strings.Contains(bodyLower, "request illegal") && !strings.Contains(bodyLower, "channel verification") {
-			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
+			// 处置策略可配（pool.account_fault_hold / account_fault_disable_after）：
+			// 默认长冷却 24h 后自动重试（上游风控通常 1–3 个工作日解除），连续 N 次
+			// 才升级永久禁用；hold=0 保持旧行为（立即禁用）。
+			h.cfg.Pool.NoteAccountFault(uid, "account banned by upstream (11140 request illegal)")
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")

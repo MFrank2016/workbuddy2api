@@ -52,6 +52,9 @@ type Config struct {
 		// http.Server 的 ReadTimeout 覆盖整个请求读取：大上下文/文件块请求经慢链路上传
 		// 需要更宽裕的窗口；"0" = 不限制（旧 max_body_mb 的硬编码 60s 约束的接替）。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+		// MaxBodyMB 单请求体上限（MB，吸收自 hub）：默认 16；0 = 不限制。
+		// 网关在读 body 前用 http.MaxBytesReader 拦截，超限 413（防并发大 body 打爆内存）。
+		MaxBodyMB int `json:"max_body_mb"`
 	} `json:"server"`
 
 	// Logging 请求归档与调用来源（吸收自 panel；归档/来源默认开启，对齐 panel）。
@@ -195,6 +198,10 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP（X-Forwarded-For/X-Real-IP 首段）给上游。
 		// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）；true 才透传。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// ModelAliases 模型别名/重定向（吸收自 hub 的后台模型重定向）：键为源模型名
+		// （支持后缀 "*" 通配），值为目标模型名；命中后改写请求 model，选号/账本按
+		// 目标模型记账。默认空 = 不启用（避免静默改写用户请求）。
+		ModelAliases map[string]string `json:"model_aliases"`
 		// RetryEnabled 聊天 SSE 请求的**同账号瞬时重试**开关。默认关闭：
 		// 打开后仅对 5xx 与传输层失败按 retry_attempts 次重试（同一账号、
 		// 指数退避），429/402/401/403 等**永不重试**（配额/凭据问题重试只会更糟）。
@@ -280,7 +287,19 @@ type Config struct {
 		// CreditFloor 积分保底：账号余额低于该值时，对实测收费模型不再参与选号
 		// （防止收费请求把余额打穿、连免费模型都冷却到次日签到）。0 = 关闭（默认）。
 		CreditFloor int64 `json:"credit_floor"`
+		// AccountFaultHold 11140 账号级风控处置：长冷却时长（默认 "24h"）；
+		// "0" = 立即永久禁用（旧行为）。
+		AccountFaultHold string `json:"account_fault_hold"`
+		// AccountFaultDisableAfter 连续 N 次 11140 后升级永久禁用（默认 3；<=0 = 不升级）。
+		AccountFaultDisableAfter int `json:"account_fault_disable_after"`
 	} `json:"pool"`
+
+	// Panel 管理面板鉴权（吸收自 hub 的独立面板密码）：password_hash 非空时启用
+	// 密码登录（浏览器会话 cookie），API Key（Bearer）仍然有效；空 = 仅 Bearer（旧行为）。
+	Panel struct {
+		PasswordHash string `json:"password_hash"` // PBKDF2 摘要（wb2api -hash-password 生成）
+		SessionHours int    `json:"session_hours"` // 会话有效期小时数（默认 24）
+	} `json:"panel"`
 
 	SessionSticky struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
@@ -301,6 +320,8 @@ type Config struct {
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100，吸收自 panel）；
 	// 0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// AccountFaultHoldDur 解析后的 11140 长冷却时长（0 = 立即禁用）。
+	AccountFaultHoldDur time.Duration `json:"-"`
 	// CreditExhaustedDur 解析后的积分耗尽冷却时长（issue #78）；0 = 不启用
 	// （保持「硬冷却到次日 04:00」的旧行为）。
 	CreditExhaustedDur time.Duration `json:"-"`
@@ -397,6 +418,13 @@ func Default() *Config {
 	c.Logging.RequestArchiveMaxMB = 100
 	// 入站读取上限默认 300s（吸收自 panel issue #100；"0" = 不限制）。
 	c.Server.ReadTimeout = "300s"
+	// 请求体上限默认 16MB（吸收自 hub）；0 = 不限制。
+	c.Server.MaxBodyMB = 16
+	// 面板会话有效期默认 24h（密码登录启用时才生效）。
+	c.Panel.SessionHours = 24
+	// 11140 处置默认：24h 长冷却 + 连续 3 次升级禁用（旧行为可配 "0" 立即禁用）。
+	c.Pool.AccountFaultHold = "24h"
+	c.Pool.AccountFaultDisableAfter = 3
 	return c
 }
 
@@ -682,6 +710,22 @@ func (c *Config) normalize() error {
 	}
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义（0 = 不限制）", c.Server.ReadTimeout)
+	}
+	if c.Server.MaxBodyMB < 0 {
+		return fmt.Errorf("server.max_body_mb: %d 不得为负；0 = 不限制", c.Server.MaxBodyMB)
+	}
+	if c.Panel.SessionHours <= 0 {
+		c.Panel.SessionHours = 24
+	}
+	// 11140 处置策略：空值回落 24h；"0" = 立即永久禁用（旧行为）；负时长报错。
+	if strings.TrimSpace(c.Pool.AccountFaultHold) == "" {
+		c.Pool.AccountFaultHold = "24h"
+	}
+	if c.AccountFaultHoldDur, err = time.ParseDuration(c.Pool.AccountFaultHold); err != nil {
+		return fmt.Errorf("pool.account_fault_hold: %w", err)
+	}
+	if c.AccountFaultHoldDur < 0 {
+		return fmt.Errorf("pool.account_fault_hold: 负时长 %q 无意义（0 = 立即禁用）", c.Pool.AccountFaultHold)
 	}
 	// 积分耗尽后的冷却时长（issue #78）：空 = 保持「硬冷却到次日 04:00」的旧行为；
 	// 填了必须是正时长（负值会让冷却立即到期，等于没冷却 —— 与其静默放行，不如报错）。

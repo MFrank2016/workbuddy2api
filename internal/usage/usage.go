@@ -53,6 +53,7 @@ type bucket struct {
 	Realm string  `json:"r"`            // cn / global
 	UID   string  `json:"u"`            // 账号 uid
 	Model string  `json:"m"`            // 上游裸模型名
+	Key   string  `json:"k,omitempty"`  // API Key 名称（多 Key 归因；"" = 旧数据/未标注）
 	Rate  string  `json:"x,omitempty"`  // 请求时生效积分倍率（规范化数值；旧桶为空）
 	Req   int64   `json:"q"`            // 请求数（含失败）
 	Err   int64   `json:"e"`            // 失败数
@@ -158,11 +159,16 @@ type Delta struct {
 	HasTPS          bool
 }
 
-// Add 记录一次请求尝试。
+// Add 记录一次请求尝试（无密钥维度；等价 AddKeyed 的 key=""）。
+func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool) {
+	r.AddKeyed(now, realm, uid, model, "", d, ok)
+}
+
+// AddKeyed 同 Add，附带 API Key 维度（多 Key 用量归因；"" = 主密钥/未标注）。
 //
 // ok=false 表示该次尝试失败（传输错误 / 上游 >=400 / 解析失败）。失败尝试通常
 // 没有 usage，但**仍要计入请求数与失败数**——重试放大正是靠这一列才看得出来。
-func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool) {
+func (r *Recorder) AddKeyed(now time.Time, realm, uid, model, key string, d Delta, ok bool) {
 	if r == nil {
 		return
 	}
@@ -173,15 +179,15 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 		model = "(unknown)"
 	}
 	scope := "h:" + now.Format(hourLayout)
-	key := scope + "|" + realm + "|" + uid + "|" + model + "|" + d.ModelRate
+	mapKey := scope + "|" + realm + "|" + uid + "|" + model + "|" + d.ModelRate + "|" + key
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	b := r.buckets[key]
+	b := r.buckets[mapKey]
 	if b == nil {
-		b = &bucket{Scope: scope, Realm: realm, UID: uid, Model: model, Rate: d.ModelRate}
-		r.buckets[key] = b
+		b = &bucket{Scope: scope, Realm: realm, UID: uid, Model: model, Rate: d.ModelRate, Key: key}
+		r.buckets[mapKey] = b
 	}
 	b.Req++
 	if !ok {
@@ -300,7 +306,7 @@ func (r *Recorder) load() error {
 	}
 	for i := range f.Buckets {
 		b := f.Buckets[i]
-		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model+"|"+b.Rate] = &b
+		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model+"|"+b.Rate+"|"+b.Key] = &b
 	}
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil
@@ -470,6 +476,7 @@ type Snapshot struct {
 	ByRealm         []KeyedAgg  `json:"by_realm"`
 	ByAccount       []KeyedAgg  `json:"by_account"`
 	ByModel         []KeyedAgg  `json:"by_model"`
+	ByKey           []KeyedAgg  `json:"by_key,omitempty"`
 	Series          []Point     `json:"series"`
 	CreditByAccount []CreditAgg `json:"credit_by_account"`
 	CreditByModel   []CreditAgg `json:"credit_by_model"`
@@ -570,6 +577,7 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	acctAgg := map[string]*aggAcc{}
 	acctRealm := map[string]string{}
 	modelAgg := map[string]*aggAcc{}
+	keyAgg := map[string]*aggAcc{}
 	hourSeries := map[string]*aggAcc{}
 	daySeries := map[string]*aggAcc{}
 	creditAcctAgg := map[string]*creditAcc{}
@@ -620,6 +628,13 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 			modelAgg[b.Model] = &aggAcc{}
 		}
 		modelAgg[b.Model].add(b)
+
+		if b.Key != "" {
+			if keyAgg[b.Key] == nil {
+				keyAgg[b.Key] = &aggAcc{}
+			}
+			keyAgg[b.Key].add(b)
+		}
 
 		if strings.HasPrefix(b.Scope, "h:") {
 			scope := strings.TrimPrefix(b.Scope, "h:")
@@ -676,6 +691,7 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 			return k, nicks[k]
 		}),
 		ByModel:         keyed(modelAgg, func(k string) (string, string) { return k, "" }),
+		ByKey:           keyed(keyAgg, func(k string) (string, string) { return k, "" }),
 		CreditByAccount: creditKeyed(creditAcctAgg),
 		CreditByModel:   creditKeyed(creditModelAgg),
 		Buckets:         matched,

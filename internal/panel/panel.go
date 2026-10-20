@@ -12,8 +12,10 @@ package panel
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -65,6 +67,13 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// PasswordHash 面板独立密码摘要（panel.password_hash，PBKDF2-SHA256）。
+	// 非空时浏览器可用密码登录（会话 cookie），API Key（Bearer）仍然有效；
+	// 空 = 仅 Bearer 鉴权（旧行为）。
+	PasswordHash string
+	// SessionTTL 面板会话有效期（panel.session_hours，默认 24h）。
+	SessionTTL time.Duration
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -90,6 +99,10 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// pwdMu/pwdFails 面板密码登录限速（每 IP 5 分钟最多 10 次失败）。
+	pwdMu    sync.Mutex
+	pwdFails map[string]*loginFail
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -133,11 +146,12 @@ func New(cfg Config) *Panel {
 		cfg.RedisMode = "noop"
 	}
 	p := &Panel{
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		started: time.Now(),
-		logs:    NewRing(500),
-		logins:  map[string]loginSession{},
+		cfg:      cfg,
+		mux:      http.NewServeMux(),
+		started:  time.Now(),
+		logs:     NewRing(500),
+		logins:   map[string]loginSession{},
+		pwdFails: map[string]*loginFail{},
 	}
 	p.routes()
 	return p
@@ -149,6 +163,9 @@ func (p *Panel) Logs() *Ring { return p.logs }
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
+	p.mux.HandleFunc("GET /panel/api/auth_mode", p.authMode)
+	p.mux.HandleFunc("POST /panel/api/login", p.passwordLogin)
+	p.mux.HandleFunc("POST /panel/api/logout", p.passwordLogout)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
@@ -200,12 +217,95 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // 即用新值（无需重启）。
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, p.apiKey()) {
-			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+		if httpauth.VerifyBearer(r, p.apiKey()) {
+			next(w, r)
 			return
 		}
-		next(w, r)
+		if p.validSession(r) {
+			// Cookie 鉴权：非安全方法要求同源 Origin（SameSite=Strict 之外的第二道
+			// CSRF 闸；无 Origin 头的非浏览器客户端不受影响）。
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				if origin := r.Header.Get("Origin"); origin != "" {
+					u, err := url.Parse(origin)
+					if err != nil || u.Host != r.Host {
+						writeErr(w, http.StatusForbidden, "csrf_origin_mismatch")
+						return
+					}
+				}
+			}
+			next(w, r)
+			return
+		}
+		writeErr(w, http.StatusUnauthorized, "invalid_api_key")
 	}
+}
+
+// validSession 校验面板密码会话 cookie（仅当 panel.password_hash 配置时生效）。
+func (p *Panel) validSession(r *http.Request) bool {
+	if p.cfg.PasswordHash == "" {
+		return false
+	}
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	return verifySession(p.cfg.PasswordHash, c.Value, time.Now())
+}
+
+// authMode 公开端点：前端据此决定是否显示密码登录框（不泄露任何秘密）。
+func (p *Panel) authMode(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"password": p.cfg.PasswordHash != ""})
+}
+
+// passwordLogin 面板密码登录：校验 PBKDF2 摘要 → 签发 HMAC 会话 cookie。
+// 带简单限速（每 IP 5 分钟 10 次失败），避免在线爆破。
+func (p *Panel) passwordLogin(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.PasswordHash == "" {
+		writeErr(w, http.StatusNotFound, "password login disabled")
+		return
+	}
+	ip := remoteIP(r)
+	if !p.allowLogin(ip) {
+		writeErr(w, http.StatusTooManyRequests, "too many login attempts, retry later")
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if !VerifyPassword(p.cfg.PasswordHash, body.Password) {
+		p.noteLoginFail(ip)
+		writeErr(w, http.StatusUnauthorized, "invalid password")
+		return
+	}
+	ttl := p.cfg.SessionTTL
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	token, exp := signSession(p.cfg.PasswordHash, ttl)
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		Expires:  exp,
+		MaxAge:   int(time.Until(exp).Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   r.TLS != nil,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// passwordLogout 清除会话 cookie。
+func (p *Panel) passwordLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // apiKey 当前生效密钥（Live 优先，回落静态字段）。

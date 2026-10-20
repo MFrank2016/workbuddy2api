@@ -45,3 +45,25 @@ func TestResolveModelEdge(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchModelAlias(t *testing.T) {
+	m := map[string]string{
+		"gpt-5.6-luna": "glm-5.2",
+		"gpt-5.6-*":    "deepseek-v4.1-flash",
+		"claude-*":     "glm-5.2",
+	}
+	cases := []struct{ model, want string }{
+		{"gpt-5.6-luna", "glm-5.2"},              // 精确优先于通配
+		{"gpt-5.6-terra", "deepseek-v4.1-flash"}, // 后缀通配
+		{"claude-4.6", "glm-5.2"},
+		{"glm-5.2", ""},
+	}
+	for _, c := range cases {
+		if got := matchModelAlias(m, c.model); got != c.want {
+			t.Errorf("matchModelAlias(%q)=%q want %q", c.model, got, c.want)
+		}
+	}
+	if got := matchModelAlias(nil, "x"); got != "" {
+		t.Errorf("nil aliases got %q", got)
+	}
+}

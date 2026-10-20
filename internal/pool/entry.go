@@ -91,6 +91,8 @@ type Status struct {
 	ModelCosts     []ModelCostStatus `json:"model_costs,omitempty"`
 	Disabled       bool              `json:"disabled"`
 	DisabledReason string            `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	// AccountFaultHolds 连续 11140 风控计数（>0 时运维可见；成功/复活清零）。
+	AccountFaultHolds int `json:"account_fault_holds,omitempty"`
 	// Enterprise 企业版账号（auth.EnterpriseID 非空，计算值不落盘）。
 	Enterprise bool `json:"enterprise,omitempty"`
 	// ManualDisabled 运维手动停用（issue #138/#118）——与 disabled **并列独立**，
@@ -208,8 +210,11 @@ type entry struct {
 	// lastCheckinDay 最近一次签到成功的本地日期（panel CheckinDone 观测）。
 	lastCheckinDay string
 	// tokenUsage 聊天请求 token 用量摘要（panel TokenUsage，持久化）。
-	tokenUsage   TokenUsage
-	successCount int64 // 累计成功
+	tokenUsage TokenUsage
+	// accountFaultHolds 连续 11140 账号级风控次数（NoteAccountFault；成功/复活清零，
+	// 进程内计数，重启归零可接受）。
+	accountFaultHolds int
+	successCount      int64 // 累计成功
 	// errTotal 累计错误（终身累计，仅状态展示用；选号权重不消费——原「成功率」
 	// 因子已删，见 pick.weightOf 注释与 success-ema-review）。
 	errTotal    int64     // 累计错误（终身累计，供状态展示；选号权重不消费，原成功率因子已删）

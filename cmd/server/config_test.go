@@ -518,17 +518,37 @@ func TestBadSessionTTL(t *testing.T) {
 	}
 }
 
-// TestMaxBodyLegacyKeyIgnored max_body_mb 已移除（BREAKING）：旧配置文件里仍带该键
-// （含非法值形态 0/-1 与 server 段整体存在）必须解析成功、启动不报错——字段已删，
-// JSON 未知键天然忽略（非 DisallowUnknownFields 严格模式），无 deprecation 噪音。
-func TestMaxBodyLegacyKeyIgnored(t *testing.T) {
-	for _, v := range []string{"8", "16", "0", "-1"} {
-		dir := t.TempDir()
+// TestMaxBodyConfig max_body_mb（吸收自 hub）：默认 16；显式值生效；0 = 不限制；
+// 负值报错（无合理语义）。
+func TestMaxBodyConfig(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		v    string
+		want int
+	}{{"8", 8}, {"16", 16}, {"0", 0}} {
 		fp := filepath.Join(dir, "c.json")
-		os.WriteFile(fp, []byte(`{"server":{"max_body_mb":`+v+`}}`), 0o600)
-		if _, err := Load(fp); err != nil {
-			t.Fatalf("legacy max_body_mb=%s must not fail startup: %v", v, err)
+		os.WriteFile(fp, []byte(`{"server":{"max_body_mb":`+tc.v+`}}`), 0o600)
+		c, err := Load(fp)
+		if err != nil {
+			t.Fatalf("max_body_mb=%s: %v", tc.v, err)
 		}
+		if c.Server.MaxBodyMB != tc.want {
+			t.Errorf("max_body_mb=%s got %d want %d", tc.v, c.Server.MaxBodyMB, tc.want)
+		}
+	}
+	// 缺省 = 16。
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.MaxBodyMB != 16 {
+		t.Errorf("default max_body_mb=%d want 16", c.Server.MaxBodyMB)
+	}
+	// 负值报错。
+	fp := filepath.Join(dir, "neg.json")
+	os.WriteFile(fp, []byte(`{"server":{"max_body_mb":-1}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("max_body_mb=-1 应报错")
 	}
 }
 
