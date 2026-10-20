@@ -20,8 +20,10 @@ import (
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
+	"workbuddy2api/internal/reqlog"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/usage"
 )
 
 // AuthKey 一条鉴权密钥及其可见的**业务分组**（由 cmd/server 从 config 展开注入）。
@@ -65,6 +67,15 @@ type Config struct {
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
+	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
+	// 面板自带 Bearer 鉴权与内嵌静态资源，主路由只做转发。
+	Panel http.Handler
+
+	// Usage 逐请求用量记录器（可选；nil = 不记录）。
+	Usage *usage.Recorder
+
+	// RequestLog 请求指标与 JSONL 归档（可选；nil = 不记录）。
+	RequestLog *reqlog.Recorder
 
 	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
 	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
@@ -281,6 +292,10 @@ func NewHandler(cfg Config) *Handler {
 		h.mux.HandleFunc("GET /metrics", h.withAuth(h.promMetrics))
 	}
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	if cfg.Panel != nil {
+		// 管理面板（internal/panel）：/panel/ 前缀整体转交，面板自带鉴权与静态资源。
+		h.mux.Handle("/panel/", cfg.Panel)
+	}
 	return h
 }
 
@@ -1173,6 +1188,35 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.prompt = stats.PromptTokens()
 			st.cacheHit, st.cacheMiss, st.cacheWr, _ = stats.CacheTotals()
 			cacheMissWarn.noteCacheTokens(bareModel, int64(st.prompt), int64(st.cacheHit), int64(st.cacheMiss))
+			if h.cfg.Usage != nil {
+				elapsed := time.Since(st.start)
+				completion := int64(st.toks)
+				if completion < 0 {
+					completion = 0
+				}
+				var tps float64
+				var hasTPS bool
+				if hasUsage {
+					tps, hasTPS = tokensPerSecond(completion, elapsed, st.ttfb)
+				}
+				h.cfg.Usage.Add(time.Now(), acct.Realm(), acct.UID, bareModel, usage.Delta{
+					PromptTokens:     int64(st.prompt),
+					HasPromptTokens:  hasUsage,
+					CompletionTokens: completion,
+					HasCompletion:    hasUsage,
+					TotalTokens:      int64(st.prompt) + completion,
+					HasTotal:         hasUsage,
+					Credit:           st.credit,
+					HasCredit:        st.hasCredit,
+					HasCacheTokens:   st.cacheHit != 0 || st.cacheMiss != 0,
+					CacheHitTokens:   int64(st.cacheHit),
+					CacheMissTokens:  int64(st.cacheMiss),
+					LatencyMs:        elapsed.Milliseconds(),
+					HasLatency:       true,
+					TokensPerSecond:  tps,
+					HasTPS:           hasTPS,
+				}, st.status < 400)
+			}
 			if credit, ok := stats.Credit(); ok {
 				st.credit = credit
 				st.hasCredit = true

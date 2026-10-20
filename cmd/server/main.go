@@ -15,12 +15,15 @@ import (
 
 	"workbuddy2api/internal/alert"
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/panel"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
+	"workbuddy2api/internal/reqlog"
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/usage"
 )
 
 // checkinReportFn 把 scheduler 的**进程内**签到接到 HTTP 入口（POST /v1/checkin）。
@@ -366,6 +369,35 @@ func main() {
 			cfg.Budget.DailyCreditLimit)
 	}
 
+	// —— panel 能力装配（吸收自 linguo2625469/workbuddy2api-panel）——
+	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
+	usagePath := stateSibling(cfg.StateFile, "usage.json")
+	usageRec := usage.New(usagePath)
+	usageRec.Start()
+	defer usageRec.Stop()
+
+	// 请求指标 + 脱敏 JSONL 归档（默认只开指标；归档开关接通后写入 request-logs/）。
+	requestLog := reqlog.New(reqlog.Config{
+		Dir:           stateSibling(cfg.StateFile, "request-logs"),
+		Enabled:       false,
+		RetentionDays: 7,
+		MaxBytes:      100 << 20,
+	})
+	defer requestLog.Close()
+
+	pn := panel.New(panel.Config{
+		Pool:        p,
+		Upstream:    up,
+		Scheduler:   sch,
+		AuthDir:     cfg.AuthDir,
+		APIKey:      cfg.APIKey,
+		RedisMode:   redisMode,
+		StickyCount: sessCount,
+		Usage:       usageRec,
+		RequestLog:  requestLog,
+		ProbeFile:   stateSibling(cfg.StateFile, "output_probes.json"),
+	})
+
 	h := server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
@@ -379,6 +411,10 @@ func main() {
 		PromptText:   cfg.PromptText,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
+		// panel 能力：管理面板（/panel/）+ 逐请求用量记录（吸收自 panel 分支）。
+		Panel:      pn,
+		Usage:      usageRec,
+		RequestLog: requestLog,
 		// 运维管理端点开关（config admin.enabled，默认 false）。
 		AdminEnabled: cfg.Admin.Enabled,
 		// Prometheus 指标端点开关（config metrics.enabled，默认 false）。
@@ -475,4 +511,13 @@ func main() {
 		log.Fatalf("http: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径回落当前目录）。
+func stateSibling(stateFile, name string) string {
+	dir := filepath.Dir(stateFile)
+	if dir == "" || dir == "." {
+		return name
+	}
+	return filepath.Join(dir, name)
 }
