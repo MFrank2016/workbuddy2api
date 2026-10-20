@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // travelStub 模拟 growth 域全部端点，记录调用次数与请求参数。
@@ -82,7 +82,7 @@ func billingAndGrowthServer(stub *travelStub) *httptest.Server {
 		case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
 			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
-			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":100,"CycleCapacityRemain":500,"CycleCapacityUsed":0}]}}}}`))
+			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":1000,"CycleCapacityRemain":500,"CycleCapacityUsed":0}]}}}}`))
 		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
 			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
 		default:
