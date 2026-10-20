@@ -749,3 +749,67 @@ func TestPromptInvalidModeStillErrors(t *testing.T) {
 		t.Errorf("error should mention (custom / append / passthrough): %v", err)
 	}
 }
+
+func TestRetryConfigNormalize(t *testing.T) {
+	c := Default()
+	c.Upstream.RetryEnabled = true
+	c.Upstream.RetryAttempts = 99 // 越界 → 钳 5
+	c.Upstream.RetryBackoff = 99  // 越界 → 钳 8
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Upstream.RetryAttempts != 5 {
+		t.Errorf("RetryAttempts = %d, want 5", c.Upstream.RetryAttempts)
+	}
+	if c.Upstream.RetryBackoff != 8 {
+		t.Errorf("RetryBackoff = %v, want 8", c.Upstream.RetryBackoff)
+	}
+}
+
+func TestRetryConfigDisabledIsLazy(t *testing.T) {
+	c := Default()
+	c.Upstream.RetryEnabled = false
+	c.Upstream.RetryAttempts = -5 // 关着时不校验
+	c.Upstream.RetryBackoff = -1
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize disabled retry: %v", err)
+	}
+}
+
+func TestPoolThrottleDefaults(t *testing.T) {
+	c := Default()
+	// 默认值：WeightDefault=1.0 / MaxConcurrencyDefault=0 / MinIntervalDefault=0 / MaxTotalConcurrency=0
+	if c.Pool.WeightDefault != 1.0 {
+		t.Errorf("WeightDefault = %v, want 1.0", c.Pool.WeightDefault)
+	}
+	if c.Pool.MaxTotalConcurrency != 0 {
+		t.Errorf("MaxTotalConcurrency = %d, want 0", c.Pool.MaxTotalConcurrency)
+	}
+	// 越界钳制
+	c.Pool.WeightDefault = 5000
+	c.Pool.MaxConcurrencyDefault = 999
+	c.Pool.MinIntervalDefault = 99999
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Pool.WeightDefault != 1000 {
+		t.Errorf("WeightDefault = %v, want clamped 1000", c.Pool.WeightDefault)
+	}
+	if c.Pool.MaxConcurrencyDefault != 256 {
+		t.Errorf("MaxConcurrencyDefault = %d, want 256", c.Pool.MaxConcurrencyDefault)
+	}
+	if c.Pool.MinIntervalDefault != 3600 {
+		t.Errorf("MinIntervalDefault = %v, want 3600", c.Pool.MinIntervalDefault)
+	}
+}
+
+func TestAlertingMinConsecutiveFails(t *testing.T) {
+	c := Default()
+	if c.Alerting.MinConsecutiveFails != 3 {
+		t.Errorf("MinConsecutiveFails = %d, want 3", c.Alerting.MinConsecutiveFails)
+	}
+	c.Alerting.MinConsecutiveFails = -1
+	if err := c.normalize(); err == nil {
+		t.Fatal("want error for negative min_consecutive_fails")
+	}
+}

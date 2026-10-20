@@ -108,9 +108,15 @@ type Config struct {
 		MinHealthyGlobal    int    `json:"min_healthy_global"`    // 默认 0 = 关闭（纯 CN 部署不误报）
 		RecoverHealthy      int    `json:"recover_healthy"`       // 恢复阈值（迟滞上沿），默认 1
 		BreakerThreshold    int    `json:"breaker_threshold"`     // 熔断账号数阈值，默认 0 = 关闭
-		ForTicks            int    `json:"for_ticks"`             // 连续满足多少拍才触发，默认 2
-		ClearTicks          int    `json:"clear_ticks"`           // 连续不满足多少拍才解除，默认 2
-		SendResolve         bool   `json:"send_resolve"`          // 恢复时是否也发通知，默认 false
+		// MinConsecutiveFails 连续失败预警阈值：默认 3；0 = 关闭该规则。
+		// 统计「连续失败计数 ≥ 该值」的账号数（熔断计数 fails 口径：401/403/429
+		// 等喂入 +1，达 breaker_threshold 熔断），≥1 个即告警。与 breaker_high
+		// 的区别：本规则在熔断边界同步发出，语义是「连续失败已达门槛」，而
+		// breaker_high 只数已熔断账号。
+		MinConsecutiveFails int  `json:"min_consecutive_fails"`
+		ForTicks            int  `json:"for_ticks"`    // 连续满足多少拍才触发，默认 2
+		ClearTicks          int  `json:"clear_ticks"`  // 连续不满足多少拍才解除，默认 2
+		SendResolve         bool `json:"send_resolve"` // 恢复时是否也发通知，默认 false
 	} `json:"alerting"`
 
 	// Budget 当日积分预算闸（admission control）。默认**关闭**：
@@ -176,6 +182,18 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP（X-Forwarded-For/X-Real-IP 首段）给上游。
 		// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）；true 才透传。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// RetryEnabled 聊天 SSE 请求的**同账号瞬时重试**开关。默认关闭：
+		// 打开后仅对 5xx 与传输层失败按 retry_attempts 次重试（同一账号、
+		// 指数退避），429/402/401/403 等**永不重试**（配额/凭据问题重试只会更糟）。
+		// 关闭 = 行为与现状逐字一致（5xx/传输失败直接走换号轮转）。
+		RetryEnabled bool `json:"retry_enabled"`
+		// RetryAttempts 同账号最多重试次数（第 1 次失败后额外重试次数），钳 [1,5]。
+		// 默认 1：一次瞬时 5xx/连接失败最多多打一遍上游。上限 5 对齐
+		// workbuddy-switch-plus mirror.py 的 MAX_ATTEMPTS_CAP。
+		RetryAttempts int `json:"retry_attempts"`
+		// RetryBackoff 重试退避基数（秒），钳 [0.25,8]。第 n 次重试等待
+		// base·2^n 秒封顶 8s（对齐 mirror MAX_BACKOFF_CAP），并施加 ±25% 抖动。
+		RetryBackoff float64 `json:"retry_backoff"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -202,17 +220,17 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal  int     `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
-		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
+		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114「累计错误率高/连续失败 N 次的账号移出候选池一段时间」）：
 		// ErrClient/传输层这类「不罚号」失败连续计数，达阈临时出池。与冷却/熔断
 		// 并存取更长者不叠加。默认 5 次 / 10m。
-		DegradeThreshold   int    `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
-		DegradeCooldown    string `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
-		DegradeCooldownMax string `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
+		DegradeThreshold   int     `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
+		DegradeCooldown    string  `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
+		DegradeCooldownMax string  `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
@@ -227,6 +245,22 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// WeightDefault 账号级选号权重默认值（weight 乘子）：默认 1.0（等价现行
+		// 纯三因子权重，行为逐字一致）。auth 文件显式 weight 的账号用其配置值；
+		// 0 = 只读备用（不参与自动轮转）。钳 (0,1000]。
+		WeightDefault float64 `json:"weight_default"`
+		// MaxConcurrencyDefault 账号级并发上限默认值：默认 0 = 不限（回落现行
+		// max_in_flight / max_in_flight_global 分档，行为逐字一致）。auth 文件
+		// 显式 max_concurrency 的账号用其配置值。钳 [0,256]。
+		MaxConcurrencyDefault int `json:"max_concurrency_default"`
+		// MinIntervalDefault 账号级最小请求间隔默认值（秒）：默认 0 = 不限
+		// （行为逐字一致）。auth 文件显式 min_interval 的账号用其配置值。
+		// 软约束：全部被限住时回落 LRU 兜底，不报「暂无可用账号」。钳 [0,3600]。
+		MinIntervalDefault float64 `json:"min_interval_default"`
+		// MaxTotalConcurrency 全池总并发上限：默认 0 = 不限（行为逐字一致）。
+		// 顶满时本次选号返回 nil → handler 回 503（比 mirror 的忙等让渡更稳，
+		// 不进热路径忙等）。钳 [0,512]。
+		MaxTotalConcurrency int `json:"max_total_concurrency"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -319,6 +353,19 @@ func Default() *Config {
 	c.Alerting.BreakerThreshold = 0
 	c.Alerting.ForTicks = 2
 	c.Alerting.ClearTicks = 2
+	// 同号瞬时重试默认关闭：行为与现状逐字一致（字段存疑不影响启动）。
+	// RetryAttempts=1（最多重试 1 次）/ RetryBackoff=0.5s 是开启后的保守默认。
+	c.Upstream.RetryEnabled = false
+	c.Upstream.RetryAttempts = 1
+	c.Upstream.RetryBackoff = 0.5
+	// 账号级流量整形默认 = 无此功能（weight=1.0 等价纯三因子；限额 0 = 不限）。
+	c.Pool.WeightDefault = 1.0
+	c.Pool.MaxConcurrencyDefault = 0
+	c.Pool.MinIntervalDefault = 0
+	c.Pool.MaxTotalConcurrency = 0
+	// 连续失败预警默认开启（阈值 3，镜像 mirror 的 account_fail_threshold=3）；
+	// 0 显式关闭。
+	c.Alerting.MinConsecutiveFails = 3
 	return c
 }
 
@@ -489,6 +536,46 @@ func applyEnv(c *Config) {
 			c.Alerting.SendResolve = b
 		}
 	}
+	if v := os.Getenv("WB2A_RETRY_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.RetryEnabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_RETRY_ATTEMPTS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Upstream.RetryAttempts = n
+		}
+	}
+	if v := os.Getenv("WB2A_RETRY_BACKOFF"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Upstream.RetryBackoff = f
+		}
+	}
+	if v := os.Getenv("WB2A_WEIGHT_DEFAULT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Pool.WeightDefault = f
+		}
+	}
+	if v := os.Getenv("WB2A_MAX_CONCURRENCY_DEFAULT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Pool.MaxConcurrencyDefault = n
+		}
+	}
+	if v := os.Getenv("WB2A_MIN_INTERVAL_DEFAULT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Pool.MinIntervalDefault = f
+		}
+	}
+	if v := os.Getenv("WB2A_MAX_TOTAL_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Pool.MaxTotalConcurrency = n
+		}
+	}
+	if v := os.Getenv("WB2A_ALERTING_MIN_CONSECUTIVE_FAILS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Alerting.MinConsecutiveFails = n
+		}
+	}
 }
 
 func (c *Config) normalize() error {
@@ -591,6 +678,48 @@ func (c *Config) normalize() error {
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
 	}
+	// 上游重试段归一：Enabled=false 时惰性（字段存疑不影响启动）；Enabled=true
+	// 时 Attempts 钳 [1,5]、Backoff 钳 [0.25,8]（越界按"填错单位"处理，钳到合法
+	// 区间而非报错——与 mirror 的上界理由一致）。
+	if c.Upstream.RetryEnabled {
+		if c.Upstream.RetryAttempts < 1 {
+			c.Upstream.RetryAttempts = 1
+		}
+		if c.Upstream.RetryAttempts > 5 {
+			c.Upstream.RetryAttempts = 5
+		}
+		if c.Upstream.RetryBackoff < 0.25 {
+			c.Upstream.RetryBackoff = 0.25
+		}
+		if c.Upstream.RetryBackoff > 8 {
+			c.Upstream.RetryBackoff = 8
+		}
+	}
+	// 账号级流量整形钳制：weight 钳 (0,1000]、限额钳 [0,256]/[0,3600]/[0,512]。
+	if c.Pool.WeightDefault < 0 {
+		c.Pool.WeightDefault = 1.0
+	}
+	if c.Pool.WeightDefault > 1000 {
+		c.Pool.WeightDefault = 1000
+	}
+	if c.Pool.MaxConcurrencyDefault < 0 {
+		c.Pool.MaxConcurrencyDefault = 0
+	}
+	if c.Pool.MaxConcurrencyDefault > 256 {
+		c.Pool.MaxConcurrencyDefault = 256
+	}
+	if c.Pool.MinIntervalDefault < 0 {
+		c.Pool.MinIntervalDefault = 0
+	}
+	if c.Pool.MinIntervalDefault > 3600 {
+		c.Pool.MinIntervalDefault = 3600
+	}
+	if c.Pool.MaxTotalConcurrency < 0 {
+		c.Pool.MaxTotalConcurrency = 0
+	}
+	if c.Pool.MaxTotalConcurrency > 512 {
+		c.Pool.MaxTotalConcurrency = 512
+	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
 	}
@@ -663,6 +792,7 @@ func (c *Config) normalizeAlerting() error {
 		{"alerting.startup_grace_seconds", a.StartupGraceSeconds},
 		{"alerting.for_ticks", a.ForTicks},
 		{"alerting.clear_ticks", a.ClearTicks},
+		{"alerting.min_consecutive_fails", a.MinConsecutiveFails},
 	} {
 		if f.val < 0 {
 			return fmt.Errorf("%s: 不得为负", f.name)

@@ -61,6 +61,7 @@
     "breaker_threshold": 0,
     "for_ticks": 2,
     "clear_ticks": 2,
+    "min_consecutive_fails": 3,
     "send_resolve": false
   },
   "budget": {
@@ -81,7 +82,10 @@
     "device_token": "",
     "device_token_file": "",
     "client_name": "WorkBuddy",
-    "passthrough_ip": false
+    "passthrough_ip": false,
+    "retry_enabled": false,
+    "retry_attempts": 1,
+    "retry_backoff": 0.5
   },
   "features": {
     "sanitize_blacklist_fingerprints": true
@@ -106,7 +110,11 @@
     "idle_weight_per_hour": 0.5,
     "idle_weight_max": 5.0,
     "expiring_soon": "168h",
-    "cost_explore_interval": "30m"
+    "cost_explore_interval": "30m",
+    "weight_default": 1.0,
+    "max_concurrency_default": 0,
+    "min_interval_default": 0,
+    "max_total_concurrency": 0
   },
   "session_sticky": {
     "enabled": true,
