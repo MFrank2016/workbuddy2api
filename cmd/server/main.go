@@ -335,7 +335,7 @@ func main() {
 	if !cfg.Schedule.CatEnabled {
 		log.Printf("夜猫子任务已禁用（schedule.cat_enabled=false）")
 	} else {
-		log.Printf("夜猫子任务已启用：%v 点（task_runner.py ALL --yes --only black_cat）", cfg.Schedule.CatHours)
+		log.Printf("夜猫子任务已启用：%v 点（Go 原生：BlackcatNeed → RunNightChats）", cfg.Schedule.CatHours)
 	}
 	if cfg.Schedule.JitterMinutes > 0 {
 		log.Printf("排程抖动已启用：各任务触发时刻在名义整点后 0-%d 分钟内确定性偏移（schedule.jitter_minutes）",

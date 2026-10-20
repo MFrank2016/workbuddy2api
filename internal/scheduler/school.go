@@ -1,9 +1,9 @@
-// school.go 开学季任务与夜猫子任务的脚本类排程：从系统 crontab 迁入 Go scheduler。
+// school.go 开学季任务的脚本类排程：从系统 crontab 迁入 Go scheduler。
 //
-// 背景：school（12:00）与 cat（01:00 夜猫窗口）原由系统 crontab 调
-// scripts/school_open_day_cron.sh 执行——依赖外部系统 cron、容器重建可能丢失、
-// 不在 config 里配置。迁入后成为第五、第六类任务，时点由 schedule.school_hours /
-// schedule.cat_hours 配置，school_open_day_cron.sh 保留为手动触发入口。
+// 背景：school（12:00）原由系统 crontab 调 scripts/school_open_day_cron.sh 执行
+// ——依赖外部系统 cron、容器重建可能丢失、不在 config 里配置。迁入后时点由
+// schedule.school_hours 配置，school_open_day_cron.sh 保留为手动触发入口。
+// （夜猫子 cat 已换 Go 原生实现，见 blackcat.go。）
 package scheduler
 
 import (
@@ -97,7 +97,7 @@ func runScript(name, root string, commands [][]string) (ok, fail int, note strin
 	return ok, fail, note
 }
 
-// runScriptTask 跑一组脚本命令并记台账：脚本类任务（school/cat）只有「命令级」
+// runScriptTask 跑一组脚本命令并记台账：脚本类任务（school）只有「命令级」
 // 粒度——一条命令要么成功要么失败，没有账号维度的分解。
 //
 // 退出码非 0 即算 Fail（脚本自己会把「活动下线」「非窗口期」等正常态处理成 0 退出，
@@ -119,17 +119,5 @@ func (s *Scheduler) RunSchoolNow() { s.runSchool(triggerManual) }
 func (s *Scheduler) runSchool(trigger string) {
 	s.runScriptTask(taskSchool, trigger, "school", [][]string{
 		{pythonCmd(), "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"},
-	})
-}
-
-// RunCatNow 立即执行夜猫子任务（人工入口）。
-func (s *Scheduler) RunCatNow() { s.runCat(triggerManual) }
-
-// runCat 执行夜猫子任务：task_runner.py ALL --yes --only black_cat。
-// black_cat 时段敏感：夜猫窗口 23:00–08:00 CST 内最多补 1 次（task_runner 内部
-// 判定，非窗口期打印 skip 正常退出）。失败只记 WARN。
-func (s *Scheduler) runCat(trigger string) {
-	s.runScriptTask(taskCat, trigger, "cat", [][]string{
-		{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"},
 	})
 }

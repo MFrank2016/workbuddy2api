@@ -506,7 +506,7 @@ func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
 	case taskSchool:
 		s.runSchool(trigger)
 	case taskCat:
-		s.runCat(trigger)
+		s.runBlackcat(trigger)
 	case taskGrowth:
 		// 成长任务队列：回调在 panel 侧异步启动（返回不等执行完），nil 未挂载则跳过。
 		if fn := s.growthHookFn(); fn != nil {

@@ -130,29 +130,40 @@ func TestRunSchoolNowBuildsCommand(t *testing.T) {
 	}
 }
 
-// TestRunCatNowBuildsCommand RunCatNow 构造
-// python3 scripts/task_runner.py ALL --yes --only black_cat，工作目录为仓库根。
-func TestRunCatNowBuildsCommand(t *testing.T) {
+// TestRunCatNowNative RunCatNow 走 Go 原生夜猫子实现（不再构造 python 子进程）：
+// 窗口钉在正午（窗口外）→ 早退分支不触上游、不拉解释器；台账仍记一行 cat。
+func TestRunCatNowNative(t *testing.T) {
 	t.Setenv("WB2A_PYTHON", "")
 	f := installFakeExec(t)
+
+	restore := nowForNightWindow
+	nowForNightWindow = func() time.Time { return time.Date(2026, 10, 7, 12, 0, 0, 0, time.Local) }
+	t.Cleanup(func() { nowForNightWindow = restore })
+
 	s := New(Config{})
 	s.RunCatNow()
-	want := []string{"scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"}
-	if f.lastName != "python3" || !equalArgs(f.lastArgs, want) {
-		t.Errorf("cmd=%s %v want python3 %v", f.lastName, f.lastArgs, want)
+	if f.runN != 0 {
+		t.Fatalf("原生实现不应拉起 python 子进程: runN=%d cmd=%s %v", f.runN, f.lastName, f.lastArgs)
 	}
-	if f.lastDir != repoRoot() {
-		t.Errorf("dir=%q want repo root %q", f.lastDir, repoRoot())
+	if r, ok := s.ledger.Runs()["cat"]; !ok || r.Total != 0 || r.Fail != 0 {
+		t.Fatalf("cat 台账: ok=%v r=%+v（期望 total=0 fail=0）", ok, r)
 	}
 }
 
-// TestDispatchSchoolCatAndFailureWarnsOnly dispatch 把 school/cat 分发给对应脚本；
-// 脚本失败只记 WARN（不 panic/不向上抛），且不影响后续任务继续分发。
+// TestDispatchSchoolCatAndFailureWarnsOnly dispatch 把 school 分发给脚本、cat
+// 分发给 Go 原生实现；school 脚本失败只记 WARN（不 panic/不向上抛），且不影响
+// 后续任务继续分发。
 func TestDispatchSchoolCatAndFailureWarnsOnly(t *testing.T) {
 	t.Setenv("WB2A_PYTHON", "")
 	f := installFakeExec(t)
 	f.err = errors.New("boom boom")
 	s := New(Config{})
+
+	// cat 已切 Go 原生：把窗口钉在窗口外（正午），dispatch(cat) 走早退分支——
+	// 不触碰本测试的 nil Pool（零值 Config），也不构造 python 子进程。
+	restore := nowForNightWindow
+	nowForNightWindow = func() time.Time { return time.Date(2026, 10, 7, 12, 0, 0, 0, time.Local) }
+	t.Cleanup(func() { nowForNightWindow = restore })
 
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
@@ -167,15 +178,12 @@ func TestDispatchSchoolCatAndFailureWarnsOnly(t *testing.T) {
 		t.Errorf("dispatch(school) 未执行: runN=%d last=%v", f.runN, f.lastArgs)
 	}
 	s.dispatch(context.Background(), taskCat)
-	if f.runN != 2 || f.lastArgs[0] != "scripts/task_runner.py" {
-		t.Errorf("dispatch(cat) 未执行: runN=%d last=%v", f.runN, f.lastArgs)
+	if f.runN != 1 {
+		t.Errorf("dispatch(cat) 不应构造 python 子进程（已切 Go 原生）: runN=%d last=%v", f.runN, f.lastArgs)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "WARN") || !strings.Contains(out, "scripts/school_open_day_2026.py") {
 		t.Errorf("school 失败未按 WARN 记录:\n%s", out)
-	}
-	if !strings.Contains(out, "scripts/task_runner.py") {
-		t.Errorf("cat 失败未按 WARN 记录:\n%s", out)
 	}
 }
 
