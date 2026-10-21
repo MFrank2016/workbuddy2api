@@ -691,6 +691,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 必须声明在 writeFrame 闭包之前：闭包里要写 sawFinish。
 	sawDone := false
 	sawFinish := false
+	// 上游已经明确报错（error 帧）：那是**确定的终止**，不是「说到一半断了」。
+	// 不排除的话，error 帧后上游关 TCP 会被误判成 truncated —— 客户端会先收到
+	// 上游错误、再收到一条误导性的 upstream_truncated。
+	sawErrorFrame := false
 
 	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
 	// 仅 JSON 解析成功时计数记为一次有效转发（JSON 解析失败照常降级原样写出，但不计数）。
@@ -712,6 +716,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			sawFinish = true
 		}
 		if _, hasErr := obj["error"]; hasErr {
+			sawErrorFrame = true
 			// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
 			if o.onErrorFrame != nil {
 				o.onErrorFrame(payload)
@@ -785,6 +790,9 @@ readLoop:
 			if werr := writeChunk(finishOnlyFrame(map[string]any{}, "tool_calls"), ""); werr != nil {
 				return werr
 			}
+			// 这是网关自己补的收尾帧（工具调用回合的 finish_reason: tool_calls）：
+			// 上游虽未发 [DONE]，但语义上已经正常收尾，不应再判成截断。
+			sawFinish = true
 		}
 	}
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
@@ -802,7 +810,7 @@ readLoop:
 	//
 	// 判据与非流式 Aggregate 同构：那边同样以 !sawDone 认定「未正常收尾」。
 	// 空流（validFrames == 0）走上方的 errEmptyStream 分支，不重复判定。
-	truncated := validFrames > 0 && !sawDone && !sawFinish
+	truncated := validFrames > 0 && !sawDone && !sawFinish && !sawErrorFrame
 	if validFrames == 0 {
 		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
 	} else if truncated {
