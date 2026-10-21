@@ -58,5 +58,8 @@ func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":               true,
 		"restart_required": restartRequired,
+		// 全量清单：外部管理端用它 + 自己保存前的快照做 diff，判断「本次变了哪些
+		// 必须重启的字段」（上游读到的已是新文件，自己算不出差异）。
+		"restart_paths": p.cfg.RestartRequiredPaths,
 	})
 }

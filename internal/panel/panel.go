@@ -58,6 +58,12 @@ type Config struct {
 	// 宿主文件系统上原子写好 config.json；而上游这里若是单文件 bind mount，
 	// rename 覆盖会返回 EBUSY（device or resource busy）。
 	SaveConfig func(raw []byte, write bool) (restartRequired []string, err error)
+	// RestartRequiredPaths 所有「只在启动时读取」的配置路径（全量清单）。
+	//
+	// 为什么需要它：外部管理端自己写盘时，上游读到的已经是新配置，按文件差异算出的
+	// restart_required 恒为空 —— 于是「改了 listen 却没提示重启」。管理端拿到这份
+	// 清单后，用自己保存前的快照做对比，才能准确报出「本次哪些字段变了且必须重启」。
+	RestartRequiredPaths []string
 
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int

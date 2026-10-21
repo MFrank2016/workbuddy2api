@@ -452,6 +452,7 @@ func main() {
 		SaveConfig: func(raw []byte, write bool) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch, write)
 		},
+		RestartRequiredPaths: restartRequiredPaths,
 	})
 	// 成长任务队列（面板任务中心同管线）：独立排程（schedule.growth_hours，默认
 	// 01:00），到点由 scheduler.dispatch 调用；回调内部异步启动，不等执行完。
