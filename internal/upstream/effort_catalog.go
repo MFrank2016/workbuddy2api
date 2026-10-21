@@ -168,5 +168,11 @@ func globalEffortMap(remoteEfforts map[string][]string, remoteDefaults map[strin
 			defs[id] = v
 		}
 	}
+	// 远端覆盖**之后**再补一次档（issue #238）：上游元数据仍只回 ['high']，
+	// 若只在静态兜底上补，这一步会把 max 覆盖回去 —— /v1/models 宣称支持 max，
+	// 而 normalizeReasoningEffort 仍把客户端请求的 max 降回 high，等于没修。
+	for id, v := range efforts {
+		efforts[id] = extendGlobalEfforts(id, v)
+	}
 	return efforts, defs
 }
