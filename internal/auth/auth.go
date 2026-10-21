@@ -526,37 +526,39 @@ func (a *Auth) SaveAtomic() error {
 	if a.FilePath == "" {
 		return fmt.Errorf("no FilePath set")
 	}
-	doc := map[string]any{
-		"auth": map[string]any{
-			"accessToken":  a.AccessToken,
-			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
-			"domain":       a.Domain,
-			"realm":        a.realm,
-		},
-		"account": map[string]any{
-			"uid":          a.UID,
-			"enterpriseId": a.EnterpriseID,
-			"nickname":     a.Nickname,
-		},
+	// 先读回磁盘上的现有内容：保留本函数不认识的键，并**绝不覆盖** proxy /
+	// proxy_session（见下方说明）。
+	doc := map[string]any{}
+	if raw, err := os.ReadFile(a.FilePath); err == nil {
+		if err := json.Unmarshal(raw, &doc); err != nil || doc == nil {
+			doc = map[string]any{}
+		}
+	}
+	doc["auth"] = map[string]any{
+		"accessToken":  a.AccessToken,
+		"refreshToken": a.RefreshToken,
+		"expiresAt":    a.ExpiresAt,
+		"domain":       a.Domain,
+		"realm":        a.realm,
+	}
+	doc["account"] = map[string]any{
+		"uid":          a.UID,
+		"enterpriseId": a.EnterpriseID,
+		"nickname":     a.Nickname,
 	}
 	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
 	}
-	// ProxyName 同理非空才写回：**刷新 token 会整份重建文件**，不保留就等于把面板
-	// 绑好的出口线路静默解绑（出口随之改变，而这类变化没人会发现）。空值不写，
-	// 避免在没绑线路的文件里引入空键。
-	if a.ProxyName != "" {
-		doc["proxy"] = a.ProxyName
-	}
-	// ProxySession 同理**必须写回**：Parse 会读它、SessionName() 又优先用它。
-	// 漏写的话每次 token 刷新都会把面板存下的会话名从磁盘上删掉，下次加载退回
-	// 昵称 slug —— 改过昵称的账号出口 IP 会悄悄变化（正是该字段要避免的场景）。
-	if a.ProxySession != "" {
-		doc["proxy_session"] = a.ProxySession
-	}
+	// ★ proxy / proxy_session 不在这里写回 —— 它们的所有权归磁盘（面板）★
+	//
+	// 这两个字段的唯一写入方是 workbuddy-manager（write_auth_file / set_account_proxy）。
+	// 本进程内的 *Auth 最多滞后一个热加载周期（5 秒），于是：
+	//   · 用内存值「非空才写」→ 面板刚绑定、尚未热加载的那次冷却/刷新写回会用旧空值
+	//     把绑定抹掉（实测发生过：一个高频冷却的账号绑定自己消失了）；
+	//   · 用「内存值总是写」→ 面板**解绑**后，内存里仍是旧线路名，写回会把解绑复活。
+	// 两种都错。正确做法是：这两个键一律保持磁盘原样（上面的 doc 已从磁盘读入）。
 	// Groups 非空才写回顶层 groups（与 device_token 同策略：不给无该字段的旧文件引入空键）。
 	//
 	// ★ 必须写回 ★ 本函数用**固定字段集整体重写**文件，漏掉哪个键就等于把那个键从磁盘上
