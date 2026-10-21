@@ -22,16 +22,28 @@ services:
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
       - TZ=Asia/Shanghai
-    # 只监听本机回环：公网统一走宿主机 Caddy（workbuddy2api.061995.xyz，DNS-01 签证书）。
-    # 本机脚本（login.sh / checkin.sh 等）仍用 http://127.0.0.1:7863 访问，不受影响。
-    # 注意：workbuddy-manager 的「更新上游」会保留本文件的定制（网络/卷/环境变量），
-    # 并把端口绑定维持为 127.0.0.1，不会在此处回退成公网绑定。
+    # 默认只监听本机回环：公网统一走宿主机 Caddy（workbuddy2api.061995.xyz，
+    # DNS-01 签证书）。本机脚本（login.sh / checkin.sh 等）仍用
+    # http://127.0.0.1:7863 访问，不受影响。
+    #
+    # 需要从局域网直接访问时（例如脚本跑在另一台机器），在 .env 里设
+    #   WB_UPSTREAM_BIND=0.0.0.0        # 或指定某块内网网卡地址
+    # 而不要直接改这一行 —— 默认值保持「只绑回环」这条安全基线。
+    # 注意：workbuddy-manager 的「更新上游」会保留本文件的定制（网络/卷/环境变量）。
     ports:
-      - "127.0.0.1:7863:7863"
+      - "${WB_UPSTREAM_BIND:-127.0.0.1}:7863:7863"
     networks:
       - default
-      # 宿主机 Caddy 所在 compose 项目的网络（项目目录 /opt/caddy 时名为 caddy_caddy_net），
-      # Caddy 经容器名 workbuddy2api:7863 回源；GUI / 管理端也在此网络内直连本网关。
+      # 宿主机 Caddy 所在 compose 项目的网络（项目目录 /opt/caddy 时名为
+      # caddy_caddy_net），Caddy 经容器名 workbuddy2api:7863 回源；GUI / 管理端
+      # 也在此网络内直连本网关。
+      #
+      # ⚠️ 这条是**外部网络**：宿主机上必须已经存在同名网络，否则
+      # `docker compose up` 会直接失败（network ... declared as external, but
+      # could not be found）。两种处理：
+      #   · 用 Caddy 反代：先 `docker network create caddy_caddy_net`（或由
+      #     Caddy 的 compose 项目创建），网络名不同时用 CADDY_NETWORK 覆盖；
+      #   · 不需要 Caddy：把下面这行连同 networks 段的 caddy_caddy_net 一起注释掉。
       - caddy_caddy_net
     volumes:
       # auths 凭证卷：login.sh 在宿主机落盘 workbuddy-<uid>.json（0600），容器网关以
@@ -54,5 +66,7 @@ services:
       - ./config.json:/app/config.json
 
 networks:
+  # 名称可用 CADDY_NETWORK 覆盖（不同宿主上 Caddy 的 compose 项目名可能不同）。
   caddy_caddy_net:
     external: true
+    name: "${CADDY_NETWORK:-caddy_caddy_net}"
