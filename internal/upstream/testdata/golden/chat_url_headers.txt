@@ -1,0 +1,29 @@
+url: https://chat.example/v2/chat/completions
+accept: application/json, text/event-stream
+accept-language: zh-CN
+authorization: Bearer golden-access-token
+content-type: application/json
+origin: https://www.codebuddy.cn
+referer: https://www.codebuddy.cn/
+user-agent: WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1
+x-agent-purpose: conversation
+x-b3-sampled: 1
+x-b3-spanid: <message-id>
+x-b3-traceid: 0123456789abcdef0123456789abcdef
+x-codebuddy-request: 1
+x-conversation-id: golden-conversation
+x-conversation-message-id: <message-id>
+x-conversation-request-id: 0123456789abcdef0123456789abcdef
+x-domain: copilot.tencent.com
+x-enterprise-id: golden-enterprise
+x-ide-name: WorkBuddy
+x-ide-type: WorkBuddy
+x-ide-version: 5.5.4
+x-machine-id: 769e68ef83636be2e5cb841e9253aa4ffeb2
+x-product: WorkBuddy
+x-request-id: <message-id>
+x-requested-with: XMLHttpRequest
+x-root-request-id: 0123456789abcdef0123456789abcdef
+x-session-id: b2ad66761feec6afad0ede9d0854a697d25f
+x-trace-id: 0123456789abcdef0123456789abcdef
+x-user-id: golden-uid-0001

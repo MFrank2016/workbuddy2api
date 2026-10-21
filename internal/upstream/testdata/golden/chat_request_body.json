@@ -1,0 +1,20 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": "You are a careful assistant.",
+      "role": "system"
+    },
+    {
+      "content": "Summarize the migration plan in one line.",
+      "role": "user"
+    }
+  ],
+  "model": "glm-5.2",
+  "prompt_cache_key": "wb2a-golden-u-8c7223272dc7a6fe829d68372a21d4f1",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "temperature": 0.2
+}
