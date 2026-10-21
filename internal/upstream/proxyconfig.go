@@ -2,8 +2,8 @@ package upstream
 
 import (
 	"encoding/json"
+	"log"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -15,38 +15,33 @@ import (
 // 的话，这些命令会对每个账号报「出口线路不可用」，整批任务全红。
 //
 // 行为约定：
-//   - 文件不存在 / 解析失败 → 静默跳过（保持旧行为：独立命令本来就不依赖配置）；
-//   - 读到了 proxies → 注入（与 server 同一条路径）。
+//   - 文件不存在 → 静默跳过（独立命令本来就不依赖配置）；
+//   - 文件存在但读不了 / 解析失败 → 打一条 WARN 再跳过（不能静默：那会让所有
+//     绑了线路的账号报「上游没有配置任何线路」，而真正原因是这份配置）；
+//   - 读到了 proxies → 注入，并打一行「加载了几条、来自哪个文件」便于对账。
 //
-// 查找顺序：显式路径 → 当前目录 config.json → 上一级 config.json（cmd 常在
-// 仓库子目录里跑）。
+// 查找范围**只有**显式路径或当前工作目录的 config.json —— 不再向上级目录探测：
+// 那可能读到无关项目的配置，静默把账号流量导到别的代理上。
 func ConfigureProxiesFromConfigFile(explicit string) {
-	for _, path := range configCandidates(explicit) {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var doc struct {
-			Proxies map[string]string `json:"proxies"`
-		}
-		if err := json.Unmarshal(raw, &doc); err != nil {
-			continue
-		}
-		if len(doc.Proxies) > 0 {
-			ConfigureProxies(doc.Proxies)
-		}
+	path := strings.TrimSpace(explicit)
+	if path == "" {
+		path = "config.json"
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		// 文件不存在是正常形态（这些命令只读 auths/）。
 		return
 	}
-}
-
-func configCandidates(explicit string) []string {
-	var out []string
-	if p := strings.TrimSpace(explicit); p != "" {
-		out = append(out, p)
+	var doc struct {
+		Proxies map[string]string `json:"proxies"`
 	}
-	out = append(out, "config.json")
-	if wd, err := os.Getwd(); err == nil {
-		out = append(out, filepath.Join(filepath.Dir(wd), "config.json"))
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		log.Printf("WARN: 出口线路：读取 %s 失败，线路表按空处理：%v", path, err)
+		return
 	}
-	return out
+	if len(doc.Proxies) == 0 {
+		return
+	}
+	ConfigureProxies(doc.Proxies)
+	log.Printf("出口线路已加载：%d 条（来自 %s）", len(RouteNames()), path)
 }

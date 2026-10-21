@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"regexp"
@@ -547,6 +549,11 @@ func applyEnv(c *Config) {
 		var table map[string]string
 		if err := json.Unmarshal([]byte(v), &table); err == nil {
 			c.Proxies = table
+		} else {
+			// 静默丢弃会让上游以「空线路表」启动，随后每个绑了线路的账号都报
+			// 「上游没有配置任何线路」—— 错误指向 config.json，真正的原因却是这个
+			// 环境变量。applyEnv 没有 error 返回，至少把原因说出来。
+			log.Printf("WARN: WB2A_PROXIES 不是合法的 JSON 对象，已忽略：%v", err)
 		}
 	}
 	if v := os.Getenv("WB2A_ADMIN_ENABLED"); v != "" {
@@ -685,8 +692,16 @@ func (c *Config) normalize() error {
 		for name, addr := range c.Proxies {
 			n := strings.TrimSpace(name)
 			v := strings.TrimSpace(addr)
+			// 空条目直接报错而不是静默丢弃：丢掉的话，绑了该名字的账号会在每次
+			// 请求时报「未知的出口线路」—— 而真正的原因（半填的配置）本可以在启动
+			// 时一眼看到。既然这里是 fail-fast，就 fa 到底。
 			if n == "" || v == "" {
-				continue
+				return fmt.Errorf("proxies: 线路名或地址为空（name=%q）", n)
+			}
+			if _, dup := clean[n]; dup {
+				// 两个只差首尾空白的键会折叠成同一个名字，谁生效取决于 map 迭代
+				// 顺序 —— 路由变成不确定的，必须拒绝。
+				return fmt.Errorf("proxies[%s]: 线路名重复（仅空白差异）", n)
 			}
 			// `{account}` 是会话模板占位符（面板支持），url.Parse 会因花括号报
 			// "invalid userinfo"。校验时先换成固定示例会话名，真实地址在
@@ -694,15 +709,22 @@ func (c *Config) normalize() error {
 			probe := strings.ReplaceAll(v, "{account}", "probe")
 			u, err := url.Parse(probe)
 			if err != nil {
-				return fmt.Errorf("proxies[%s]: %w", n, err)
+				// 代理地址常带 user:password；*url.Error 会原样回显整条地址，
+				// 只保留内层原因，别把密码写进启动日志。
+				var ue *url.Error
+				if errors.As(err, &ue) {
+					return fmt.Errorf("proxies[%s]: invalid address: %v", n, ue.Err)
+				}
+				return fmt.Errorf("proxies[%s]: invalid address", n)
 			}
 			switch strings.ToLower(u.Scheme) {
 			case "http", "https", "socks5", "socks5h":
 			default:
 				return fmt.Errorf("proxies[%s]: 不支持的协议 %q（只能是 http/https/socks5/socks5h）", n, u.Scheme)
 			}
-			if u.Host == "" {
-				return fmt.Errorf("proxies[%s]: 地址缺少主机名（%q）", n, v)
+			// Hostname() 而非 Host：`user:pass@:1080` 的 Host 非空但主机名为空。
+			if u.Hostname() == "" {
+				return fmt.Errorf("proxies[%s]: 地址缺少主机名（scheme %q）", n, u.Scheme)
 			}
 			clean[n] = v
 		}
