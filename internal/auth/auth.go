@@ -591,11 +591,9 @@ func (a *Auth) SaveAtomic() error {
 	if err != nil {
 		return err
 	}
-	tmp := a.FilePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, a.FilePath)
+	// 权限与属主：跨 uid 场景的核心（详见 atomicwrite.go）——已有文件沿用磁盘上的
+	// mode 与 uid/gid，新文件用 FileMode()（默认 0600）；chown 失败只 warning。
+	return writeAtomicWithMode(a.FilePath, raw, logfmt.Label(a.UID, a.Nickname))
 }
 
 // AuthFileGlob auth 文件的统一 glob 模式（宽侧：workbuddy*.json）。
