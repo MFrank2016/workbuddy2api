@@ -600,7 +600,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			// 因子对 global 完全失效，选号退化成纯轮询（issue #228）。
 			// UserResourceDetailedWithExpiry 只调 billing/meter 只读接口，
 			// 不碰签到，风控语义与 D4 门控一致。
-			if remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, s.cfg.ExpiringSoonWindow); err != nil {
+			if remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, s.ExpiringSoonWindow()); err != nil {
 				log.Printf("user-resource(global) %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			} else {
 				s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
@@ -656,7 +656,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		}
 		// 分桶查余额：快过期窗口内的积分单独标记，pool 优先消耗（issue:积分过期）。
 		// ExpiringSoonWindow<=0 时退化为纯总量（与引入前一致）。
-		remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, s.cfg.ExpiringSoonWindow)
+		remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, s.ExpiringSoonWindow())
 		if err != nil {
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			oc.Status = CheckinFail
