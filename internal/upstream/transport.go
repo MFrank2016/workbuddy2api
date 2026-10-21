@@ -7,6 +7,7 @@ package upstream
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -99,13 +100,74 @@ func newTransport() *http.Transport {
 // 的 proxies 里使用（ConfigureProxies 会忽略它），避免语义歧义。
 const DirectRouteName = "__direct__"
 
-var directTransport = sync.OnceValue(func() *http.Transport {
-	tr := newTransport()
-	// newTransport 默认跟随 HTTP(S)_PROXY；直连必须显式清空。空闲连接池与
-	// 其它线路分开（每个 Transport 自带池），不会把代理连接复用给直连。
-	tr.Proxy = nil
-	return tr
-})
+// directTransport 返回「强制直连」用的 Transport（Proxy=nil）。
+//
+// 从模板克隆而不是裸 newTransport()：否则会丢掉 CA 包 / ResponseHeaderTimeout
+// 等客户端级配置（与线路 transport 同一个坑）。模板变更时缓存由
+// ConfigureBaseTransport 清空。
+var directCache = struct {
+	mu sync.Mutex
+	tr *http.Transport
+}{}
+
+func directTransport() *http.Transport {
+	directCache.mu.Lock()
+	defer directCache.mu.Unlock()
+	if directCache.tr == nil {
+		tr := cloneBaseTransport()
+		// newTransport 默认跟随 HTTP(S)_PROXY；直连必须显式清空。空闲连接池与
+		// 其它线路分开（每个 Transport 自带池），不会把代理连接复用给直连。
+		tr.Proxy = nil
+		directCache.tr = tr
+	}
+	return directCache.tr
+}
+
+// ── 线路 transport 的模板（客户端级配置继承）────────────────────────────
+//
+// 线路 transport 若直接 `newTransport()`，就会丢掉客户端级配置：
+//
+//	· `Client.SetCABundle` 只把额外根证书装到 c.HTTP / c.ChatHTTP 上 —— 走
+//	  TLS 解密代理（ca_bundle 的存在理由）时，线路请求会 x509 校验失败；
+//	· `upstream.header_timeout_seconds` 只改 ChatHTTP 的 ResponseHeaderTimeout，
+//	  线路 transport 仍是硬编码默认值。
+//
+// 所以维护一个「模板」：main 在配置完成后注入，SetCABundle 也会刷新它；线路
+// transport 一律从模板克隆。
+var baseTransport = struct {
+	mu sync.RWMutex
+	tr *http.Transport
+}{}
+
+// ConfigureBaseTransport 设置线路 transport 的模板（传 nil = 回到 newTransport 默认）。
+// 同时清空线路缓存与直连缓存：模板变了，旧连接池的配置就过时了。
+func ConfigureBaseTransport(tr *http.Transport) {
+	baseTransport.mu.Lock()
+	if tr == nil {
+		baseTransport.tr = nil
+	} else {
+		baseTransport.tr = tr.Clone()
+	}
+	baseTransport.mu.Unlock()
+
+	routes.mu.Lock()
+	routes.cache = map[string]*http.Transport{}
+	routes.mu.Unlock()
+
+	directCache.mu.Lock()
+	directCache.tr = nil
+	directCache.mu.Unlock()
+}
+
+func cloneBaseTransport() *http.Transport {
+	baseTransport.mu.RLock()
+	tr := baseTransport.tr
+	baseTransport.mu.RUnlock()
+	if tr == nil {
+		return newTransport()
+	}
+	return tr.Clone()
+}
 
 // ── 账号级出口线路（issue #210）──────────────────────────────────
 //
@@ -162,7 +224,13 @@ func normalizeProxyURL(raw string) (*url.URL, error) {
 	}
 	u, err := url.Parse(v)
 	if err != nil {
-		return nil, fmt.Errorf("invalid proxy address: %w", err)
+		// `*url.Error` 的 Error() 会原样回显输入地址 —— 而代理地址里常带
+		// `user:password`。只保留内层原因，绝不把原始地址写进错误。
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return nil, fmt.Errorf("invalid proxy address: %v", ue.Err)
+		}
+		return nil, fmt.Errorf("invalid proxy address")
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "socks5h":
@@ -171,8 +239,11 @@ func normalizeProxyURL(raw string) (*url.URL, error) {
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme %q (want http/https/socks5/socks5h)", u.Scheme)
 	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("proxy address has no host: %q", v)
+	// 用 Hostname() 而不是 Host：`socks5://user:pass@:1080` 的 Host 是 ":1080"
+	// （非空），但主机名其实为空 —— 这种地址连不上，且会让「有主机名」的检查失效。
+	if u.Hostname() == "" {
+		// 不回显原文：它可能包含 userinfo。
+		return nil, fmt.Errorf("proxy address has no host (scheme %q)", u.Scheme)
 	}
 	return u, nil
 }
@@ -197,7 +268,7 @@ func TransportFor(name, session string) (*http.Transport, error) {
 		return directTransport(), nil
 	}
 	if name == "" {
-		return newTransport(), nil
+		return cloneBaseTransport(), nil
 	}
 	routes.mu.RLock()
 	addr, ok := routes.table[name]
@@ -213,11 +284,7 @@ func TransportFor(name, session string) (*http.Transport, error) {
 
 	rendered := addr
 	if strings.Contains(rendered, SessionPlaceholder) {
-		s := strings.TrimSpace(session)
-		if s == "" {
-			s = "acct"
-		}
-		rendered = strings.ReplaceAll(rendered, SessionPlaceholder, s)
+		rendered = strings.ReplaceAll(rendered, SessionPlaceholder, sanitizeSession(session))
 	}
 	key := name + "\x00" + rendered
 
@@ -232,11 +299,18 @@ func TransportFor(name, session string) (*http.Transport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("出口线路 %q 的地址无效：%w", name, err)
 	}
-	tr := newTransport()
+	tr := cloneBaseTransport()
 	tr.Proxy = http.ProxyURL(u)
 	routes.mu.Lock()
 	if routes.cache == nil {
 		routes.cache = map[string]*http.Transport{}
+	}
+	// 双检：两个 goroutine 同时未命中时会各建一份，后写的覆盖先写的 ——
+	// 先写的那份空闲连接池就泄漏了。这里在写锁内再看一次，输家关掉自己的池。
+	if existing := routes.cache[key]; existing != nil {
+		routes.mu.Unlock()
+		tr.CloseIdleConnections()
+		return existing, nil
 	}
 	routes.cache[key] = tr
 	routes.mu.Unlock()
@@ -269,4 +343,32 @@ func roundTripCloseIdle(rt http.RoundTripper) {
 	if ci, ok := rt.(closeIdler); ok {
 		ci.CloseIdleConnections()
 	}
+}
+
+// sanitizeSession 把会话名收敛到 URL userinfo 安全字符集。
+//
+// 为什么必须做：会话名来自 auth 文件的 `proxy_session`（可能是手写/旧版遗留），
+// 而它会被直接替换进代理地址的 username。含 `@` / `:` / `/` / `?` / `#` / 空白
+// 时，`url.Parse` 会把它解释成**另一个主机** —— 例如模板
+// `http://{account}:pass@gw:8080` + session `evil.com/` 会解析到 evil.com，
+// 等于把带凭据的请求发给攻击者指定的主机。
+func sanitizeSession(raw string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(raw) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "acct"
+	}
+	if len(out) > 64 {
+		out = out[:64]
+	}
+	return out
 }

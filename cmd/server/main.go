@@ -231,6 +231,8 @@ func main() {
 	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
 	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
 		tr.ResponseHeaderTimeout = up.HeaderTimeout
+		// 让「按账号线路」的 transport 也继承这份配置（连接池参数 / 首字节超时）。
+		upstream.ConfigureBaseTransport(tr)
 	}
 	// 账号级出口线路表（config.json 的 proxies 段 / WB2A_PROXIES）：
 	// 账号文件顶层的 `proxy` 写线路名，这里注入「线路名 → 代理地址」映射。
@@ -627,6 +629,11 @@ var restartRequiredPaths = []string{
 func applyIncoming(cur, incoming map[string]any) (map[string]any, []string) {
 	before := deepCopyMap(cur)
 	merged := mergeConfigMaps(cur, incoming)
+	if before == nil {
+		// 深拷贝失败：宁可保守地报告「这些字段可能需要重启」，也不要因为
+		// before 与 merged 变成同一个对象而给出「全部热生效」的假象。
+		return merged, append([]string(nil), restartRequiredPaths...)
+	}
 	return merged, restartRequiredFields(before, merged)
 }
 
@@ -634,11 +641,11 @@ func applyIncoming(cur, incoming map[string]any) (map[string]any, []string) {
 func deepCopyMap(m map[string]any) map[string]any {
 	b, err := json.Marshal(m)
 	if err != nil {
-		return m
+		return nil
 	}
 	var out map[string]any
 	if err := json.Unmarshal(b, &out); err != nil {
-		return m
+		return nil
 	}
 	return out
 }
@@ -708,6 +715,16 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 			return nil, fmt.Errorf("replace config: %w", err)
 		}
 	}
+	// 出口线路表：`proxies` 段改了要重新注入，否则内存里的路由表还是旧的 ——
+	// 面板那边会显示「已热生效」，而新增/改名的线路实际查不到。
+	// ConfigureProxies 同时会清空按线路缓存的 transport，地址变更也能立即生效。
+	upstream.ConfigureProxies(newCfg.Proxies)
+	if names := upstream.RouteNames(); len(names) > 0 {
+		log.Printf("出口线路已重新加载：%d 条（%s）", len(names), strings.Join(names, ", "))
+	} else {
+		log.Printf("出口线路已清空（config.json 的 proxies 段为空）")
+	}
+
 	// 热应用（能立即生效的字段全部应用）。
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,

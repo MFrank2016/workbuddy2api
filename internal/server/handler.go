@@ -1269,6 +1269,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if errors.As(terr, &uerr) {
 			status = uerr.Status
 		}
+		// 线路配置错误（账号绑定的线路名不存在 / 地址非法 / 上游没配任何线路）：
+		// 这是**配置问题，不是账号问题** —— 换多少个号结果都一样。此前它落进下面的
+		// 「网络抖动」分支，会 NoteFailures + fail + 换号，一次拼错就能把整池打空
+		// 并最终 503，而且日志里只看到「no healthy account」。这里直接终止轮转。
+		if uerr != nil && uerr.Kind == upstream.ErrRouteConfig {
+			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			st.status = uerr.Status
+			lastErr = terr
+			log.Printf("ERROR: [server] route config acct=%s: %v (rotation stopped, account not penalized)",
+				logfmt.Label(acct.UID, acct.Nickname), terr)
+			break
+		}
 		if uerr == nil && terr != nil {
 			// 上游超时 / 停滞：**不换号、不罚号**。
 			//
@@ -1430,7 +1442,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 502 观测没有意义）。
 				st.status = http.StatusBadGateway
 				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
-			case upstream.IsTruncatedStreamError(sErr):
+			case upstream.IsTruncatedStreamError(sErr) && errFrame == "":
+				// `&& errFrame == ""`：上游 200 + error 帧后直接关 TCP（6004 限流 /
+				// 审核拦截的典型形态）也会被判成截断。那种情况必须走下面的 error 帧
+				// 分支做账号处置（模型级冷却 / 惩罚 / 清负缓存），否则限流号会继续
+				// 被选中。
 				// 上游 200 但流中途断掉（转发过内容帧、无 finish_reason、无 [DONE]）：
 				// StreamHint 已在 [DONE] 之前补一条 error 帧（客户端由此判失败而非
 				// 「完成」）。这里同样把日志/状态收敛到 502 —— 不这么做，日志里留下

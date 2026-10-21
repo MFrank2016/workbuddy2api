@@ -551,6 +551,12 @@ func (a *Auth) SaveAtomic() error {
 	if a.ProxyName != "" {
 		doc["proxy"] = a.ProxyName
 	}
+	// ProxySession 同理**必须写回**：Parse 会读它、SessionName() 又优先用它。
+	// 漏写的话每次 token 刷新都会把面板存下的会话名从磁盘上删掉，下次加载退回
+	// 昵称 slug —— 改过昵称的账号出口 IP 会悄悄变化（正是该字段要避免的场景）。
+	if a.ProxySession != "" {
+		doc["proxy_session"] = a.ProxySession
+	}
 	// Groups 非空才写回顶层 groups（与 device_token 同策略：不给无该字段的旧文件引入空键）。
 	//
 	// ★ 必须写回 ★ 本函数用**固定字段集整体重写**文件，漏掉哪个键就等于把那个键从磁盘上

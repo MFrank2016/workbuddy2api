@@ -44,6 +44,10 @@ const (
 	ErrModelEntitlement                // 11158「model not allowed for user type」（免费号不可用）→ 模型级权限，不罚号、仍轮换
 	ErrClient                          // 其他 4xx / 业务错误
 	ErrToolCallMismatch                // 11148 工具调用/结果历史错配 → 请求级错误：不罚号、不轮转
+	// ErrRouteConfig 账号绑定的出口线路不可用（线路名不存在 / 地址非法 / 未配置线路）。
+	// 这是**配置错误**，换多少个号都一样：不罚号、不轮转、不喂熔断，直接失败。
+	// 此前它被当成普通 error 走「网络抖动」分支，一次拼错就能把整池打空并最终 503。
+	ErrRouteConfig
 )
 
 func (k ErrKind) String() string {
@@ -76,6 +80,8 @@ func (k ErrKind) String() string {
 		return "model_entitlement"
 	case ErrToolCallMismatch:
 		return "tool_call_mismatch"
+	case ErrRouteConfig:
+		return "route_config"
 	case ErrClient:
 		return "client"
 	default:
@@ -831,13 +837,31 @@ func (c *Client) clientFor(a *auth.Auth, chat bool) (*http.Client, error) {
 		if a != nil {
 			label = logfmt.Label(a.UID, a.Nickname) + " "
 		}
-		return nil, fmt.Errorf("账号 %s出口线路不可用：%w", label, err)
+		// **typed 错误**：这是配置问题，不是账号/传输问题。返回普通 error 会让
+		// handler 走进「网络抖动」分支（NoteFailures + fail + 换号），一次拼错
+		// 就能把整池打空并最终 503。ErrRouteConfig 在 handler 里是「不罚号、不轮转」。
+		return nil, &Error{
+			Kind:   ErrRouteConfig,
+			Status: http.StatusServiceUnavailable,
+			Msg:    fmt.Sprintf("账号 %s出口线路不可用：%v", label, err),
+		}
 	}
+	// 复制客户端级设置（Timeout / CheckRedirect / Jar …），只换 Transport。
+	// 直接 new 一个 client 会丢掉 upstream.timeout_seconds 等配置。
+	base := c.HTTP
+	if chat && c.ChatHTTP != nil {
+		base = c.ChatHTTP
+	}
+	if base == nil {
+		base = &http.Client{}
+	}
+	hc := *base
+	hc.Transport = tr
 	if chat {
 		// 聊天无总时长（SSE 长流），首字节由 Transport 的 ResponseHeaderTimeout 管
-		return &http.Client{Timeout: 0, Transport: tr}, nil
+		hc.Timeout = 0
 	}
-	return &http.Client{Timeout: 120 * time.Second, Transport: tr}, nil
+	return &hc, nil
 }
 
 // chatHTTPFor 聊天用 client（按账号线路）。
@@ -1096,6 +1120,9 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		Nickname:     a.Nickname,
 		DeviceToken:  a.DeviceToken,
 		ProxyName:    a.ProxyName,
+		// 必须带上会话名：否则续期请求会按昵称 slug 渲染 {account}，而业务流量
+		// 用的是存下来的 proxy_session —— 同一账号的续期与聊天从不同出口 IP 出去。
+		ProxySession: a.ProxySession,
 	}
 	a.Unlock()
 	c.RefreshHeaders(req, &hdrSnapshot)
@@ -1516,7 +1543,12 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	// 按账号线路出站：这里带的是账号 Bearer，走共享 transport 就等于把流量漏到宿主 IP。
+	client, cerr := c.clientFor(a, false)
+	if cerr != nil {
+		return nil, cerr
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1596,7 +1628,12 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	// （Bearer + web UA → 400 code 12403，见 global-models-missing.md）。
 	c.CommonHeaders(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	// 按账号线路出站：这里带的是账号 Bearer，走共享 transport 就等于把流量漏到宿主 IP。
+	client, cerr := c.clientFor(a, false)
+	if cerr != nil {
+		return nil, cerr
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -2210,5 +2247,8 @@ func (c *Client) SetCABundle(path string) error {
 	if c.ChatHTTP != nil {
 		c.ChatHTTP.Transport = tr
 	}
+	// 线路 transport 也从模板克隆 —— 否则走 TLS 解密代理时它们仍用系统根证书，
+	// ca_bundle 对绑了线路的账号完全无效。
+	ConfigureBaseTransport(tr)
 	return nil
 }

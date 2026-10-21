@@ -462,7 +462,13 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 			fmt.Printf("[dbg] %s: %s\n", k, req.Header.Get(k))
 		}
 	}
-	resp, err := c.HTTP.Do(req)
+	// 这是聊天请求（带账号 Bearer）：必须按账号线路出站，否则绑了线路的账号
+	// 仍从宿主 IP 出站。用 chat client（无总时长，交给 Transport 的首字节超时）。
+	chatClient, cerr := c.chatHTTPFor(a)
+	if cerr != nil {
+		return "", "", cerr
+	}
+	resp, err := chatClient.Do(req)
 	if err != nil {
 		return "", "", err
 	}

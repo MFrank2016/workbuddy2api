@@ -121,3 +121,40 @@ func TestSaveAtomicOmitsEmptyProxy(t *testing.T) {
 		t.Fatalf("未绑线路的文件不应写回空 proxy 键，实际: %v", doc["proxy"])
 	}
 }
+
+// TestSaveAtomicPreservesProxySession 与 proxy 同一类坑：SaveAtomic 用固定字段集
+// 整体重写文件，漏写 proxy_session 就会在每次 token 刷新时把它从磁盘删掉 ——
+// SessionName() 随后退回昵称 slug，改过昵称的账号出口 IP 会悄悄变化。
+func TestSaveAtomicPreservesProxySession(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "workbuddy-sess.json")
+	raw := []byte(`{
+		"auth": {"accessToken":"t","refreshToken":"r","expiresAt":1,"domain":"d","realm":"cn"},
+		"account": {"uid":"u","nickname":"n"},
+		"proxy": "resin",
+		"proxy_session": "sess-abc"
+	}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	a, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if a.ProxySession != "sess-abc" {
+		t.Fatalf("ProxySession = %q", a.ProxySession)
+	}
+	a.FilePath = path
+	a.AccessToken = "t2"
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("SaveAtomic: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	var doc map[string]any
+	if err := json.Unmarshal(after, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got, _ := doc["proxy_session"].(string); got != "sess-abc" {
+		t.Fatalf("SaveAtomic 丢了 proxy_session：%v", doc["proxy_session"])
+	}
+}
