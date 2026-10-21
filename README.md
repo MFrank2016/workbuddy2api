@@ -22,11 +22,19 @@
 
 ---
 
+> [!IMPORTANT]
+> **原上游已停止维护（2026-10-21）**：`linguo2625469/workbuddy2api-panel` 不再更新代码、不跟进上游变化、不处理 issue / PR。
+>
+> 原因：上游开始禁用反代（通道校验、账号限制收紧）、维护者精力有限、非法转卖泛滥。本仓库是该上游的延续 fork，按原项目 MIT License 自行维护；通道稳定性与存活周期已不可控，因使用非官方客户端导致的账号风控 / 封禁由使用者自行承担。
+>
+> **维护方式披露**：原上游近期的 issue / PR 处置、代码审查、测试与修复实现大量由 AI 辅助完成（自动化编码 agent），合并与发布决策由维护者作出。
+
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeBuddy``` 账号包装为统一的 `/v1/chat/completions` 服务。
+WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 `CodeBuddy` 账号包装为统一的 `/v1/chat/completions` 服务。
 
 ### 交流群组
+
 - [@checkinHome](https://t.me/checkinHome)
 
 ### 本项目做什么
@@ -59,38 +67,38 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 新增配置面与缺省值（吸收自 panel；`logging.*` 两项缺省开启、对齐 panel）：
 
-| 配置 | 缺省 | 说明 |
-| --- | --- | --- |
-| `pool.credit_floor` | `0` | 积分保底；`0` = 关闭 |
-| `pool.prefer_expiring` | `true` | 最早到期积分优先路由；`false` = 退回普通权重 |
-| `schedule.include_disabled_in_tasks` | `false` | 保号任务是否覆盖已禁用账号 |
-| `schedule.balance_refresh_enabled` / `balance_refresh_minutes` | `true` / `5` | 余额后台刷新周期 |
-| `schedule.growth_hours` / `schedule.growth_enabled` | `[1]` / `true` | 成长任务队列独立排程（panel 任务中心同管线） |
-| `logging.request_archive_enabled` / `request_retention_days` / `request_archive_max_mb` | `true` / `7` / `100` | 请求 JSONL 归档与保留策略 |
-| `logging.request_client_info` | `true` | 请求日志是否记录来源 IP/UA |
-| `server.read_timeout` | `"300s"` | 入站请求读取上限（issue #100）；`"0"` = 不限制 |
-| `server.max_body_mb` | `16` | 单请求体上限（MB）；`0` = 不限制，超限 413 |
-| `upstream.model_aliases` | `{}` | 模型重定向（后缀 `*` 通配）：如把桌面端后台任务模型改写到免费模型；空 = 不启用 |
-| `upstream.stream_keepalive_seconds` | `15` | 首字节前 SSE 注释心跳周期（秒）；`0` = 关闭 |
-| `upstream.first_byte_retry` | `true` | 首字节前传输层失败时同账号重开一次；`false` = 关闭 |
-| `debug.enabled` / `debug.full_requests` / `debug.dir` | `false` / `false` / `./data` | 完整请求诊断 JSONL（入站/出站、脱敏）；`full_requests` 才记录完整 body |
-| `auth.delete_on_auth_failure` | `false` | 授权失效时删除凭据；删除前仍做只读可用性探测，不确定则保留 |
-| `panel.password_hash` / `panel.session_hours` | `""` / `24` | 面板独立密码（PBKDF2 摘要，`wb2api -hash-password '<pw>'` 生成）；空 = 仅 API Key |
-| `upstream.ca_bundle` / `upstream.cn_chat_base` | `""` / `""` | 额外根证书 PEM（TLS 解密代理）/ 国内上游地址覆盖（如 `https://www.workbuddy.cn`） |
-| `api_keys[].models` / `api_keys[].realm` | 空 | 密钥级模型白名单（`*` 通配）与域绑定；不匹配本地 400 |
-| `auth.disabled_models`（auth 文件） | 空 | 账号级禁用模型（`*` 通配），选号跳过 |
-| `pool.account_fault_hold` / `account_fault_disable_after` | `"24h"` / `3` | 11140 风控处置：长冷却后自动重试，连续 N 次升级禁用；`"0"` = 立即禁用 |
-| `pool.account_daily_credit_limit` | `0` | 单账号当日 credit 上限；`0` = 关闭（达到后当日不参与选号） |
-| `pool.account_daily_token_limit` | `0` | 单账号当日 prompt token 上限；`0` = 关闭。credit 闸拦不住「不扣费但猛灌上下文」的模型，这道按输入量兜底 |
-| `pool.large_prompt_threshold` | `200000` | 超大 prompt 阈值（token）；超过它的请求撞 429 时**不换号重放**，改为等该号冷却后同号重试一次，仍失败回 429。`0` = 关闭该保护 |
-| `pool.large_prompt_max_wait` | `"180s"` | 上述等待的上限；`"0"` = 不等待（直接回 429）。等待期间持有该号在途名额，不宜过大 |
+| 配置                                                                                    | 缺省                         | 说明                                                                                                                         |
+| --------------------------------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `pool.credit_floor`                                                                     | `0`                          | 积分保底；`0` = 关闭                                                                                                         |
+| `pool.prefer_expiring`                                                                  | `true`                       | 最早到期积分优先路由；`false` = 退回普通权重                                                                                 |
+| `schedule.include_disabled_in_tasks`                                                    | `false`                      | 保号任务是否覆盖已禁用账号                                                                                                   |
+| `schedule.balance_refresh_enabled` / `balance_refresh_minutes`                          | `true` / `5`                 | 余额后台刷新周期                                                                                                             |
+| `schedule.growth_hours` / `schedule.growth_enabled`                                     | `[1]` / `true`               | 成长任务队列独立排程（panel 任务中心同管线）                                                                                 |
+| `logging.request_archive_enabled` / `request_retention_days` / `request_archive_max_mb` | `true` / `7` / `100`         | 请求 JSONL 归档与保留策略                                                                                                    |
+| `logging.request_client_info`                                                           | `true`                       | 请求日志是否记录来源 IP/UA                                                                                                   |
+| `server.read_timeout`                                                                   | `"300s"`                     | 入站请求读取上限（issue #100）；`"0"` = 不限制                                                                               |
+| `server.max_body_mb`                                                                    | `16`                         | 单请求体上限（MB）；`0` = 不限制，超限 413                                                                                   |
+| `upstream.model_aliases`                                                                | `{}`                         | 模型重定向（后缀 `*` 通配）：如把桌面端后台任务模型改写到免费模型；空 = 不启用                                               |
+| `upstream.stream_keepalive_seconds`                                                     | `15`                         | 首字节前 SSE 注释心跳周期（秒）；`0` = 关闭                                                                                  |
+| `upstream.first_byte_retry`                                                             | `true`                       | 首字节前传输层失败时同账号重开一次；`false` = 关闭                                                                           |
+| `debug.enabled` / `debug.full_requests` / `debug.dir`                                   | `false` / `false` / `./data` | 完整请求诊断 JSONL（入站/出站、脱敏）；`full_requests` 才记录完整 body                                                       |
+| `auth.delete_on_auth_failure`                                                           | `false`                      | 授权失效时删除凭据；删除前仍做只读可用性探测，不确定则保留                                                                   |
+| `panel.password_hash` / `panel.session_hours`                                           | `""` / `24`                  | 面板独立密码（PBKDF2 摘要，`wb2api -hash-password '<pw>'` 生成）；空 = 仅 API Key                                            |
+| `upstream.ca_bundle` / `upstream.cn_chat_base`                                          | `""` / `""`                  | 额外根证书 PEM（TLS 解密代理）/ 国内上游地址覆盖（如 `https://www.workbuddy.cn`）                                            |
+| `api_keys[].models` / `api_keys[].realm`                                                | 空                           | 密钥级模型白名单（`*` 通配）与域绑定；不匹配本地 400                                                                         |
+| `auth.disabled_models`（auth 文件）                                                     | 空                           | 账号级禁用模型（`*` 通配），选号跳过                                                                                         |
+| `pool.account_fault_hold` / `account_fault_disable_after`                               | `"24h"` / `3`                | 11140 风控处置：长冷却后自动重试，连续 N 次升级禁用；`"0"` = 立即禁用                                                        |
+| `pool.account_daily_credit_limit`                                                       | `0`                          | 单账号当日 credit 上限；`0` = 关闭（达到后当日不参与选号）                                                                   |
+| `pool.account_daily_token_limit`                                                        | `0`                          | 单账号当日 prompt token 上限；`0` = 关闭。credit 闸拦不住「不扣费但猛灌上下文」的模型，这道按输入量兜底                      |
+| `pool.large_prompt_threshold`                                                           | `200000`                     | 超大 prompt 阈值（token）；超过它的请求撞 429 时**不换号重放**，改为等该号冷却后同号重试一次，仍失败回 429。`0` = 关闭该保护 |
+| `pool.large_prompt_max_wait`                                                            | `"180s"`                     | 上述等待的上限；`"0"` = 不等待（直接回 429）。等待期间持有该号在途名额，不宜过大                                             |
 
 ### 其他社区前端面板
 
 - [workbuddy2api-gui](https://github.com/287775856/workbuddy2api-gui) — 账号池状态可视化面板
 - [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) — 账号管理工具
 
-> ⚠️ 合规须知：本项目是**非官方**网关，使用 ```CodeBuddy``` 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
+> ⚠️ 合规须知：本项目是**非官方**网关，使用 `CodeBuddy` 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
 📖 完整文档见 [GitHub Wiki](https://github.com/Sliverkiss/workbuddy2api/wiki)。
 
@@ -190,15 +198,15 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 core 侧相关 flag（默认值，改 `config.json` 后重启）：
 
-| flag | 默认 | 说明 |
-|---|---|---|
-| `upstream.max_images` | `0` | 单请求图片上限，0 = 不限 |
-| `upstream.image_policy` | `passthrough` | `passthrough` / `truncate` / `error` |
-| `upstream.capability_guard` | `false` | 图片能力预检 |
-| `profiles.enabled` | `false` | 产品 profile 路由总开关 |
-| `profiles.detect_only` | `true` | 只写字段，不改变 URL / 选号 |
-| `search.enabled` | `false` | `/v1/search` 是否存在 |
-| `mcp.enabled` | `false` | `/v1/mcp` 是否存在 |
+| flag                        | 默认          | 说明                                 |
+| --------------------------- | ------------- | ------------------------------------ |
+| `upstream.max_images`       | `0`           | 单请求图片上限，0 = 不限             |
+| `upstream.image_policy`     | `passthrough` | `passthrough` / `truncate` / `error` |
+| `upstream.capability_guard` | `false`       | 图片能力预检                         |
+| `profiles.enabled`          | `false`       | 产品 profile 路由总开关              |
+| `profiles.detect_only`      | `true`        | 只写字段，不改变 URL / 选号          |
+| `search.enabled`            | `false`       | `/v1/search` 是否存在                |
+| `mcp.enabled`               | `false`       | `/v1/mcp` 是否存在                   |
 
 ### 辅助工具
 
@@ -405,15 +413,15 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ### 会自动化发生的事（先知道这些）
 
-| 环节 | 行为 |
-| --- | --- |
-| 触发 | **只在 PR 创建时**自动评审一次；之后改标题、追加提交都不会自动重跑 |
-| 打标 | 自动打一个分类标签（`bug` / `enhancement` / `question` / `documentation`） |
-| 改标题 | 标题不符合 Conventional Commits 时**会被 AI 改写**（如 `feat(scheduler): …`） |
-| 改正文 | 在正文顶部追加自动维护的块（要点 + 关联的 canonical issue，带 `<!-- ai-governance:linked -->` 锚点）；**请勿删除锚点行**，也不要手工重复它 |
-| 关闭 | 垃圾 / 恶意内容 → 关闭并**锁定**；只有测试、无意义或纯占位的改动 → 判 `TRIVIAL` 关闭（不锁定）；与历史结论冲突（重复已合并、或维护者已 wontfix 的改动）→ 附历史依据关闭并打 `history-rejected` |
-| 合并 | 通过闸门的 PR 由**仓库原生 auto-merge** squash 合并进 `master`；提交信息取 PR 标题，所以标题要写成一句人话 |
-| 身份 | 以上动作由 `github-actions[bot]` 执行。不同意判定就在 PR 下留言并 @ 维护者 —— 维护者可摘掉标签、关闭 auto-merge、或重跑治理 |
+| 环节   | 行为                                                                                                                                                                                           |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 触发   | **只在 PR 创建时**自动评审一次；之后改标题、追加提交都不会自动重跑                                                                                                                             |
+| 打标   | 自动打一个分类标签（`bug` / `enhancement` / `question` / `documentation`）                                                                                                                     |
+| 改标题 | 标题不符合 Conventional Commits 时**会被 AI 改写**（如 `feat(scheduler): …`）                                                                                                                  |
+| 改正文 | 在正文顶部追加自动维护的块（要点 + 关联的 canonical issue，带 `<!-- ai-governance:linked -->` 锚点）；**请勿删除锚点行**，也不要手工重复它                                                     |
+| 关闭   | 垃圾 / 恶意内容 → 关闭并**锁定**；只有测试、无意义或纯占位的改动 → 判 `TRIVIAL` 关闭（不锁定）；与历史结论冲突（重复已合并、或维护者已 wontfix 的改动）→ 附历史依据关闭并打 `history-rejected` |
+| 合并   | 通过闸门的 PR 由**仓库原生 auto-merge** squash 合并进 `master`；提交信息取 PR 标题，所以标题要写成一句人话                                                                                     |
+| 身份   | 以上动作由 `github-actions[bot]` 执行。不同意判定就在 PR 下留言并 @ 维护者 —— 维护者可摘掉标签、关闭 auto-merge、或重跑治理                                                                    |
 
 ### 自动合并的闸门
 
@@ -524,6 +532,7 @@ Actions → AI Governance → Run workflow，填 `pr-number`）—— 所以尽�
 </table>
 
 ## 特别感谢
+
 - [@YuJunZhiXue](https://github.com/YuJunZhiXue)
 
 ## License
