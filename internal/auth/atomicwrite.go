@@ -1,9 +1,80 @@
 package auth
 
 import (
+	"errors"
 	"log"
 	"os"
+	"runtime"
+	"syscall"
+	"time"
 )
+
+// renameFile 是 os.Rename 的注入点：Windows 上的重试分支必须在 Linux CI 上
+// 可被真实执行（而不是 skip 或只测退避函数）。
+var renameFile = os.Rename
+
+// goos 是 runtime.GOOS 的注入点，同样只为让「仅 Windows 重试」这条判定可测。
+var goos = runtime.GOOS
+
+const (
+	// renameRetryBudget 是重命名重试的总墙钟上限。
+	renameRetryBudget = 2 * time.Second
+	// renameRetryMaxAttempts 是含首次在内的最大尝试次数（防止退避序列无限拉长）。
+	renameRetryMaxAttempts = 20
+)
+
+// renameBackoff 是固定退避序列（50/100/200/400ms 循环）。
+// 刻意不用「80×50ms」：那会跑到 4s，突破 2s 的墙钟上限。
+var renameBackoff = [...]time.Duration{
+	50 * time.Millisecond,
+	100 * time.Millisecond,
+	200 * time.Millisecond,
+	400 * time.Millisecond,
+}
+
+// isRetryableRenameErr 报告错误是否属于 Windows 上「文件被短暂占用」的瞬时错误。
+// 只认这五个 errno：EPERM/EACCES（杀毒软件或索引服务持有句柄）、EBUSY、
+// EMFILE/ENFILE（句柄耗尽）。其它错误（ENOENT、跨设备 rename 等）重试无意义。
+func isRetryableRenameErr(err error) bool {
+	for _, target := range []error{
+		syscall.EPERM, syscall.EACCES, syscall.EBUSY, syscall.EMFILE, syscall.ENFILE,
+	} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// renameWithRetry 执行 os.Rename，仅在 Windows 上对瞬时占用错误重试。
+//
+// 为什么只在 Windows：POSIX 的 rename 是同目录内的原子 inode 替换，不会出现
+// 「目标被占用」；Linux 上重试只会把真实错误（权限、只读挂载）延迟 2s 才暴露。
+//
+// ★ 绝不在 EPERM 时放宽权限 ★：把目标 chmod 成 0666 看似能绕过占用，实际是把
+// auth 文件（明文 token）变成全局可读可写。宁可保存失败让用户看到错误。
+func renameWithRetry(oldpath, newpath string) error {
+	err := renameFile(oldpath, newpath)
+	if err == nil || goos != "windows" || !isRetryableRenameErr(err) {
+		return err
+	}
+	deadline := time.Now().Add(renameRetryBudget)
+	for attempt := 1; attempt < renameRetryMaxAttempts; attempt++ {
+		delay := renameBackoff[(attempt-1)%len(renameBackoff)]
+		// 睡过截止时间就不睡：宁可少一次尝试，也不能突破 2s 墙钟上限。
+		if time.Now().Add(delay).After(deadline) {
+			break
+		}
+		time.Sleep(delay)
+		if err = renameFile(oldpath, newpath); err == nil {
+			return nil
+		}
+		if !isRetryableRenameErr(err) {
+			return err
+		}
+	}
+	return err
+}
 
 // writeAtomicWithMode 把 raw 原子写入 path（tmp + rename），并保持**现有文件**的
 // 权限与属主；path 不存在时用 FileMode()（默认 0600）建新文件。
@@ -40,5 +111,11 @@ func writeAtomicWithMode(path string, raw []byte, label string) error {
 				label, wantUID, wantGID, err, wantMode)
 		}
 	}
-	return os.Rename(tmp, path)
+	if err := renameWithRetry(tmp, path); err != nil {
+		// 保留 tmp 会让下次写入覆盖它，但更糟的是把「保存失败」变成静默的
+		// 「旧文件还在」——调用方看到 error 才能记录/告警，这里只清掉残留。
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
