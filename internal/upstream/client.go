@@ -802,6 +802,12 @@ type Client struct {
 	// false 即显式逃生门：即使用户 auth 写了 realm=global 也**不**路由到 global base——
 	// chatBase/billingBase 返回 CN base，路径也走 CN（双保险，与 auth.Realm() 的开关闸呼应）。
 	GlobalEnabled bool
+
+	// ProfilesEnabled / ProfilesDetectOnly 产品 profile 路由开关（config profiles.*，
+	// 缺省 false/true = 全关）。**只有 Enabled=true 且 DetectOnly=false 才按
+	// productprofile.go 的表路由**；其余组合逐字走旧的 chatBase(a)/globalOn(a)。
+	ProfilesEnabled    bool
+	ProfilesDetectOnly bool
 	// Retry 聊天 SSE 的同账号瞬时重试配置（见 retry.go）。零值 = 关闭，
 	// 行为与现状逐字一致（5xx/传输失败直接换号轮转）。wiring 从 config 注入。
 	Retry RetryConfig
@@ -913,7 +919,14 @@ func (c *Client) globalOn(a *auth.Auth) bool {
 	return c.GlobalEnabled && a != nil && a.Realm() == "global"
 }
 
+// chatBase 生效的 chat base。
+//
+// profiles 激活（enabled=true 且 detect_only=false）→ productprofile 表 + ② host 覆盖轴；
+// 其余组合逐字走迁移前的旧判据（globalOn → globalChatBase / ChatBaseCN）。
 func (c *Client) chatBase(a *auth.Auth) string {
+	if desc, ok := c.ProfileFor(a); ok {
+		return c.profileChatBase(desc)
+	}
 	if c.globalOn(a) {
 		return c.globalChatBase()
 	}
@@ -1008,7 +1021,14 @@ func (c *Client) GlobalEffortSnapshot() (efforts map[string][]string, defaults m
 	return c.effortsSnapshot("global"), c.defaultEffortsSnapshot("global")
 }
 
+// billingBase 生效的 billing base。
+//
+// profiles 激活 → 表值；只有 intl-* 可被 global.billing_base 覆盖（cn-* 无覆盖键）。
+// 未激活 → 旧判据逐字（globalOn → globalBillingBase / BillingBaseCN）。
 func (c *Client) billingBase(a *auth.Auth) string {
+	if desc, ok := c.ProfileFor(a); ok {
+		return c.profileBillingBase(desc)
+	}
 	if c.globalOn(a) {
 		return c.globalBillingBase()
 	}
@@ -1016,8 +1036,13 @@ func (c *Client) billingBase(a *auth.Auth) string {
 }
 
 // webBase 返回官网域（任务领奖类接口；未注入时回落默认）。
-// realm 感知：global 账号切国际站 workbuddy.ai，CN 用 workbuddy.cn。
+//
+// profiles 激活 → 恒取表的 web base 列（**不受任何 override 影响**：cn-cli 的
+// web base 固定 www.workbuddy.cn）。未激活 → 旧判据逐字。
 func (c *Client) webBase(a *auth.Auth) string {
+	if desc, ok := c.ProfileFor(a); ok {
+		return desc.WebBase
+	}
 	if c.globalOn(a) {
 		return defaultGlobalBase
 	}
@@ -1036,12 +1061,13 @@ const (
 	dailyCheckinPathV2 = "/v2/billing/meter/daily-checkin"
 )
 
-// billingMeterPaths 按 realm 返回 billing/meter 域路径候选序列：
+// billingMeterPaths 按 realm（profiles 激活时按 profile 的 realm，见 intlEndpoint）
+// 返回 billing/meter 域路径候选序列：
 // global → [无 /v2, 有 /v2]（404 时 fallback）；cn → [有 /v2]（现状逐字，零回归）。
 // 仅作用于 get-user-resource / daily-checkin（/billing/meter/* 族）；report /v2/report 不参与，
 // 其他 billing 端点（growth 等）路径不含 /billing/meter 前缀，走原常量不受影响。
 func (c *Client) billingMeterPaths(a *auth.Auth) []string {
-	if c.globalOn(a) {
+	if c.intlEndpoint(a) {
 		return []string{billingMeterPath, billingMeterPathV2}
 	}
 	return []string{billingMeterPathV2}
@@ -1049,7 +1075,7 @@ func (c *Client) billingMeterPaths(a *auth.Auth) []string {
 
 // checkinMeterPaths 同上，针对 daily-checkin。
 func (c *Client) checkinMeterPaths(a *auth.Auth) []string {
-	if c.globalOn(a) {
+	if c.intlEndpoint(a) {
 		return []string{dailyCheckinPath, dailyCheckinPathV2}
 	}
 	return []string{dailyCheckinPathV2}
@@ -1119,13 +1145,8 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		return fmt.Errorf("no refreshToken")
 	}
 
-	url := c.chatBase(a) + "/v2/plugin/auth/token/refresh"
 	ctx, cancel := context.WithTimeout(context.Background(), refreshIOTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	if err != nil {
-		return err
-	}
 	// RefreshHeaders 读取 a 的字段（domain/uid 等）注入请求头——需在锁内取快照值，
 	// 用一个显式逐字段拷贝的临时 auth 构造头（不拷贝 sync.Mutex，避免 vet copies-lock）。
 	a.Lock()
@@ -1144,10 +1165,32 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		ProxySession: a.ProxySession,
 	}
 	a.Unlock()
-	c.RefreshHeaders(req, &hdrSnapshot)
 
-	// 网络 I/O（锁外，30s 上限）。
-	data, err := c.doJSON(&hdrSnapshot, req)
+	// base 候选序列：profiles 未激活 = 单元素旧 chatBase（零回归）；激活 =
+	// [AuthBase, LegacyChatBase]（契约 §1：refresh 一律用 auth base，4xx/网络错误回落）。
+	// 每个候选单独构造请求（RefreshHeaders 会写头，请求对象不可复用）。
+	var data json.RawMessage
+	var err error
+	candidates := c.refreshBaseCandidates(a)
+	for i, base := range candidates {
+		req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v2/plugin/auth/token/refresh", nil)
+		if rerr != nil {
+			return rerr
+		}
+		c.RefreshHeaders(req, &hdrSnapshot)
+
+		// 网络 I/O（锁外，30s 上限）。
+		data, err = c.doJSON(&hdrSnapshot, req)
+		if err == nil {
+			break
+		}
+		if i < len(candidates)-1 && shouldFallbackRefresh(err) {
+			log.Printf("WARN: [upstream] refresh acct=%s: %s failed (%v) — falling back to %s",
+				logfmt.Label(a.UID, a.Nickname), base, err, candidates[i+1])
+			continue
+		}
+		return err
+	}
 	if err != nil {
 		return err
 	}
@@ -1231,7 +1274,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// 兜底 system（防 console 域上游 code 11-128；#119 后 global 出站固定 /v2，
 	// 该兜底保留——上游对 /v2 是否需要 system 无实测反证，删了无回滚路径）。
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
-	if c.globalOn(a) {
+	if c.intlEndpoint(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
@@ -1443,7 +1486,7 @@ const (
 // global → /v2/enterprises/personal/models（国际版实测可用路径，见 global_models.go
 // probe 家族）：governed by globalOn（config global.enabled + 账号 realm 双闸）。
 func (c *Client) modelsPath(a *auth.Auth) string {
-	if c.globalOn(a) {
+	if c.intlEndpoint(a) {
 		return globalModelsPath
 	}
 	return cnModelsPath

@@ -280,6 +280,11 @@ func main() {
 	if v := strings.TrimSpace(cfg.Upstream.CNChatBase); v != "" {
 		up.ChatBaseCN = v
 	}
+	// 产品 profile 路由开关（profiles.enabled / profiles.detect_only）。
+	// restart-only：只有 enabled=true 且 detect_only=false 才按 profile 表路由，
+	// 其余组合逐字走旧的 chatBase/globalOn（见 internal/upstream/productprofile.go）。
+	up.ProfilesEnabled = cfg.Profiles.Enabled
+	up.ProfilesDetectOnly = cfg.Profiles.DetectOnly
 	// 聊天 SSE 同账号瞬时重试（upstream.retry_*，默认关 = 行为逐字一致）。
 	up.Retry = upstream.RetryConfig{
 		Enabled:  cfg.Upstream.RetryEnabled,

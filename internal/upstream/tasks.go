@@ -235,8 +235,11 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://www.workbuddy.cn")
-	req.Header.Set("Referer", "https://www.workbuddy.cn/profile/growth-center")
+	// Origin/Referer 按 profile 的 Origin 列（cn-cli → codebuddy.cn，cn-work →
+	// workbuddy.cn）；profiles 未激活时回落迁移前的硬编码 workbuddy.cn。
+	origin := c.taskOrigin(a)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/profile/growth-center")
 	req.Header.Set("x-client-platform", "web")
 	if ua := c.userAgent(a); ua != "" {
 		req.Header.Set("User-Agent", ua)

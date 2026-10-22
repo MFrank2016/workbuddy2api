@@ -63,10 +63,14 @@ func (c *Client) cliVersion() string {
 // ANALYSIS-global-chat-solutions.md：`WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2`）。
 // global 账号送错平台段（`WorkBuddy` 非 `WorkBuddy AI`）可能触发上游 403 code 11140
 // "request illegal" 风控。官方无任何 UA 随机化（step1 §4），故默认确定性。
-// realm 判定委托 auth.Realm()（含全局开关逃生门）。
+// realm 判定：profiles 激活时取表的 UA platform 列（cn-*→`WorkBuddy`、
+// intl-*→`WorkBuddy AI`，与 stored realm 解耦：显式 cn-work 账号即使 domain 是
+// workbuddy.ai 也发 CN 平台段）；未激活时逐字回落 auth.IsGlobal()（含逃生门）。
 func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
 	platform := "WorkBuddy"
-	if a != nil && a.IsGlobal() {
+	if desc, ok := c.ProfileFor(a); ok {
+		platform = desc.UAPlatform
+	} else if a != nil && a.IsGlobal() {
 		platform = "WorkBuddy AI"
 	}
 	return "WorkBuddy/" + c.clientVersion() + " " + platform + "/" + c.clientVersion() + " CLI/" + c.cliVersion()

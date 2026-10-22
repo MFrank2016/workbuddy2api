@@ -76,7 +76,8 @@ func (c *CheckinActivity) EndsAt() (time.Time, bool) { return parseCheckinActivi
 // CheckinActivityStatus 查询签到活动状态（POST + 空对象 body；只读）。
 func (c *Client) CheckinActivityStatus(a *auth.Auth) (*CheckinActivity, error) {
 	paths := []string{checkinActivityPathV2}
-	if c.globalOn(a) {
+	// 路径族跟随端点 realm（profiles 激活时按 profile，否则逐字回落 globalOn）。
+	if c.intlEndpoint(a) {
 		paths = []string{checkinActivityPath, checkinActivityPathV2}
 	}
 	data, err := c.billingMeterJSON(a, paths, http.MethodPost, map[string]any{})

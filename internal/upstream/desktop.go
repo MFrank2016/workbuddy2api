@@ -284,7 +284,8 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("x-client-platform", "web")
-	req.Header.Set("Origin", c.webBase(a))
+	// Origin 取 profile 的 Origin 列（任务类端点），未激活回落 webBase(a)。
+	req.Header.Set("Origin", c.webOrigin(a))
 	req.Header.Set("Referer", pageURL)
 	req.Header.Set("User-Agent", ua)
 	if a.UID != "" {
