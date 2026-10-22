@@ -96,6 +96,15 @@ type Config struct {
 	// RecordClientInfo 请求日志是否记录调用来源（IP/UA）；Live 非空时以 Live 快照为准。
 	RecordClientInfo bool
 
+	// —— 图片/能力门禁与工具端点（Todo 11）：Live 非空时以快照为准，否则回落
+	// 这些静态字段。**不要在这里写默认值以外的硬编码**：零值 Config 的回落
+	// 必须是 0/passthrough/false/false/false，与 config 默认值一致。
+	MaxImages       int    // upstream.max_images；0 = 不限
+	ImagePolicy     string // upstream.image_policy；空 = passthrough
+	CapabilityGuard bool   // upstream.capability_guard
+	SearchEnabled   bool   // search.enabled
+	MCPEnabled      bool   // mcp.enabled
+
 	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
 	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
 	AdminEnabled bool
@@ -355,7 +364,28 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		SoftCooldown:         h.cfg.SoftCooldown,
 		SanitizeFingerprints: true,
 		RecordClientInfo:     h.cfg.RecordClientInfo,
+		// 图片/能力门禁与工具端点：**从 cfg 取**，不在这里硬编码 ——
+		// 硬编码会让「无 Live 的裸用路径」永远显示旧值，而面板改了配置
+		// 也不报错，只让 flag 看起来没生效。
+		MaxImages:       h.cfg.MaxImages,
+		ImagePolicy:     imagePolicyOr(h.cfg.ImagePolicy),
+		CapabilityGuard: h.cfg.CapabilityGuard,
+		SearchEnabled:   h.cfg.SearchEnabled,
+		MCPEnabled:      h.cfg.MCPEnabled,
 	}
+}
+
+// imagePolicyOr 把空的 image_policy 归一到默认 passthrough。
+//
+// 为什么需要它：裸用 Handler（测试 / 嵌入式调用方）通常不经过 cmd/server 的
+// normalize，ImagePolicy 是零值空串。空串对消费方意味着「未知策略」，而迁移前
+// 的实际行为是透传 —— 回落到 passthrough 才是「缺省 = 旧行为」。
+// 非空值原样返回：合法性由配置层（cmd/server normalizeTools）负责，这里不重复判断。
+func imagePolicyOr(policy string) string {
+	if policy == "" {
+		return "passthrough"
+	}
+	return policy
 }
 
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认 600s）。

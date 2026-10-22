@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/config"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/server"
@@ -177,6 +178,27 @@ type Config struct {
 		BillingBase string `json:"billing_base"`
 	} `json:"global"`
 
+	// Search 搜索工具端点开关（/v1/search）。默认**关闭**：关闭时路径不存在，
+	// 与迁移前逐字一致（未注册的路由对探测与真 404 不可区分）。
+	Search struct {
+		Enabled bool `json:"enabled"` // 默认 false
+	} `json:"search"`
+
+	// MCP MCP 端点开关（/v1/mcp）。默认**关闭**，理由同 Search。
+	MCP struct {
+		Enabled bool `json:"enabled"` // 默认 false
+	} `json:"mcp"`
+
+	// Auth 账号凭证文件的落盘行为。
+	//
+	// FileMode 只作用于 **新建** auth 文件（已有文件的权限在 SaveAtomic 里以磁盘
+	// 现状为准）。空 = 保持现状 0600；允许 0600 / 0640 / 0644 —— 跨 uid 部署
+	// （manager 写入、core 读取）需要组读。**restart-only**：不进 livecfg.Snapshot，
+	// 面板保存只落盘，改值需重启进程才生效（见 applyAuthFileMode）。
+	Auth struct {
+		FileMode string `json:"file_mode"` // ""（=0600）/ "0600" / "0640" / "0644"
+	} `json:"auth"`
+
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
 		TimeoutSeconds int `json:"timeout_seconds"`
@@ -235,6 +257,17 @@ type Config struct {
 		// RetryBackoff 重试退避基数（秒），钳 [0.25,8]。第 n 次重试等待
 		// base·2^n 秒封顶 8s（对齐 mirror MAX_BACKOFF_CAP），并施加 ±25% 抖动。
 		RetryBackoff float64 `json:"retry_backoff"`
+		// MaxImages 单请求允许的图片数上限。**0 = 不限**（默认，与迁移前逐字一致）。
+		// 超过上限时的处置由 ImagePolicy 决定；本字段只描述阈值，不改变请求内容。
+		MaxImages int `json:"max_images"`
+		// ImagePolicy 图片数超过 MaxImages 时的处置策略，默认 passthrough（透传，
+		// 与迁移前逐字一致）。truncate = 截断到上限；error = 本地拒绝并回 400。
+		// 非法值在启动期报错（normalize），不静默回落——静默回落会让运维以为策略
+		// 生效了，实际仍在透传。
+		ImagePolicy string `json:"image_policy"`
+		// CapabilityGuard 能力预检开关。默认 false：不向上游预检模型能力，
+		// 请求原样转发（与迁移前逐字一致）。开启后由后续 todo 的预检实现消费。
+		CapabilityGuard bool `json:"capability_guard"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -332,6 +365,11 @@ type Config struct {
 	} `json:"session_sticky"`
 
 	// 解析后
+	// AuthFileMode 解析后的 auth.file_mode；仅 AuthFileModeSet 为 true 时有效
+	// （空串 = 未配置 = 保持现状 0600）。restart-only：只在启动期经
+	// applyAuthFileMode 接到 auth.SetFileMode，normalize 只校验不接线。
+	AuthFileMode        os.FileMode   `json:"-"`
+	AuthFileModeSet     bool          `json:"-"`
 	SoftRateDur         time.Duration `json:"-"`
 	SoftRateMaxDur      time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
@@ -449,6 +487,15 @@ func Default() *Config {
 	// 11140 处置默认：24h 长冷却 + 连续 3 次升级禁用（旧行为可配 "0" 立即禁用）。
 	c.Pool.AccountFaultHold = "24h"
 	c.Pool.AccountFaultDisableAfter = 3
+	// 图片/能力门禁与工具端点默认**全关**（零值），行为与迁移前逐字一致。
+	// 这里显式写出以明示默认值意图（config.example.json 与此一致）。
+	c.Upstream.MaxImages = 0
+	c.Upstream.ImagePolicy = "passthrough"
+	c.Upstream.CapabilityGuard = false
+	c.Search.Enabled = false
+	c.MCP.Enabled = false
+	// auth.file_mode 默认空 = 保持现状 0600（不设进程级覆盖）。
+	c.Auth.FileMode = ""
 	return c
 }
 
@@ -644,6 +691,39 @@ func applyEnv(c *Config) {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			c.Upstream.RetryBackoff = f
 		}
+	}
+	// 图片/能力门禁与工具端点 env 覆盖（容器部署通常只给 env）。
+	//
+	// 与相邻项不同：**解析失败不静默忽略**，而是保留原值交给 normalize 处理 ——
+	// WB2A_MAX_IMAGES=-1 这类值必须让启动失败（负上限无意义），而不是被悄悄
+	// 丢掉后按 0（不限）跑起来。非数字同理：留一个非法值比静默当作未设置安全。
+	if v := os.Getenv("WB2A_MAX_IMAGES"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			c.Upstream.MaxImages = n
+		} else {
+			c.Upstream.MaxImages = -1 // 触发 normalize 的「不得为负」报错
+		}
+	}
+	if v := os.Getenv("WB2A_IMAGE_POLICY"); v != "" {
+		c.Upstream.ImagePolicy = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("WB2A_CAPABILITY_GUARD"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.CapabilityGuard = b
+		}
+	}
+	if v := os.Getenv("WB2A_SEARCH_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Search.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_MCP_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.MCP.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_AUTH_FILE_MODE"); v != "" {
+		c.Auth.FileMode = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("WB2A_WEIGHT_DEFAULT"); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
@@ -949,7 +1029,79 @@ func (c *Config) normalize() error {
 	if c.Logging.RequestArchiveMaxMB <= 0 {
 		c.Logging.RequestArchiveMaxMB = 100
 	}
+	if err := c.normalizeTools(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// normalizeTools 归一并校验图片/能力门禁与工具端点段，以及 auth.file_mode。
+//
+// 三类校验都是 fail-fast（启动期报错，不静默回落）：
+//
+//  1. upstream.image_policy 只能是 passthrough / truncate / error。写错时静默回落
+//     到 passthrough 会让运维以为「已改成 truncate」而实际仍在透传 —— 配置看起来
+//     完全正常，行为却与预期相反。
+//  2. upstream.max_images 不得为负（0 = 不限是哨兵值，不回落、不报错）。负上限
+//     没有任何语义，只能是笔误。
+//  3. auth.file_mode 只能是 ""（未配置 = 保持 0600）/ 0600 / 0640 / 0644。这里只
+//     **解析校验**，不调 auth.SetFileMode —— restart-only 字段：normalize 也会被
+//     面板保存（ParseConfig）调用，若在那里接线，面板一存配置新建 auth 文件的权限
+//     当场就变了，与「重启才生效」的承诺相反。真正的接线在启动期的 applyAuthFileMode。
+func (c *Config) normalizeTools() error {
+	// policy：空 = 默认 passthrough（Default 已置；此兜底覆盖 Default 被绕过的场景），
+	// 大小写不敏感（与 prompt.mode 同风格）。
+	switch p := strings.ToLower(strings.TrimSpace(c.Upstream.ImagePolicy)); p {
+	case "", "passthrough":
+		c.Upstream.ImagePolicy = "passthrough"
+	case "truncate":
+		c.Upstream.ImagePolicy = "truncate"
+	case "error":
+		c.Upstream.ImagePolicy = "error"
+	default:
+		return fmt.Errorf("upstream.image_policy: %q 不是合法值（passthrough / truncate / error）", c.Upstream.ImagePolicy)
+	}
+	if c.Upstream.MaxImages < 0 {
+		return fmt.Errorf("upstream.max_images: %d 不得为负；0 = 不限", c.Upstream.MaxImages)
+	}
+
+	// file_mode：空 = 不设覆盖（保持现状 0600）。非空按**字面量**严格比对，
+	// 不走 ParseUint —— "6000" 能过 ParseUint（=0o6000，setuid 位），"0640x" 不能，
+	// 但两者都不该被当成「合法权限」；"600"（漏前导 0）也拒绝，避免八进制歧义。
+	mode := strings.TrimSpace(c.Auth.FileMode)
+	switch mode {
+	case "":
+		c.AuthFileMode = 0
+		c.AuthFileModeSet = false
+	case "0600":
+		c.AuthFileMode = 0o600
+		c.AuthFileModeSet = true
+	case "0640":
+		c.AuthFileMode = 0o640
+		c.AuthFileModeSet = true
+	case "0644":
+		c.AuthFileMode = 0o644
+		c.AuthFileModeSet = true
+	default:
+		return fmt.Errorf("auth.file_mode: %q 不是合法值（0600 / 0640 / 0644；空 = 保持现状 0600）", c.Auth.FileMode)
+	}
+	return nil
+}
+
+// applyAuthFileMode 把 auth.file_mode 接到进程级的 auth.SetFileMode（**仅启动期**）。
+//
+// 空值 = 不碰进程级覆盖（保持 auth 包默认 0600 或上一次显式设置），与
+// TestApplyAuthFileModeEmptyKeepsCurrent 锁定的语义一致：未配置就不应该有副作用。
+// 非空时 mode 已在 normalizeTools 里校验过，这里仍接 SetFileMode 的错误 —— 它是
+// 允许集合的**唯一实现方**，复制一份判断迟早漂移。
+func applyAuthFileMode(c *Config) error {
+	if !c.AuthFileModeSet {
+		return nil
+	}
+	if err := auth.SetFileMode(c.AuthFileMode); err != nil {
+		return fmt.Errorf("auth.file_mode: %w", err)
+	}
+	return nil
 }
 
 // normalizeAlerting 归一并校验 alerting 段。

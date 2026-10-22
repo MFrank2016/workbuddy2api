@@ -19,6 +19,18 @@ type Snapshot struct {
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
+
+	// —— 图片/能力门禁与工具端点（Todo 11）：5 个字段都随面板保存热生效。 ——
+	// 零值 = 迁移前行为：0（不限）/ passthrough（透传）/ false / false / false。
+	MaxImages       int    // upstream.max_images；0 = 不限
+	ImagePolicy     string // upstream.image_policy；passthrough / truncate / error
+	CapabilityGuard bool   // upstream.capability_guard；false = 不预检
+	SearchEnabled   bool   // search.enabled；false = /v1/search 不存在
+	MCPEnabled      bool   // mcp.enabled；false = /v1/mcp 不存在
+
+	// auth.file_mode **不在此处**：它是 restart-only（改值需重启进程），
+	// 放进快照会让面板保存当场改变新建 auth 文件的权限，与承诺相反。
+	// 它的接线在 cmd/server 启动期的 applyAuthFileMode。
 }
 
 // Holder 原子持有当前快照。

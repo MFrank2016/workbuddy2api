@@ -151,6 +151,17 @@ func main() {
 	// Realm()/IsGlobal() 先过此闸——显式 false 时恒 cn（逃生门：纯 CN 锁定的第一道闸）。
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
 
+	// auth.file_mode（restart-only）：只在启动期接线。必须在 LoadDir 之后、
+	// 任何 SaveAtomic 之前 —— 它只影响**新建**文件，已有文件的权限在
+	// SaveAtomic 里一律以磁盘现状为准。空值 = 不设覆盖（保持 0600）。
+	if err := applyAuthFileMode(cfg); err != nil {
+		log.Fatalf("auth file mode: %v", err)
+	}
+	if cfg.AuthFileModeSet {
+		log.Printf("新建 auth 文件权限：%#o（auth.file_mode=%s，restart-only）",
+			cfg.AuthFileMode, cfg.Auth.FileMode)
+	}
+
 	// model.json 本地缓存接线（context_length 四级查找链第 3 级）：数据目录与
 	// state.json 同风格（Docker volume 持久化路径 ./data）。首次缺失/损坏自动回落
 	// 仓库种子 embed；models.dev 按需拉取成功后原子写回。
@@ -424,13 +435,13 @@ func main() {
 	})
 	defer requestLog.Close()
 
-	// 运行期可变配置快照（面板在线改 api_key / soft_rate / 脱敏 / 来源记录时热生效）。
-	live := livecfg.New(livecfg.Snapshot{
-		APIKey:               cfg.APIKey,
-		SoftCooldown:         cfg.SoftRateDur,
-		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
-		RecordClientInfo:     cfg.Logging.RequestClientInfo,
-	})
+	// 运行期可变配置快照（面板在线改 api_key / soft_rate / 脱敏 / 来源记录 /
+	// 图片·能力门禁 / search·mcp 开关时热生效）。
+	//
+	// ★ 映射集中在 liveSnapshot 一处 ★ 启动与面板保存共用同一份映射，
+	// 否则「启动时有的字段」与「保存后热生效的字段」两份真相迟早漂移：
+	// 表现为面板保存后某字段看起来没生效，而两边都不报错。
+	live := livecfg.New(liveSnapshot(cfg))
 
 	pn := panel.New(panel.Config{
 		Pool:        p,
@@ -480,12 +491,18 @@ func main() {
 		// 模型别名/重定向（upstream.model_aliases，默认空 = 不启用）。
 		ModelAliases: cfg.Upstream.ModelAliases,
 		// panel 能力：管理面板（/panel/）+ 逐请求用量记录（吸收自 panel 分支）。
-		Panel:      pn,
-		Usage:      usageRec,
-		RequestLog: requestLog,
-		Live:       live,
-		// 请求日志是否记录调用来源（IP/UA）；经 livecfg 热生效，静态值供 Live 为 nil 的裸用路径。
+		Panel:            pn,
+		Usage:            usageRec,
+		RequestLog:       requestLog,
+		Live:             live,
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
+		// 图片/能力门禁与工具端点：经 livecfg 热生效，静态值供 Live 为 nil 的
+		// 裸用路径（fallback 必须读 cfg，不得硬编码）。
+		MaxImages:       cfg.Upstream.MaxImages,
+		ImagePolicy:     cfg.Upstream.ImagePolicy,
+		CapabilityGuard: cfg.Upstream.CapabilityGuard,
+		SearchEnabled:   cfg.Search.Enabled,
+		MCPEnabled:      cfg.MCP.Enabled,
 		// 运维管理端点开关（config admin.enabled，默认 false）。
 		AdminEnabled: cfg.Admin.Enabled,
 		// Prometheus 指标端点开关（config metrics.enabled，默认 false）。
@@ -620,6 +637,32 @@ var restartRequiredPaths = []string{
 	"upstash", "session_sticky.ttl", "session_sticky.gc_interval",
 	"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
 	"panel.password_hash", "panel.session_hours",
+	// auth.file_mode：只作用于**新建** auth 文件的进程级权限，且接线在启动期
+	// （applyAuthFileMode）—— 热更它会让面板一存配置，新建凭证文件的权限当场变，
+	// 与「restart-only」的承诺相反。故列入重启清单，且不进 livecfg.Snapshot。
+	"auth.file_mode",
+}
+
+// liveSnapshot 把 Config 映射成运行期快照（**唯一映射点**）。
+//
+// 启动（livecfg.New）与面板保存（saveConfig）都必须走它：映射写两份时，
+// 新增字段只补一处就会变成「启动时生效、保存后不生效」（或反之），而两边
+// 都不会报错 —— 只能靠用户发现面板保存后行为没变。
+//
+// 不进快照的字段：auth.file_mode（restart-only，见 restartRequiredPaths）、
+// 以及一切只在启动期读取的部署路径类字段。
+func liveSnapshot(c *Config) livecfg.Snapshot {
+	return livecfg.Snapshot{
+		APIKey:               c.APIKey,
+		SoftCooldown:         c.SoftRateDur,
+		SanitizeFingerprints: c.Features.SanitizeBlacklistFingerprints,
+		RecordClientInfo:     c.Logging.RequestClientInfo,
+		MaxImages:            c.Upstream.MaxImages,
+		ImagePolicy:          c.Upstream.ImagePolicy,
+		CapabilityGuard:      c.Upstream.CapabilityGuard,
+		SearchEnabled:        c.Search.Enabled,
+		MCPEnabled:           c.MCP.Enabled,
+	}
 }
 
 // applyIncoming 深合并提交的配置，并返回「确实变了、且必须重启才生效」的字段。
@@ -727,12 +770,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	}
 
 	// 热应用（能立即生效的字段全部应用）。
-	live.Store(livecfg.Snapshot{
-		APIKey:               newCfg.APIKey,
-		SoftCooldown:         newCfg.SoftRateDur,
-		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
-		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
-	})
+	//
+	// 快照走 liveSnapshot —— 与启动期同一份映射（见那里的注释）。
+	// auth.file_mode 不在其中：它 restart-only，改值只落盘，重启才生效。
+	live.Store(liveSnapshot(newCfg))
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
