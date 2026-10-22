@@ -218,6 +218,25 @@ var invalidImageRule = errorRule{kind: ErrImageInvalid, mode: matchFold, pattern
 // 网络层/解析层错误不在此识别（见 IsAlreadyCheckin）。
 var alreadyCheckinRule = errorRule{mode: matchFold, patterns: []string{"已签到", "already"}}
 
+// inactiveCheckinPatterns 签到活动「没开/已关」的文案形态。**这不是全局 errorRule**：
+// 它不参与 Classify（活动状态不是错误分类，不该影响 pool 冷却/熔断），唯一调用点
+// 是 scheduler 的签到分支（经 IsInactiveCheckin）。
+//
+// 文案来源：上游对「活动不在进行中」的签到请求返回业务错误（code 10001 等），实测
+// 与公开反馈出现的措辞集中在三类：
+//   - 活动未开启 / 未开始 / 未开放 / 已结束 / 已关闭 / 已暂停
+//   - 签到（活动）已过期
+//   - 当前无（进行中的）活动
+//
+// 负向守卫（见 IsInactiveCheckin）：文案必须同时提到「活动」或「签到」，否则
+// `token 已过期` / `session 已过期` 这类**凭证**失效会被误判成活动结束——那会把
+// 真实的账号故障静默记成正常态。
+var inactiveCheckinPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`活动.*(?:未开启|未开始|未开放|已结束|已关闭|已暂停)`),
+	regexp.MustCompile(`(?:签到|活动).*已过期`),
+	regexp.MustCompile(`当前无.*活动`),
+}
+
 // accountFaultRule 账号级授权/配额故障关键词（大小写不敏感子串匹配）。
 //
 // 定位：这类错误是**账号本身状态**决定的本机故障，不是请求格式、不是临时限流、
@@ -1717,6 +1736,63 @@ func (b CreditBuckets) Total() int64 { return b.Expiring + b.Stable }
 // packageEndLayout 上游 CycleEndTime / 请求体过滤串的时间格式（墙钟）。
 const packageEndLayout = "2006-01-02 15:04:05"
 
+// expiryFloor 到期候选的**下界**（2020-01-01，UTC+8 墙钟）。
+//
+// 为什么需要：上游对「无到期信息」的套餐会下发零值/纪元值（`0001-01-01 00:00:00`、
+// epoch 毫秒 0、`1970-01-01 00:00:00`）。这些值都能被 time 解析成功，但语义是
+// 「没有这个字段」而不是「马上就要过期」——若照单全收，分桶会把整包误标成
+// Expiring，让选号把长期积分当快过期积分优先烧掉（且永远不会「真的」过期）。
+// 取 2020 作分界：上游业务在 2026 年才存在，任何早于此的日期都是脏值而非真实到期。
+var expiryFloor = time.Date(2020, 1, 1, 0, 0, 0, 0, softRateResetLoc)
+
+// packageExpiryCandidate 一个套餐的到期候选值（上游同时下发多个语义不同的时间字段）。
+type packageExpiryCandidate struct {
+	// deductionEndMS 可抵扣窗口结束（epoch 毫秒）：真「用不完就没了」的时刻。
+	deductionEndMS int64
+	// expired / packageEnd / cycleEnd 墙钟字符串（packageEndLayout），空 = 未下发。
+	expired, packageEnd, cycleEnd string
+}
+
+// earliestPackageEnd 返回该套餐**所有可解析候选值中最早者**，忽略零值/纪元脏值。
+//
+// 为什么取最早而不是按优先级取第一个：上游对同一个包同时下发
+//   - CycleEndTime（周期边界，月度套餐 = 当月最后一天）
+//   - DeductionEndTime（可抵扣窗口结束，实测体验版在 2034 年）
+//
+// 语义上「这个包的积分什么时候会消失」由更早的那个决定——只认其中一个（旧实现只认
+// CycleEndTime）会在另一字段更早时低估紧迫度，把快过期积分留在 Stable 里插不上队。
+//
+// 全部候选都不可解析/是脏值时返回 false，调用方保守归 Stable（不误标快过期）。
+func earliestPackageEnd(c packageExpiryCandidate, loc *time.Location) (time.Time, bool) {
+	var (
+		best time.Time
+		ok   bool
+	)
+	// 单个候选值 → 接受条件：解析成功、不早于 expiryFloor、不早于 now 之外不管
+	//（是否「已过期」由调用方按 now 判定，这里只负责挑值）。
+	consider := func(t time.Time) {
+		if t.Before(expiryFloor) {
+			return // 零值/纪元/1970 类脏值：当作「没下发」
+		}
+		if !ok || t.Before(best) {
+			best, ok = t, true
+		}
+	}
+	// DeductionEndTime 是 epoch 毫秒；<=0 视为未下发（上游用 0 表示空）。
+	if c.deductionEndMS > 0 {
+		consider(time.UnixMilli(c.deductionEndMS).In(loc))
+	}
+	for _, raw := range []string{c.expired, c.packageEnd, c.cycleEnd} {
+		if raw == "" {
+			continue
+		}
+		if t, perr := time.ParseInLocation(packageEndLayout, raw, loc); perr == nil {
+			consider(t)
+		}
+	}
+	return best, ok
+}
+
 // UserResourceDetailed 同 UserResource，但按到期时间把余额拆成 CreditBuckets。
 // soon>0 时把到期时间 <= now+soon 的套餐余额计入 Expiring；soon<=0 时全部归 Stable。
 // 到期时间判据是 CycleEndTime（R-A/R-B 实测：CN/global 两域字段全集均无 PackageEndTime，
@@ -1745,14 +1821,20 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain 
 			r = 0
 		}
 		remain += r
-		// 分桶：仅 soon>0 且能解析出有效到期时间、且确实在窗口内 → Expiring。
-		if soon > 0 && r > 0 && acct.CycleEndTime != "" {
+		// 分桶：仅 soon>0 且能解析出**有效**到期时间、且确实在窗口内 → Expiring。
+		// 到期时间取所有候选字段中最早者（见 earliestPackageEnd）：上游同一个包
+		// 可能同时下发 CycleEndTime（周期边界）与 DeductionEndTime（可抵扣窗口结束），
+		// 只认其中一个会在另一字段更早时低估紧迫度。
+		if soon > 0 && r > 0 {
 			// 上游时间为 UTC+8 墙钟（与 softRateResetLoc 同口径，官网展示时区）。
-			if end, perr := time.ParseInLocation(packageEndLayout, acct.CycleEndTime, softRateResetLoc); perr == nil {
-				if !end.After(now.Add(soon)) {
-					buckets.Expiring += r
-					continue
-				}
+			if end, ok := earliestPackageEnd(packageExpiryCandidate{
+				deductionEndMS: acct.DeductionEndTime,
+				expired:        acct.ExpiredTime,
+				packageEnd:     acct.PackageEndTime,
+				cycleEnd:       acct.CycleEndTime,
+			}, softRateResetLoc); ok && !end.After(now.Add(soon)) {
+				buckets.Expiring += r
+				continue
 			}
 		}
 		buckets.Stable += r
@@ -1767,8 +1849,16 @@ type userResourceResp struct {
 		Data struct {
 			TotalDosage int64 `json:"TotalDosage"`
 			Accounts    []struct {
-				PackageName         string `json:"PackageName"`
+				PackageName string `json:"PackageName"`
+				// 到期候选字段（分桶取所有可解析值中最早者，见 earliestPackageEnd）。
+				// CycleEndTime 周期边界（墙钟字符串）；DeductionEndTime 可抵扣窗口结束
+				// （epoch 毫秒，实测 CN/global 两域均下发，是体验版真失效时刻）；
+				// ExpiredTime 实测字段存在但恒空；PackageEndTime 实测响应**不下发**
+				//（只出现在请求体过滤参数里），保留解析以兼容未来字段。
 				CycleEndTime        string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
+				DeductionEndTime    int64  `json:"DeductionEndTime"`
+				ExpiredTime         string `json:"ExpiredTime"`
+				PackageEndTime      string `json:"PackageEndTime"`
 				CapacitySize        int64  `json:"CapacitySize"`
 				CapacityRemain      int64  `json:"CapacityRemain"`
 				CapacityUsed        int64  `json:"CapacityUsed"`
@@ -1907,12 +1997,48 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 // IsAlreadyCheckin 报告 err 是否表示"今天已签到"（上游幂等拒绝重复签到）。
 // 只认带分类的 *Error（业务 code 或 HTTP 错误）：网络层/解析层错误不得当作幂等成功，
 // 否则停机补签遇到抖动会误记为 already，账号当天实际未签到却被判定正常。
+//
+// 判定顺序 inactive > already：文案同时命中两套关键词（如「签到活动已结束，今天已
+// 签到」）时让位给 IsInactiveCheckin——活动结束的语义更具体，也不该被记成"今天已签"。
 func IsAlreadyCheckin(err error) bool {
 	var ue *Error
 	if !errors.As(err, &ue) {
 		return false
 	}
+	if IsInactiveCheckin(err) {
+		return false
+	}
 	return alreadyCheckinRule.hit(ue.Msg, strings.ToLower(ue.Msg))
+}
+
+// IsInactiveCheckin 报告 err 是否表示「签到活动当前不在进行中」（未开启/已结束/已过期）。
+//
+// 定位：这是**活动级正常态**，不是账号故障——活动下线后每天两轮签到都会收到同一条
+// 业务错误。若把它记成 fail，运维会去查一个不存在的账号故障，且全灭判据会排毫无
+// 意义的重试（活动没开，重试多少次都一样，纯打上游）。
+//
+// 因此它刻意**不是**全局 errorRule：不参与 Classify，不影响 pool 冷却/熔断。
+// 调用点只有签到分支（scheduler.CheckinAll 与面板单号签到），与聊天请求的错误分类
+// 完全隔离——活动状态不该让任何账号被冷却。与 IsAlreadyCheckin 一样只认 *Error：
+// 网络层/解析层错误不得判 inactive（否则抖动会被当成"活动结束"，账号当天没签却显示正常）。
+//
+// 负向守卫：文案必须同时提到「活动」或「签到」，否则 `token 已过期` 会被误判。
+func IsInactiveCheckin(err error) bool {
+	var ue *Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	msg := ue.Msg
+	if !strings.Contains(msg, "活动") && !strings.Contains(msg, "签到") {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	for _, re := range inactiveCheckinPatterns {
+		if re.MatchString(msg) || re.MatchString(lower) {
+			return true
+		}
+	}
+	return false
 }
 
 func truncate(s string, n int) string {

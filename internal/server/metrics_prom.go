@@ -231,7 +231,7 @@ func writePromMetrics(snap MetricsSnapshot, health []promRealmHealth, stickySess
 			w.sample("wb2api_task_last_run_timestamp_seconds", float64(tasks[kind].Finished.Unix()), "kind", kind)
 		}
 
-		w.family("wb2api_task_last_run_accounts", "各类定时任务最近一轮的计数分解：total=本轮涉及量，ok=做成，already=幂等成功（如今天已签到），fail=上游报错，skipped=有意跳过（禁用号/无凭证/global/门槛未达/在途）。", "gauge")
+		w.family("wb2api_task_last_run_accounts", "各类定时任务最近一轮的计数分解：total=本轮涉及量，ok=做成，already=幂等成功（如今天已签到），inactive=活动级正常态（签到活动未开启/已结束，不计失败、不排重试），fail=上游报错，skipped=有意跳过（禁用号/无凭证/global/门槛未达/在途）。total = ok+already+inactive+fail+skipped。", "gauge")
 		for _, kind := range ranKinds {
 			for _, res := range promTaskResults {
 				w.sample("wb2api_task_last_run_accounts", float64(promTaskResultValue(tasks[kind], res)), "kind", kind, "result", res)

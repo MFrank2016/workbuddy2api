@@ -386,3 +386,36 @@ func TestConcurrentRecordAndRetry(t *testing.T) {
 		t.Errorf("应有 3 类记录，got %d", len(s.Runs()))
 	}
 }
+
+// TestRunInactiveFieldIsRunCount 签到三态的第三态 inactive 必须落在 **Run** 上
+// （不是 Outcome）：它是本轮计数分解的一项，与 ok/already/fail/skipped 同级。
+// total 必须等于五项之和——否则 /status 上的分解加不回总数，运维对不上账。
+func TestRunInactiveFieldIsRunCount(t *testing.T) {
+	r := Run{
+		Kind: "checkin", Trigger: TriggerSchedule,
+		Total: 10, OK: 3, Already: 2, Fail: 1, Skipped: 3, Inactive: 1,
+	}
+	if r.OK+r.Already+r.Fail+r.Skipped+r.Inactive != r.Total {
+		t.Errorf("分解不守恒：%d != %d（%+v）",
+			r.OK+r.Already+r.Fail+r.Skipped+r.Inactive, r.Total, r)
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// JSON 键名固定为 inactive（/status 与告警规则照这个写）；零值也必须写出，
+	// 与 ok/fail/skipped 同口径（缺失会让人误以为"没这一项"）。
+	if v, ok := back["inactive"]; !ok || v.(float64) != 1 {
+		t.Errorf("JSON 应有 inactive=1，got %v", back["inactive"])
+	}
+	rawZero, _ := json.Marshal(Run{Kind: "checkin"})
+	var backZero map[string]any
+	_ = json.Unmarshal(rawZero, &backZero)
+	if v, ok := backZero["inactive"]; !ok || v.(float64) != 0 {
+		t.Errorf("零值也应写出 inactive=0（不做 omitempty），got %v", backZero["inactive"])
+	}
+}

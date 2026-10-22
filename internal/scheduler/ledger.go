@@ -23,8 +23,8 @@ const (
 // 各任务在自己的遍历里累加，结束后交给 recordRun 一次性落账——不在这里做任何
 // 二次推断（比如从日志行反推成功数），避免口径分叉。
 type runTally struct {
-	total, ok, already, fail, skipped int
-	note                              string
+	total, ok, already, inactive, fail, skipped int
+	note                                        string
 	// interrupted 本轮被 ctx 取消打断（优雅停机），计数是**部分**的。
 	// 此时不判全灭、不排重试：一轮只跑了 3 个号就停机，不代表上游全挂。
 	interrupted bool
@@ -32,7 +32,8 @@ type runTally struct {
 
 // recordRun 结束一轮执行：写台账，必要时排定当日失败重试，并返回这条记录。
 //
-// 全灭判据（AllFailed）：**有失败，且没有任何一个账号真正做成**（ok+already==0）。
+// 全灭判据（AllFailed）：**有失败，且没有任何一个账号真正做成**（ok+already+inactive==0）。
+// inactive（活动未开启）计入「做成」侧：它证明上游可达且给了确定答复，重试无收益。
 //
 // 为什么不是「失败率超阈值」：只要还有账号成功，就证明上游是通的，失败是账号级
 // 的（token 过期、单号被限流），重试只会对同一批注定失败的账号再打一遍上游——
@@ -49,10 +50,14 @@ func (s *Scheduler) recordRun(kind taskKind, trigger string, started time.Time, 
 		Trigger: trigger,
 		Started: started, Finished: finished,
 		Elapsed: finished.Sub(started).Round(time.Millisecond).String(),
-		Total:   t.total, OK: t.ok, Already: t.already, Fail: t.fail, Skipped: t.skipped,
+		Total:   t.total, OK: t.ok, Already: t.already,
+		Inactive: t.inactive, Fail: t.fail, Skipped: t.skipped,
 		Note: t.note,
 	}
-	r.AllFailed = !t.interrupted && r.Fail > 0 && r.OK+r.Already == 0
+	// inactive 也算「上游是通的」：活动未开启是上游的真实业务回复，不是网络/上游
+	// 抖动。把它排除在全灭判据之外，才能保证「有活动未开启的轮次不排重试」
+	//（重试只会再拿一次同样的「活动未开启」，纯打上游）。
+	r.AllFailed = !t.interrupted && r.Fail > 0 && r.OK+r.Already+r.Inactive == 0
 	if t.interrupted {
 		r.Note = joinDetail(r.Note, "interrupted")
 	}

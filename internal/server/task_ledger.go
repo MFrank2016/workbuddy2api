@@ -29,7 +29,7 @@ var promTaskKinds = []string{"checkin", "activity", "keepalive", "travel", "scho
 // promTaskResults wb2api_task_last_run_accounts 的 result 维度固定顺序。
 // total 也在其中——它是本轮涉及量，与 ok/fail/skipped 一起构成完整分解，
 // 单独列一个指标反而要多一条 HELP/TYPE。
-var promTaskResults = []string{"total", "ok", "already", "fail", "skipped"}
+var promTaskResults = []string{"total", "ok", "already", "inactive", "fail", "skipped"}
 
 // promTaskResultValue 按 result 维度取最近一轮的计数。
 func promTaskResultValue(r taskledger.Run, result string) int {
@@ -40,6 +40,8 @@ func promTaskResultValue(r taskledger.Run, result string) int {
 		return r.OK
 	case "already":
 		return r.Already
+	case "inactive":
+		return r.Inactive
 	case "fail":
 		return r.Fail
 	case "skipped":

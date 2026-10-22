@@ -79,18 +79,21 @@ func buildCheckinReport(outcomes []scheduler.CheckinOutcome, realmOf func(string
 	}
 	for _, o := range outcomes {
 		rep.Results = append(rep.Results, server.CheckinResult{
-			UID:      o.UID,
-			Nickname: o.Nickname,
-			Realm:    realmOf(o.UID),
-			Status:   string(o.Status),
-			Credits:  o.Credits,
-			Detail:   o.Detail,
+			UID:         o.UID,
+			Nickname:    o.Nickname,
+			Realm:       realmOf(o.UID),
+			Status:      string(o.Status),
+			StatusLabel: o.Status.Label(),
+			Credits:     o.Credits,
+			Detail:      o.Detail,
 		})
 		switch o.Status {
 		case scheduler.CheckinOK:
 			rep.OK++
 		case scheduler.CheckinAlready:
 			rep.Already++
+		case scheduler.CheckinInactive:
+			rep.Inactive++
 		case scheduler.CheckinFail:
 			rep.Fail++
 		case scheduler.CheckinSkipped:

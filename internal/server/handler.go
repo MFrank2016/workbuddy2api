@@ -174,8 +174,13 @@ type CheckinResult struct {
 	UID      string `json:"uid"`
 	Nickname string `json:"nickname,omitempty"`
 	Realm    string `json:"realm,omitempty"`
-	// Status ok（签到成功）/ already（上游判定今天已签，幂等）/ fail / skipped。
+	// Status ok（签到成功）/ already（上游判定今天已签，幂等）/ inactive（签到活动
+	// 未开启/已结束，活动级正常态）/ fail / skipped。
 	Status string `json:"status"`
+	// StatusLabel 该状态的中文展示文案（如 inactive → 「活动未开启」）。
+	// 由 scheduler.CheckinStatus.Label() 统一提供，前端不再自己拼映射
+	//（两处各写一套迟早漂移：面板显示「未开启」、回执显示 inactive）。
+	StatusLabel string `json:"status_label,omitempty"`
 	// Credits 签到后的余额；仅余额查询成功时非 nil。
 	// ★ global 账号也走这条路 ★ 它们跳过签到（无签到体系），但余额查询是号池
 	// 「剩余积分」的唯一数据源，故仍会出现在 results 里。
@@ -187,14 +192,15 @@ type CheckinResult struct {
 // CheckinReport 一次全量签到的报告。
 type CheckinReport struct {
 	// Enabled 排程是否启用（schedule.checkin_enabled）；false 时手动入口仍可用。
-	Enabled bool            `json:"enabled"`
-	Hours   []int           `json:"hours"` // 自动签到时点（本地小时）
-	Total   int             `json:"total"`
-	OK      int             `json:"ok"`
-	Already int             `json:"already"`
-	Fail    int             `json:"fail"`
-	Skipped int             `json:"skipped"`
-	Results []CheckinResult `json:"results"`
+	Enabled  bool            `json:"enabled"`
+	Hours    []int           `json:"hours"` // 自动签到时点（本地小时）
+	Total    int             `json:"total"`
+	OK       int             `json:"ok"`
+	Already  int             `json:"already"`
+	Inactive int             `json:"inactive"`
+	Fail     int             `json:"fail"`
+	Skipped  int             `json:"skipped"`
+	Results  []CheckinResult `json:"results"`
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。

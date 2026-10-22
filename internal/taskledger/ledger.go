@@ -47,8 +47,13 @@ const (
 //   - OK      真正做成的动作数
 //   - Already 幂等成功（如「今天已签到」「已领过」）——与 OK 分开是为了区分
 //     「20 个号都真签到了」和「12 个真签到 + 8 个早就签过」
+//   - Inactive 活动级正常态（签到活动未开启/已结束）——与 Already 分开是因为它
+//     **不代表今天签到了**（账号当天可能真的没签），与 Fail 分开是因为它不是账号
+//     故障（重试/熔断都无意义）。本字段类型是 Run（计数），不是 Outcome（单账号结果）。
 //   - Fail    上游报错的账号/命令数
 //   - Skipped 有意跳过的（禁用号、无凭证、global 域、门槛未达、在途、已达上限）
+//
+// 守恒关系：Total = OK + Already + Inactive + Fail + Skipped。
 type Run struct {
 	Kind      string    `json:"kind"`
 	Trigger   string    `json:"trigger"`
@@ -58,6 +63,7 @@ type Run struct {
 	Total     int       `json:"total"`
 	OK        int       `json:"ok"`
 	Already   int       `json:"already"`
+	Inactive  int       `json:"inactive"`
 	Fail      int       `json:"fail"`
 	Skipped   int       `json:"skipped"`
 	AllFailed bool      `json:"all_failed"`

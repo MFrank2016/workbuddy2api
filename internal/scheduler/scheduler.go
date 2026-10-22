@@ -189,11 +189,30 @@ const checkinRefreshSkew = 10 * time.Minute
 type CheckinStatus string
 
 const (
-	CheckinOK      CheckinStatus = "ok"      // 签到成功
-	CheckinAlready CheckinStatus = "already" // 上游判定今天已签到（幂等重复，视为正常）
-	CheckinFail    CheckinStatus = "fail"    // 刷新 token / 签到 / 余额查询失败
-	CheckinSkipped CheckinStatus = "skipped" // 禁用账号或无有效凭证，未参与
+	CheckinOK       CheckinStatus = "ok"       // 签到成功
+	CheckinAlready  CheckinStatus = "already"  // 上游判定今天已签到（幂等重复，视为正常）
+	CheckinInactive CheckinStatus = "inactive" // 签到活动未开启/已结束（活动级正常态，非账号故障）
+	CheckinFail     CheckinStatus = "fail"     // 刷新 token / 签到 / 余额查询失败
+	CheckinSkipped  CheckinStatus = "skipped"  // 禁用账号或无有效凭证，未参与
 )
+
+// Label 返回该状态的中文展示文案（panel 回执与 /status 的渲染共用，
+// 避免两处各写一套字符串映射而漂移）。
+func (s CheckinStatus) Label() string {
+	switch s {
+	case CheckinOK:
+		return "签到成功"
+	case CheckinAlready:
+		return "今日已签到"
+	case CheckinInactive:
+		return "活动未开启"
+	case CheckinFail:
+		return "签到失败"
+	case CheckinSkipped:
+		return "已跳过"
+	}
+	return string(s)
+}
 
 // CheckinOutcome 单账号签到结果（供手动签到回执与日志汇总）。
 type CheckinOutcome struct {
@@ -541,6 +560,8 @@ func (s *Scheduler) runCheckin(trigger string) ([]CheckinOutcome, error) {
 			t.already++
 		case CheckinSkipped:
 			t.skipped++
+		case CheckinInactive:
+			t.inactive++
 		case CheckinFail:
 			t.fail++
 		}
@@ -564,7 +585,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	started := time.Now()
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
-	var okN, alreadyN, failN, skipN int
+	var okN, alreadyN, inactiveN, failN, skipN int
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
@@ -642,11 +663,18 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		if a.IsEnterprise() {
 			oc.Status = CheckinOK // 企业版无个人签到体系；余额仍走企业口径查询
 		} else if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
-			if upstream.IsAlreadyCheckin(err) {
+			// 判定顺序 inactive > already > ok：活动未开启/已结束是活动级正常态，
+			// 不是「今天已签到」（不能记成 already，否则账号当天实际没签却显示正常），
+			// 也不是账号故障（不计 fail、不排重试、不喂熔断）。
+			switch {
+			case upstream.IsInactiveCheckin(err):
+				oc.Status = CheckinInactive
+				oc.Detail = "活动未开启"
+			case upstream.IsAlreadyCheckin(err):
 				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
 				// 出现一整段 400 报文、被误读成签到失败。
 				oc.Status = CheckinAlready
-			} else {
+			default:
 				oc.Status = CheckinFail
 				oc.Detail = err.Error()
 				log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
@@ -673,13 +701,17 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			okN++
 		case CheckinAlready:
 			alreadyN++
+		case CheckinInactive:
+			// 活动级正常态：不递增 failN（否则每天两轮都在报失败），
+			// 也不进熔断（账号本身健康）。inactiveN 仅用于日志汇总。
+			inactiveN++
 		default:
 			failN++
 		}
 		out = append(out, oc)
 	}
-	log.Printf("checkin done: total=%d ok=%d already=%d fail=%d skipped=%d",
-		len(statuses), okN, alreadyN, failN, skipN)
+	log.Printf("checkin done: total=%d ok=%d already=%d inactive=%d fail=%d skipped=%d",
+		len(statuses), okN, alreadyN, inactiveN, failN, skipN)
 	// 顺带做一次签到活动到期预警（只读探测，不影响签到结果；见 checkin_activity.go）。
 	s.warnCheckinActivity(statuses)
 	// 结果回调（落盘供控制台回放）：手动入口与定时排程共用此处，两条路径口径一致。

@@ -444,3 +444,24 @@ func TestLedgerRetryStatePersisted(t *testing.T) {
 		t.Errorf("重启后应仍记得当日已用 1 次，got reason=%q", d.Reason)
 	}
 }
+
+// TestAllFailedJudgementInactiveCountsAsReachable 有活动未开启的账号说明上游可达
+// 且给了确定答复：即使另有失败，也不该判全灭并排重试（重试只会再拿一次
+// 「活动未开启」，纯打上游）。
+func TestAllFailedJudgementInactiveCountsAsReachable(t *testing.T) {
+	s := ledgerScheduler(Config{RetryDelayMinutes: 15, RetryMaxPerDay: 3})
+	now := fixedNow(9, 0)
+	r := s.recordRun(taskCheckin, triggerSchedule, now,
+		runTally{total: 2, inactive: 1, fail: 1})
+	if r.AllFailed {
+		t.Errorf("inactive + fail 不该判全灭：%+v", r)
+	}
+	if armed := s.Ledger().ArmedRetries(r.Finished); len(armed) != 0 {
+		t.Errorf("有 inactive 时不该排重试，got %v", armed)
+	}
+	// 反例：只有 inactive 没失败 → 当然不排（也不是全灭）。
+	r2 := s.recordRun(taskCheckin, triggerSchedule, now, runTally{total: 3, inactive: 3})
+	if r2.AllFailed || len(s.Ledger().ArmedRetries(r2.Finished)) != 0 {
+		t.Errorf("全 inactive 不该判全灭/排重试：%+v", r2)
+	}
+}

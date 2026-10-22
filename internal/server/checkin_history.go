@@ -51,6 +51,7 @@ type CheckinRecord struct {
 	Total      int             `json:"total"`
 	OK         int             `json:"ok"`
 	Already    int             `json:"already"`
+	Inactive   int             `json:"inactive"`
 	Fail       int             `json:"fail"`
 	Skipped    int             `json:"skipped"`
 	Results    []CheckinResult `json:"results"`
@@ -120,6 +121,7 @@ func (s *CheckinHistoryStore) Append(rep CheckinReport, started, finished time.T
 		Total:      rep.Total,
 		OK:         rep.OK,
 		Already:    rep.Already,
+		Inactive:   rep.Inactive,
 		Fail:       rep.Fail,
 		Skipped:    rep.Skipped,
 		Results:    rep.Results,

@@ -75,3 +75,33 @@ func TestBuildCheckinReportEmpty(t *testing.T) {
 		t.Fatalf("空池应给出 total=0 且 results 非 nil 空切片: %+v", rep)
 	}
 }
+
+// TestBuildCheckinReportInactive inactive 是独立计数：既不能并入 already（账号当天
+// 实际没签），也不能并入 fail（活动级正常态）。回执的 status_label 必须渲染为
+// 「活动未开启」，否则前端只能显示英文状态码。
+func TestBuildCheckinReportInactive(t *testing.T) {
+	outcomes := []scheduler.CheckinOutcome{
+		{UID: "u1", Status: scheduler.CheckinInactive, Detail: "活动未开启"},
+		{UID: "u2", Status: scheduler.CheckinAlready},
+		{UID: "u3", Status: scheduler.CheckinOK},
+	}
+	rep := buildCheckinReport(outcomes, func(string) string { return "cn" }, true, []int{9})
+	if rep.Inactive != 1 {
+		t.Errorf("Inactive=%d want 1", rep.Inactive)
+	}
+	if rep.Fail != 0 {
+		t.Errorf("inactive 不得计入 Fail（got %d）", rep.Fail)
+	}
+	if rep.Already != 1 || rep.OK != 1 {
+		t.Errorf("计数串了：%+v", rep)
+	}
+	if got := rep.Results[0].StatusLabel; got != "活动未开启" {
+		t.Errorf("inactive 的 status_label=%q want 活动未开启", got)
+	}
+	// 各状态都有可读标签（前端不再自己拼映射）。
+	for _, r := range rep.Results {
+		if r.StatusLabel == "" {
+			t.Errorf("%s 缺 status_label", r.Status)
+		}
+	}
+}

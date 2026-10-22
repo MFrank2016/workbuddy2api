@@ -259,3 +259,64 @@ func TestPromMetricsEndpointWiresTaskLedger(t *testing.T) {
 // 窄接口——这是 main 里 TaskLedger: sch.Ledger() 能编译的前提，写成编译期断言，
 // 免得以后改接口时只在 cmd/server 才发现。
 var _ TaskLedgerReader = (*taskledger.Store)(nil)
+
+// TestPromTaskResultsHasInactiveLabel wb2api_task_last_run_accounts 的 result 维度
+// 必须含 inactive：inactive 是独立分解项（活动未开启），既不能并入 fail（会误报
+// 故障），也不能并入 skipped（会让"有意跳过"的口径失真）。
+func TestPromTaskResultsHasInactiveLabel(t *testing.T) {
+	found := false
+	for _, r := range promTaskResults {
+		if r == "inactive" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("promTaskResults 缺 inactive 标签：%v", promTaskResults)
+	}
+	run := taskledger.Run{
+		Kind: "checkin", Total: 10, OK: 3, Already: 2, Fail: 1, Skipped: 3, Inactive: 1,
+	}
+	if got := promTaskResultValue(run, "inactive"); got != 1 {
+		t.Errorf("promTaskResultValue(inactive)=%d want 1", got)
+	}
+	// total 与分解守恒（含 inactive）。
+	sum := promTaskResultValue(run, "ok") + promTaskResultValue(run, "already") +
+		promTaskResultValue(run, "fail") + promTaskResultValue(run, "skipped") +
+		promTaskResultValue(run, "inactive")
+	if sum != promTaskResultValue(run, "total") {
+		t.Errorf("分解之和 %d != total %d", sum, promTaskResultValue(run, "total"))
+	}
+}
+
+// TestStatusTaskLedgerExposesInactive /status 的 task_ledger.runs 必须原样透出
+// inactive（字段名就是台账 JSON 标签），面板/告警据此区分「活动未开启」与失败。
+func TestStatusTaskLedgerExposesInactive(t *testing.T) {
+	led := &fakeTaskLedger{
+		runs: map[string]taskledger.Run{
+			"checkin": {
+				Kind: "checkin", Trigger: taskledger.TriggerSchedule,
+				Total: 4, OK: 1, Already: 1, Fail: 1, Skipped: 0, Inactive: 1,
+			},
+		},
+		retry: map[string]taskledger.RetryState{},
+	}
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1"}), TaskLedger: led})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+	var body struct {
+		TaskLedger struct {
+			Runs map[string]struct {
+				Inactive int `json:"inactive"`
+				Total    int `json:"total"`
+			} `json:"runs"`
+		} `json:"task_ledger"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode status: %v body=%s", err, rec.Body)
+	}
+	ck := body.TaskLedger.Runs["checkin"]
+	if ck.Inactive != 1 || ck.Total != 4 {
+		t.Errorf("inactive=%d total=%d want 1/4", ck.Inactive, ck.Total)
+	}
+}
