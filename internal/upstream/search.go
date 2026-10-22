@@ -24,6 +24,7 @@ import (
 	"net/http"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/session"
 )
 
 // searchPath 上游搜索路径（参考实现 search_url_for_headers 逐字）。
@@ -80,8 +81,14 @@ func (c *Client) Search(a *auth.Auth, query string, maxResults int) ([]SearchRes
 		return nil, err
 	}
 	// 账号头一次成型：ChatHeaders 已含 CommonHeaders（Origin/Referer/UA/语言/设备头）
-	// + Authorization/X-User-Id/企业与域头。零值 ChatMeta 会补会话头族，纯附加。
-	c.ChatHeaders(req, a, "", ChatMeta{})
+	// + Authorization/X-User-Id/企业与域头。
+	// 会话头族与真实 chat 路径同族（上游渠道校验：X-Conversation-ID 缺头判非官方客户端
+	// 400 code=11-128；handler 在轮转循环外用轮级聚合键兜底，见 handler.go：#170）。
+	// search 无会话可聚合，故合成一次轮级键：X-Conversation-ID 用该键兜底、X-Trace-ID
+	// 回落同键，单次请求内值稳定。参考实现 a10bb17 的 _web_search 同样带
+	// X-Conversation-ID（_dynamic_request_headers，converter.py:545）。
+	convReqID := session.NewMessageID()
+	c.ChatHeaders(req, a, "", ChatMeta{ConversationRequestID: convReqID, ConversationHeaderID: convReqID})
 	// 搜索是非流式 JSON 端点：把 chat 的 SSE Accept 收敛回参考实现的 application/json。
 	req.Header.Set("Accept", "application/json")
 	// 按账号线路出站：搜索带的是账号 Bearer，走共享 transport 等于漏出宿主 IP。
