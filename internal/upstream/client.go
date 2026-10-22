@@ -1319,6 +1319,13 @@ type ModelInfo struct {
 	Efforts        []string // reasoning.supportedEfforts（空=未知/固定档）
 	DefaultEffort  string   // reasoning.defaultEffort（空=未声明，thinking.go 回退硬编码）
 	SupportsImages bool     // 顶层 supportsImages（多模态能力，透出到 /v1/models）
+	// SupportsImagesSet 上游是否**显式下发**了 supportsImages。三态语义：
+	//   - Set=false → 能力未知（字段缺失）：能力预检与 hint 一律 fail-open；
+	//   - Set=true, SupportsImages=false → 显式不支持（预检可拦、hint 可点名）；
+	//   - Set=true, SupportsImages=true → 显式支持。
+	// 为什么必须区分：`bool` 把「没下发」和「下发 false」压成同一个值，
+	// 预检会把所有缺字段的模型误判成不支持（上游目录大多不带该字段）。
+	SupportsImagesSet bool
 
 	// 以下为模型目录全字段补齐（任务书 models-full-fields）：
 	Description        string   // descriptionZh 中文描述
@@ -1356,11 +1363,13 @@ type dynModelEntry struct {
 	MaxOutputTokens int64    `json:"maxOutputTokens"`
 	MaxAllowedSize  int64    `json:"maxAllowedSize"`
 	Disabled        bool     `json:"disabled"`
-	SupportsImages  bool     `json:"supportsImages"`
-	SupportsReason  bool     `json:"supportsReasoning"`
-	SupportsTool    bool     `json:"supportsToolCall"`
-	OnlyReasoning   bool     `json:"onlyReasoning"`
-	Reasoning       struct {
+	// SupportsImages *bool 而非 bool：nil = 上游没下发该字段（能力未知），
+	// 与「显式 false」区分开（tri-state，见 ModelInfo.SupportsImagesSet）。
+	SupportsImages *bool `json:"supportsImages"`
+	SupportsReason bool  `json:"supportsReasoning"`
+	SupportsTool   bool  `json:"supportsToolCall"`
+	OnlyReasoning  bool  `json:"onlyReasoning"`
+	Reasoning      struct {
 		Effort             string   `json:"effort"`
 		Summary            string   `json:"summary"`
 		DefaultEffort      string   `json:"defaultEffort"`
@@ -1379,7 +1388,8 @@ func (m dynModelEntry) modelInfo() ModelInfo {
 		MaxTokens:          m.MaxOutputTokens,
 		Efforts:            m.Reasoning.SupportedEfforts,
 		DefaultEffort:      m.Reasoning.DefaultEffort,
-		SupportsImages:     m.SupportsImages,
+		SupportsImages:     m.SupportsImages != nil && *m.SupportsImages,
+		SupportsImagesSet:  m.SupportsImages != nil,
 		Description:        m.Description,
 		Credits:            m.Credits,
 		Tags:               m.Tags,

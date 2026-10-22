@@ -74,7 +74,9 @@ func TestFetchModelsDefaultEffortMissing(t *testing.T) {
 	}
 }
 
-// TestFetchModelsSupportsImagesMissing P1：上游不返回 supportsImages → false。
+// TestFetchModelsSupportsImagesMissing tri-state：上游不返回 supportsImages →
+// SupportsImages=false 且 **SupportsImagesSet=false**（「缺失」与「显式 false」可区分；
+// 能力预检只在 Set=true 时判不支持，缺失必须 fail-open）。
 func TestFetchModelsSupportsImagesMissing(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(200, `{"code":0,"data":{"models":[
@@ -90,6 +92,31 @@ func TestFetchModelsSupportsImagesMissing(t *testing.T) {
 	}
 	if infos[0].SupportsImages {
 		t.Errorf("SupportsImages=true want false (field absent)")
+	}
+	if infos[0].SupportsImagesSet {
+		t.Error("SupportsImagesSet=true want false (field absent must be distinguishable from explicit false)")
+	}
+}
+
+// TestFetchModelsSupportsImagesExplicitFalse 显式 false → Set=true（能力预检的前提）。
+func TestFetchModelsSupportsImagesExplicitFalse(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"models":[
+			{"id":"kimi-k2.7","name":"Kimi","maxInputTokens":131072,"maxOutputTokens":8192,"supportsImages":false}
+		],"agents":[{"name":"cli","models":["kimi-k2.7"]}]}}`), nil
+	})
+	infos, err := c.FetchModels(authStub())
+	if err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("infos=%+v", infos)
+	}
+	if !infos[0].SupportsImagesSet {
+		t.Error("SupportsImagesSet=false want true (explicit false)")
+	}
+	if infos[0].SupportsImages {
+		t.Error("SupportsImages=true want false")
 	}
 }
 

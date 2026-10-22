@@ -53,8 +53,8 @@ func TestChat11133HintModelNoImages(t *testing.T) {
 	resetModelsCache()
 	defer resetModelsCache()
 	seedModelsCache([]upstream.ModelInfo{
-		{ID: "deepseek-v3-0324", SupportsImages: false},
-		{ID: "hy3", SupportsImages: true},
+		{ID: "deepseek-v3-0324", SupportsImagesSet: true, SupportsImages: false},
+		{ID: "hy3", SupportsImagesSet: true, SupportsImages: true},
 	})
 	calls := 0
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -92,7 +92,7 @@ func TestChat11133HintCatalogSupportsImages(t *testing.T) {
 		name   string
 		seeded []upstream.ModelInfo
 	}{
-		{"目录声明支持", []upstream.ModelInfo{{ID: "deepseek-v3-0324", SupportsImages: true}}},
+		{"目录声明支持", []upstream.ModelInfo{{ID: "deepseek-v3-0324", SupportsImagesSet: true, SupportsImages: true}}},
 		{"目录未收录（缓存冷）", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,7 +129,7 @@ func TestChat11133HintCatalogSupportsImages(t *testing.T) {
 func TestChat11133HintNoImage(t *testing.T) {
 	resetModelsCache()
 	defer resetModelsCache()
-	seedModelsCache([]upstream.ModelInfo{{ID: "deepseek-v3-0324", SupportsImages: false}})
+	seedModelsCache([]upstream.ModelInfo{{ID: "deepseek-v3-0324", SupportsImagesSet: true, SupportsImages: false}})
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, body11133Real, false
 	})
@@ -363,7 +363,7 @@ func TestCachedModelsSnapshotZeroUpstreamCalls(t *testing.T) {
 	defer resetModelsCache()
 	// 缓存置为「已过期」（fetched=过去时刻）。
 	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = []upstream.ModelInfo{{ID: "hy3", SupportsImages: true}}
+	dynamicModelsCache.ids = []upstream.ModelInfo{{ID: "hy3", SupportsImagesSet: true, SupportsImages: true}}
 	dynamicModelsCache.fetched = time.Now().Add(-2 * dynamicModelsTTL)
 	dynamicModelsCache.Unlock()
 

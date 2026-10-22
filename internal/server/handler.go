@@ -957,6 +957,43 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 图片策略与能力预检（Todo 12）：**读 body 之后、选号之前**。
+	// 位置理由：两者都只依赖请求体 + 模型目录（不依赖账号），放在选号前意味着
+	// 被拒请求零上游 chat 请求、不占租约、不罚任何账号。
+	// 开关一律从 livecfg 取（面板热改），零值 = 迁移前行为（0/passthrough/false）。
+	live := h.loadLive()
+	body, imageCount, imgErr := upstream.ApplyImagePolicy(body, live.MaxImages, live.ImagePolicy)
+	if imgErr != nil {
+		var limitErr *upstream.ImagePolicyError
+		if errors.As(imgErr, &limitErr) {
+			st.status = http.StatusRequestEntityTooLarge
+			writeTooManyImages(w, limitErr.ImageCount, limitErr.MaxImages)
+			return
+		}
+		// 其他错误（当前不可达：ApplyImagePolicy 只在超限且 policy=error 时报错）
+		// 不猜语义，按参数错误就地拒绝。
+		st.status = http.StatusBadRequest
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", imgErr.Error())
+		return
+	}
+	// 只在真的丢掉图片时打一行：策略开启但请求未超限是常态，不该刷日志。
+	// 不二次 CountImages（body 已改写，再解析一次只为日志不值当）。
+	if live.ImagePolicy == "truncate" && imageCount > live.MaxImages {
+		log.Printf("[server] image policy: truncated %d -> %d (upstream.max_images=%d)", imageCount, live.MaxImages, live.MaxImages)
+	}
+	// 能力预检：仅当开关开、请求确实带图、且目录**显式**声明不支持（tri-state
+	// Set=true + false）时拒绝。能力缺失（Set=false）一律 fail-open——上游目录
+	// 大多数条目不下发 supportsImages，按「缺失 = 不支持」拦会把正常请求全挡掉。
+	if live.CapabilityGuard && hasImagePart(body) {
+		if cap := h.lookupModelCapability(realm, bareModel); cap.InCatalog && cap.SupportsImagesSet && !cap.SupportsImages {
+			st.status = http.StatusBadRequest
+			writeOpenAIErrorHint(w, http.StatusBadRequest, "model_capability_mismatch",
+				"model "+bareModel+" does not support images",
+				upstream.NoImagesHint(bareModel))
+			return
+		}
+	}
+
 	tried := map[string]bool{}
 	// 账号日限额（pool.account_daily_credit_limit，0 = 关闭）：当日 credit 已达上限的
 	// 账号本轮不参与选号；全部触顶时末端回 429 daily_limit_exceeded。
@@ -1382,7 +1419,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					msg = "content blocked by upstream content firewall"
 				}
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
-					h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr))
+					h.hintOf(upstream.ErrContentBlocked, string(respBody), realm, bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				return
 			}
@@ -1397,7 +1434,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
-					h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr))
+					h.hintOf(upstream.ErrPromptTooLong, string(respBody), realm, bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				return
 			}
@@ -1411,7 +1448,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					msg = "image request was rejected by upstream"
 				}
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
-					h.hintOf(upstream.ErrImageInvalid, string(respBody), bareModel, reqHasImage, uerr))
+					h.hintOf(upstream.ErrImageInvalid, string(respBody), realm, bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				return
 			}
@@ -1459,7 +1496,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 实测最常见的泄漏成因，只做严格判定等于对主场景不设防。
 			repair := upstream.NewMarkupRepair(declaredTools, true)
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
-				return h.hintContext(bareModel, reqHasImage)
+				return h.hintContext(realm, bareModel, reqHasImage)
 			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }),
 				upstream.WithMarkupRepair(repair))
 			switch {
@@ -1649,7 +1686,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	upstreamMsgPassed := false
 	var ue *upstream.Error
 	if errors.As(lastErr, &ue) {
-		hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
+		hint = h.hintOf(ue.Kind, ue.Msg, realm, bareModel, reqHasImage, ue)
 		switch ue.Kind {
 		case upstream.ErrSoftRate:
 			status = http.StatusTooManyRequests
@@ -1966,21 +2003,20 @@ func hasImagePart(body []byte) bool {
 // 是否带图 + 模型目录 supports_images 声明（目录未收录 → ModelInCatalog=false，
 // 不做「不支持」判定，防查不到误判）。仅错误路径调用（成功请求零开销）。
 //
-// 目录查询只读既有缓存快照（cachedModelsSnapshot），**不触发上游拉取**：错误路径
+// realm-aware：CN 读包级动态缓存，global 读探测快照（见 lookupModelCapability）。
+// 目录查询只读既有缓存快照，**不触发上游拉取**：错误路径
 // 加一次 FetchModels 网络调用既拖慢错误响应、又污染上游调用语义（错误风暴时放大
 // 请求量——与 WAF IP fail-fast 的「不放大请求量」哲学相悖）。缓存冷（最近 1h 未
 // 拉过）→ ModelInCatalog=false，11133 退中性 hint（宁缺勿滥，不编造能力事实）。
-func (h *Handler) hintContext(bareModel string, hasImage bool) upstream.HintContext {
+func (h *Handler) hintContext(realm, bareModel string, hasImage bool) upstream.HintContext {
 	ctx := upstream.HintContext{Model: bareModel, HasImage: hasImage}
 	if bareModel == "" {
 		return ctx
 	}
-	for _, mi := range cachedModelsSnapshot() {
-		if mi.ID == bareModel {
-			ctx.ModelInCatalog = true
-			ctx.ModelSupportsImages = mi.SupportsImages
-			return ctx
-		}
+	if cap := h.lookupModelCapability(realm, bareModel); cap.InCatalog {
+		ctx.ModelInCatalog = true
+		ctx.ModelSupportsImages = cap.SupportsImages
+		ctx.ModelSupportsImagesSet = cap.SupportsImagesSet
 	}
 	return ctx
 }
@@ -2000,10 +2036,10 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 // gateway_hint 文案（upstream.GatewayHint 单一事实来源）。uerr 为 nil 时回落
 // body 原文判定（防御路径）。transport 层错误（lastErr 非 *upstream.Error 且
 // 上游没回 body）→ 无 hint（不编造）。
-func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage bool, uerr *upstream.Error) string {
+func (h *Handler) hintOf(kind upstream.ErrKind, body, realm, bareModel string, hasImage bool, uerr *upstream.Error) string {
 	msg := body
 	if uerr != nil && uerr.Msg != "" {
 		msg = uerr.Msg
 	}
-	return upstream.GatewayHint(kind, msg, h.hintContext(bareModel, hasImage))
+	return upstream.GatewayHint(kind, msg, h.hintContext(realm, bareModel, hasImage))
 }

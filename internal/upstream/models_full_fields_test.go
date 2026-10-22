@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -211,5 +212,62 @@ func TestFetchGlobalModelInfosFailureNil(t *testing.T) {
 	// 非路由账号（CN realm）→ 不探测，infos nil。
 	if got := c.FetchGlobalModelInfos(authStub()); got != nil {
 		t.Errorf("cn account: infos=%v want nil (globalOn gate)", got)
+	}
+}
+
+// TestModelInfoSupportsImagesTriState dynModelEntry → ModelInfo 的 tri-state 派生：
+// supportsImages 缺失 → Set=false；显式 false → Set=true, SupportsImages=false；
+// 显式 true → Set=true, SupportsImages=true。CN 与 global 共用同一 modelInfo()，
+// 故本测试同时锚定两域解析口径。
+func TestModelInfoSupportsImagesTriState(t *testing.T) {
+	cases := []struct {
+		name    string
+		entry   string
+		want    bool
+		wantSet bool
+	}{
+		{"缺失", `{"id":"m"}`, false, false},
+		{"显式 false", `{"id":"m","supportsImages":false}`, false, true},
+		{"显式 true", `{"id":"m","supportsImages":true}`, true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var e dynModelEntry
+			if err := json.Unmarshal([]byte(c.entry), &e); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			mi := e.modelInfo()
+			if mi.SupportsImages != c.want || mi.SupportsImagesSet != c.wantSet {
+				t.Errorf("SupportsImages=%v SupportsImagesSet=%v want %v/%v",
+					mi.SupportsImages, mi.SupportsImagesSet, c.want, c.wantSet)
+			}
+		})
+	}
+}
+
+// TestParseGlobalModelNamesSupportsImagesTriState global 解析器同样填 SupportsImagesSet
+// （能力预检的 realm-aware 目录前提：global 模型也能命中「显式不支持」）。
+func TestParseGlobalModelNamesSupportsImagesTriState(t *testing.T) {
+	raw := `{"code":0,"data":{"models":[
+		{"id":"gpt-explicit-false","name":"A","supportsImages":false},
+		{"id":"gpt-missing","name":"B"},
+		{"id":"gpt-yes","name":"C","supportsImages":true}
+	]}}`
+	_, infos, _, _, err := parseGlobalModelNames([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := map[string]ModelInfo{}
+	for _, mi := range infos {
+		got[mi.ID] = mi
+	}
+	if mi := got["gpt-explicit-false"]; !mi.SupportsImagesSet || mi.SupportsImages {
+		t.Errorf("explicit false: SupportsImagesSet=%v SupportsImages=%v want true/false", mi.SupportsImagesSet, mi.SupportsImages)
+	}
+	if mi := got["gpt-missing"]; mi.SupportsImagesSet {
+		t.Error("missing capability must keep SupportsImagesSet=false (fail-open)")
+	}
+	if mi := got["gpt-yes"]; !mi.SupportsImagesSet || !mi.SupportsImages {
+		t.Errorf("explicit true: SupportsImagesSet=%v SupportsImages=%v want true/true", mi.SupportsImagesSet, mi.SupportsImages)
 	}
 }

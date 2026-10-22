@@ -22,8 +22,9 @@ import (
 // ctx 携带判定 hint 所需的请求侧上下文（零值合法，信息缺失时相关形态退为中性
 // hint 或无 hint）：
 //   - HasImage：请求体是否携带 image_url part（11133 的「模型不支持图片」指向前提）；
-//   - Model / ModelInCatalog / ModelSupportsImages：模型目录对该模型的
-//     supports_images 声明（目录未收录 → 不做「不支持」判定，防查不到误判成不支持）。
+//   - Model / ModelInCatalog / ModelSupportsImagesSet / ModelSupportsImages：模型目录
+//     对该模型的 supports_images 声明（目录未收录 → 不做「不支持」判定，防查不到误判
+//     成不支持；Set=false → 上游没下发该字段，能力未知，同样不判不支持）。
 //
 // 判定次序：11133/11135 上游业务码**先于** Kind 表——实测这两族归 ErrClient/
 // ErrBadParams 皆有可能（Classify 词表不含 11133），hint 层自带判定（hint 是补充
@@ -33,8 +34,8 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	// 参数被模型供应商拒绝）。只有请求确实带图、且目录能对该模型做出「不支持图片」
 	// 的判定时才给「换模型」指向，否则退中性参数形态（可能是任意参数问题，不点名图片）。
 	if isModelParamInvalid(msg) {
-		if ctx.HasImage && ctx.ModelInCatalog && !ctx.ModelSupportsImages {
-			return "model " + ctx.Model + " does not support images; pick one with supports_images=true from /v1/models"
+		if ctx.HasImage && ctx.ModelInCatalog && ctx.ModelSupportsImagesSet && !ctx.ModelSupportsImages {
+			return NoImagesHint(ctx.Model)
 		}
 		return "request parameters were rejected by the model provider; check message format and model capabilities"
 	}
@@ -77,7 +78,17 @@ type HintContext struct {
 	Model               string // 请求裸模型名（可空）
 	HasImage            bool   // 请求体是否携带 image_url part
 	ModelSupportsImages bool   // 模型目录 supports_images 声明（仅 ModelInCatalog 时有意义）
-	ModelInCatalog      bool   // 模型目录是否收录该模型（「不支持」判定的前提）
+	// ModelSupportsImagesSet 上游是否**显式下发**了 supportsImages（tri-state）。
+	// false = 能力未知：不得据此判定「不支持」（缺失 ≠ false）。
+	ModelSupportsImagesSet bool
+	ModelInCatalog         bool // 模型目录是否收录该模型（「不支持」判定的前提）
+}
+
+// NoImagesHint「模型不支持图片」的指向文案。单一事实来源：11133 的 gateway_hint
+// 与 handler 的能力预检（400 model_capability_mismatch）共用同一句，避免两处措辞
+// 漂移——客户端在同一件事上看到两种说法。
+func NoImagesHint(model string) string {
+	return "model " + model + " does not support images; pick one with supports_images=true from /v1/models"
 }
 
 // noHealthyHint 本地调度类错误（池中无健康号可用/传输层抖动，无上游原文可透传）

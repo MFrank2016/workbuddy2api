@@ -64,7 +64,7 @@ func TestGatewayHintImageForms(t *testing.T) {
 			// 11133 + 带图 + 目录声明不支持 → 点名模型 + 换模型指向（含 /v1/models 提示）。
 			"11133 带图且目录不支持",
 			body11133,
-			HintContext{Model: "deepseek-v3-0324", HasImage: true, ModelInCatalog: true, ModelSupportsImages: false},
+			HintContext{Model: "deepseek-v3-0324", HasImage: true, ModelInCatalog: true, ModelSupportsImagesSet: true, ModelSupportsImages: false},
 			"model deepseek-v3-0324 does not support images; pick one with supports_images=true from /v1/models",
 		},
 		{
@@ -78,14 +78,14 @@ func TestGatewayHintImageForms(t *testing.T) {
 			// 11133 + 带图 + 目录未收录 → 不做「不支持」判定（宁缺勿滥），退中性。
 			"11133 带图但目录未收录",
 			body11133,
-			HintContext{Model: "mystery", HasImage: true, ModelInCatalog: false, ModelSupportsImages: false},
+			HintContext{Model: "mystery", HasImage: true, ModelInCatalog: false, ModelSupportsImagesSet: true, ModelSupportsImages: false},
 			"request parameters were rejected by the model provider; check message format and model capabilities",
 		},
 		{
 			// 11133 + 不带图（纯参数问题）→ 中性参数形态，不点名图片。
 			"11133 不带图",
 			body11133,
-			HintContext{Model: "deepseek-v3-0324", HasImage: false, ModelInCatalog: true, ModelSupportsImages: false},
+			HintContext{Model: "deepseek-v3-0324", HasImage: false, ModelInCatalog: true, ModelSupportsImagesSet: true, ModelSupportsImages: false},
 			"request parameters were rejected by the model provider; check message format and model capabilities",
 		},
 		{
@@ -101,8 +101,16 @@ func TestGatewayHintImageForms(t *testing.T) {
 			// 形态判定照样给出（marker 先于 Kind 表）。
 			"11133 ErrClient 仍带形态 hint",
 			body11133,
-			HintContext{Model: "deepseek-v3-0324", HasImage: true, ModelInCatalog: true, ModelSupportsImages: false},
+			HintContext{Model: "deepseek-v3-0324", HasImage: true, ModelInCatalog: true, ModelSupportsImagesSet: true, ModelSupportsImages: false},
 			"model deepseek-v3-0324 does not support images; pick one with supports_images=true from /v1/models",
+		},
+		{
+			// 11133 + 带图 + 目录收录但**能力缺失**（supportsImages 字段不存在，tri-state
+			// Set=false）→ 不得声称「不支持图片」，退中性（fail-open）。
+			"11133 带图但能力缺失",
+			body11133,
+			HintContext{Model: "deepseek-v3-0324", HasImage: true, ModelInCatalog: true, ModelSupportsImagesSet: false, ModelSupportsImages: false},
+			"request parameters were rejected by the model provider; check message format and model capabilities",
 		},
 		{
 			// 非 11133/11135 的 body → 纯 Kind 表（ErrSoftRate 例子；6004 码字不撞
