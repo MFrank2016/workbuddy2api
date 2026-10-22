@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,6 +92,30 @@ type Auth struct {
 	// 选号时该账号对命中模型不可用（上游 11158/11102 的本地前置规避）。
 	// 生命周期同 Groups/Weight：Parse 后只读。
 	DisabledModels []string
+
+	// Profile 账号的产品 profile（cn-cli / cn-work / intl-cli / intl-work），
+	// 与 realm **正交**：realm 决定「国内/国际」，profile 决定「CLI/工作台」。
+	//
+	// 来源与优先级（契约 §1，唯一选择链）：
+	//   explicit（顶层 profile）> persisted derived（顶层 profile_derived，
+	//   仅 profile_backfill_v1=true 时可信）> stored realm（cn→cn-cli、
+	//   global→intl-work）> domain（4-host 表）> cn-cli。
+	//
+	// Parse 时算好，之后只读；**Parse 不回写**。显式值与推导值分别由
+	// profileExplicit / ProfileDerived 持有，SaveAtomic 按原样落盘。
+	Profile string
+	// ProfileDerived 已持久化的**推导** profile（顶层 profile_derived）。
+	// 只由 BackfillRealm 在落盘 realm 时写入 —— 用来记住「这个 domain 推导出
+	// 什么 profile」，使无 realm 的旧账号在重启后仍能按原 profile 解析。
+	ProfileDerived string
+
+	// profileExplicit 顶层 profile 的原始显式值（空 = 未显式指定）。
+	// 与 Profile 分开持有：Profile 是计算结果，写回时只能写用户真正设过的值，
+	// 否则一次 token 刷新就会把推导结果固化成显式选择（见 SaveAtomic）。
+	profileExplicit string
+	// profileBackfillV1 顶层 profile_backfill_v1：标记 profile_derived 是本进程
+	// 落盘的推导值（可信）。缺失/false 时 profile_derived 不参与选择。
+	profileBackfillV1 bool
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -241,6 +266,109 @@ func ResolveRealm(explicit, domain string) string {
 	return "cn"
 }
 
+// ResolveProfile 按契约 §1 的**唯一选择链**推导产品 profile：
+//
+//	explicit > persisted derived（仅当 backfillV1）> rawRealm > domain > cn-cli
+//
+// 三条容易写错的约束（均有测试钉住）：
+//  1. rawRealm 必须是 **BackfillRealm 之前**的原始 realm 字符串。BackfillRealm
+//     会给旧文件补一个 realm（www.codebuddy.ai / www.workbuddy.cn 补的是 cn），
+//     若拿补过的值参与推导，这两个 host 的 profile 就退化了。
+//  2. derived 只在 backfillV1 为 true 时可信：否则面板/用户手写的
+//     profile_derived 会意外压过 realm，与「显式才生效」的直觉相反。
+//  3. realm 只认 cn / global 两个字面值；其它值（含空串）视为「没有 realm」，
+//     继续看 domain —— 空串绝不能当 cn，否则 domain 分支永远走不到。
+func ResolveProfile(explicit, derived, rawRealm, domain string) string {
+	if p := strings.TrimSpace(explicit); p != "" {
+		return p
+	}
+	if p := strings.TrimSpace(derived); p != "" {
+		return p
+	}
+	switch strings.TrimSpace(rawRealm) {
+	case "global":
+		return "intl-work"
+	case "cn":
+		return "cn-cli"
+	}
+	if p := profileForDomain(domain); p != "" {
+		return p
+	}
+	return "cn-cli"
+}
+
+// profileForDomain 4-host 表（契约 §1「典型 domain」列）。
+//
+// 只列能**唯一**确定 profile 的 host：codebuddy.cn / workbuddy.ai 被多个
+// profile 共用，猜错会把请求打到另一个产品的端点上（比不猜更糟）。
+func profileForDomain(domain string) string {
+	switch normalizeDomain(domain) {
+	case "copilot.tencent.com":
+		return "cn-cli"
+	case "www.workbuddy.cn":
+		return "cn-work"
+	case "www.codebuddy.ai":
+		return "intl-cli"
+	case "www.workbuddy.ai":
+		return "intl-work"
+	}
+	return ""
+}
+
+// firstNonEmpty 返回第一个去空白后非空的值（顶层键优先于兼容位置）。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// normalizeDomain 把 auth 文件里的 domain 归一成裸 host。
+//
+// auth 文件里 domain 通常就是 `copilot.tencent.com`，但手写/导入的形态可能带
+// scheme、端口、路径（`https://WWW.WorkBuddy.CN/`）。不归一化的话 4-host 表
+// 只能匹配其中一种写法，另一种静默落回 cn-cli —— 那是「配置看着对、行为不对」
+// 的典型形态。
+func normalizeDomain(domain string) string {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	if d == "" {
+		return ""
+	}
+	if i := strings.Index(d, "://"); i >= 0 {
+		d = d[i+3:]
+	}
+	if i := strings.IndexByte(d, '/'); i >= 0 {
+		d = d[:i]
+	}
+	if i := strings.IndexByte(d, '@'); i >= 0 {
+		d = d[i+1:]
+	}
+	// 端口：只在最后一段是数字时剥掉（IPv6 字面量不在 4-host 表里，不处理）。
+	if i := strings.LastIndexByte(d, ':'); i >= 0 {
+		if _, err := strconv.Atoi(d[i+1:]); err == nil {
+			d = d[:i]
+		}
+	}
+	return strings.TrimSuffix(d, ".")
+}
+
+// ProfileRealm 由 profile 推导 realm（契约 §1：cn-* → cn、intl-* → global）。
+//
+// 只认两个前缀；认不出返回空串（**不编造** realm —— 猜错会让 core 按错误的
+// 版本选号）。供 search/MCP 入口与 manager 头推导共用同一份判据。
+func ProfileRealm(profile string) string {
+	p := strings.ToLower(strings.TrimSpace(profile))
+	switch {
+	case strings.HasPrefix(p, "intl-"):
+		return "global"
+	case strings.HasPrefix(p, "cn-"):
+		return "cn"
+	}
+	return ""
+}
+
 // BackfillRealm 为缺省 realm 标识的账号持久化补标识：a.realm 为空时按「原始 domain 推断」
 // 写回（cn/global），返回 (是否有变更, 归一化后的 realm)。已有标识不动（幂等）。
 //
@@ -255,6 +383,13 @@ func (a *Auth) BackfillRealm() (bool, string) {
 	}
 	r := ResolveRealm("", a.Domain)
 	a.realm = r
+	// 用 BackfillRealm **之前**的原始 realm（这里是空串）与 domain 推导 profile，
+	// 与 Parse 里同一份判据 —— 两处各写一遍迟早漂移。
+	// 推导值**不含显式覆盖**：它记的是「这个 domain 推导出什么」，显式选择另存
+	// profileExplicit，两者互不覆盖（否则显式值会把推导证据抹掉）。
+	a.ProfileDerived = ResolveProfile("", "", "", a.Domain)
+	a.Profile = ResolveProfile(a.profileExplicit, a.ProfileDerived, "", a.Domain)
+	a.profileBackfillV1 = true
 	return true, r
 }
 
@@ -423,6 +558,11 @@ func Parse(raw []byte) (*Auth, error) {
 				ExpiresAt    int64  `json:"expiresAt"`
 				Domain       string `json:"domain"`
 				Realm        string `json:"realm"`
+				// Profile 兼容读：契约规定 profile 在**顶层**，但 realm 就在 auth
+				// 段里，手写时把 profile 一起塞进 auth 是很自然的写法。不认它，
+				// 用户会看到「配置明明写了 intl-cli、实际却按 domain 推导」——
+				// 正是本仓库反复出现的「看着对、行为不对」形态。顶层优先。
+				Profile string `json:"profile"`
 			} `json:"auth"`
 			Account struct {
 				UID          string `json:"uid"`
@@ -445,6 +585,12 @@ func Parse(raw []byte) (*Auth, error) {
 			MaxConcurrency int      `json:"max_concurrency"`
 			MinInterval    float64  `json:"min_interval"`
 			DisabledModels []string `json:"disabled_models"`
+			// 产品 profile（顶层，与 device_token/groups 同位置）。三段：
+			// profile 是显式选择，profile_derived 是本进程落盘的推导值，
+			// profile_backfill_v1 标记后者可信（见 ResolveProfile 的优先级）。
+			Profile           string `json:"profile"`
+			ProfileDerived    string `json:"profile_derived"`
+			ProfileBackfillV1 bool   `json:"profile_backfill_v1"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -466,25 +612,32 @@ func Parse(raw []byte) (*Auth, error) {
 			MaxConcurrency: n.MaxConcurrency,
 			MinInterval:    n.MinInterval,
 			DisabledModels: normalizeModels(n.DisabledModels),
+
+			ProfileDerived:    strings.TrimSpace(n.ProfileDerived),
+			profileExplicit:   firstNonEmpty(n.Profile, n.Auth.Profile),
+			profileBackfillV1: n.ProfileBackfillV1,
 		}
 	} else {
 		var f struct {
-			AccessToken    string   `json:"accessToken"`
-			RefreshToken   string   `json:"refreshToken"`
-			ExpiresAt      int64    `json:"expiresAt"`
-			Domain         string   `json:"domain"`
-			Realm          string   `json:"realm"`
-			UID            string   `json:"uid"`
-			EnterpriseID   string   `json:"enterpriseId"`
-			Nickname       string   `json:"nickname"`
-			DeviceToken    string   `json:"device_token"`
-			Proxy          string   `json:"proxy"`
-			ProxySession   string   `json:"proxy_session"`
-			Groups         []string `json:"groups"`
-			Weight         *float64 `json:"weight"`
-			MaxConcurrency int      `json:"max_concurrency"`
-			MinInterval    float64  `json:"min_interval"`
-			DisabledModels []string `json:"disabled_models"`
+			AccessToken       string   `json:"accessToken"`
+			RefreshToken      string   `json:"refreshToken"`
+			ExpiresAt         int64    `json:"expiresAt"`
+			Domain            string   `json:"domain"`
+			Realm             string   `json:"realm"`
+			UID               string   `json:"uid"`
+			EnterpriseID      string   `json:"enterpriseId"`
+			Nickname          string   `json:"nickname"`
+			DeviceToken       string   `json:"device_token"`
+			Proxy             string   `json:"proxy"`
+			ProxySession      string   `json:"proxy_session"`
+			Groups            []string `json:"groups"`
+			Weight            *float64 `json:"weight"`
+			MaxConcurrency    int      `json:"max_concurrency"`
+			MinInterval       float64  `json:"min_interval"`
+			DisabledModels    []string `json:"disabled_models"`
+			Profile           string   `json:"profile"`
+			ProfileDerived    string   `json:"profile_derived"`
+			ProfileBackfillV1 bool     `json:"profile_backfill_v1"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -506,11 +659,26 @@ func Parse(raw []byte) (*Auth, error) {
 			MaxConcurrency: f.MaxConcurrency,
 			MinInterval:    f.MinInterval,
 			DisabledModels: normalizeModels(f.DisabledModels),
+
+			ProfileDerived:    strings.TrimSpace(f.ProfileDerived),
+			profileExplicit:   strings.TrimSpace(f.Profile),
+			profileBackfillV1: f.ProfileBackfillV1,
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
+	// profile 必须在 **BackfillRealm 之前**算：Parse 本身不 backfill，但 LoadDir
+	// 随后会做。这里用的 a.realm / a.Domain 都还是磁盘原值（未经任何改写）。
+	//
+	// 关键：**不回写 profile**。a.Profile 只是内存里的计算结果，落盘由 SaveAtomic
+	// 按 profileExplicit / ProfileDerived 分别处理 —— 把推导值写成显式 profile 会让
+	// 一次 token 刷新永久固化语义（见 SaveAtomic 的注释与 profile_test.go）。
+	derived := ""
+	if a.profileBackfillV1 {
+		derived = a.ProfileDerived
+	}
+	a.Profile = ResolveProfile(a.profileExplicit, derived, a.realm, a.Domain)
 	return &a, nil
 }
 
@@ -572,6 +740,23 @@ func (a *Auth) SaveAtomic() error {
 	// 静默清掉账号级禁用模型。
 	if len(a.DisabledModels) > 0 {
 		doc["disabled_models"] = a.DisabledModels
+	}
+	// profile 三键（顶层）：与 device_token/groups 同策略 —— 只在有值/已置位时写，
+	// 不给旧文件引入空键。
+	//
+	// ★ 只写**显式值**，绝不写推导结果 ★
+	// 本函数用固定字段集整体重写文件，所以漏写 = 每次 token 刷新都把管理员设的
+	// profile 静默删掉；但反过来「无条件写 a.Profile」同样有害：推导值一旦被写成
+	// 显式 profile，之后管理员把 realm 改成 global 也不再得到 intl-work（显式优先），
+	// 语义被一次刷新永久固化。推导证据走 profile_derived + 版本标记这条路。
+	if a.profileExplicit != "" {
+		doc["profile"] = a.profileExplicit
+	}
+	if a.ProfileDerived != "" {
+		doc["profile_derived"] = a.ProfileDerived
+	}
+	if a.profileBackfillV1 {
+		doc["profile_backfill_v1"] = true
 	}
 	// 账号级流量整形（v0.1.3）：与 device_token/groups 同策略——只在显式配置时
 	// 写回，不给旧文件引入空键。★ 必须写回 ★ 本函数固定字段集整体重写，漏掉

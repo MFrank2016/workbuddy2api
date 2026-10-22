@@ -644,6 +644,10 @@ var restartRequiredPaths = []string{
 	// （applyAuthFileMode）—— 热更它会让面板一存配置，新建凭证文件的权限当场变，
 	// 与「restart-only」的承诺相反。故列入重启清单，且不进 livecfg.Snapshot。
 	"auth.file_mode",
+	// profiles.enabled / profiles.detect_only：产品 profile 的路由开关。接线在
+	// 启动期（profile → base URL / Origin / UA / 排程门控），热更会让「面板说已
+	// 保存、实际路由没变」，而这类不一致从界面上看不出来。故 restart-only。
+	"profiles.enabled", "profiles.detect_only",
 }
 
 // liveSnapshot 把 Config 映射成运行期快照（**唯一映射点**）。

@@ -35,6 +35,10 @@ type APIKeyEntry struct {
 	// Realm 密钥级域绑定（"cn" / "global"）；空 = 不限。请求路由到的 realm
 	// 不匹配时本地 400。
 	Realm string `json:"realm"`
+	// Profiles 密钥级 profile 允许集（契约 §1 Selector）：空 = 不限；含 "*" = 任意。
+	// 请求头 X-WB2A-Profile 的值必须在本集合内，否则 400 profile_not_allowed
+	// （校验点在 Todo 22 的选号入口；本 todo 只负责字段与持久化）。
+	Profiles []string `json:"profiles"`
 }
 
 // Config 顶层配置。
@@ -188,6 +192,22 @@ type Config struct {
 	MCP struct {
 		Enabled bool `json:"enabled"` // 默认 false
 	} `json:"mcp"`
+
+	// Profiles 产品 profile（cn-cli / cn-work / intl-cli / intl-work）的路由开关。
+	//
+	// 契约 §1 / §5：**默认全关** —— 迁移前行为逐字一致。两个键分工：
+	//   · Enabled=false → 完全走旧的 chatBase(a)/globalOn(a)，profile 只是被写进
+	//     auth 文件（detect_only 或纯观测）；
+	//   · DetectOnly=true → 只计算并落盘 profile，**URL 路由与选号过滤都不使用它**。
+	//     只有 Enabled=true 且 DetectOnly=false 才真正按 profile 路由。
+	//
+	// **restart-only**：接线在启动期（Todo 21 的 productprofile 表与 base 解析），
+	// 不进 livecfg.Snapshot —— 热更会让「面板说已保存、实际路由没变」。两个键都
+	// 在 restartRequiredPaths 里，保存后如实提示重启。
+	Profiles struct {
+		Enabled    bool `json:"enabled"`     // 默认 false
+		DetectOnly bool `json:"detect_only"` // 默认 true
+	} `json:"profiles"`
 
 	// Auth 账号凭证文件的落盘行为。
 	//
@@ -494,6 +514,9 @@ func Default() *Config {
 	c.Upstream.CapabilityGuard = false
 	c.Search.Enabled = false
 	c.MCP.Enabled = false
+	// 产品 profile 路由默认**关闭 + 仅检测**：迁移前行为逐字一致（契约 §5）。
+	c.Profiles.Enabled = false
+	c.Profiles.DetectOnly = true
 	// auth.file_mode 默认空 = 保持现状 0600（不设进程级覆盖）。
 	c.Auth.FileMode = ""
 	return c
@@ -720,6 +743,16 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_MCP_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.MCP.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_PROFILES_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Profiles.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_PROFILES_DETECT_ONLY"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Profiles.DetectOnly = b
 		}
 	}
 	if v := os.Getenv("WB2A_AUTH_FILE_MODE"); v != "" {
@@ -1228,30 +1261,73 @@ func (c *Config) normalizeAPIKeys() error {
 
 		if len(e.Groups) == 0 {
 			e.Groups = nil
+		} else {
+			norm := make([]string, 0, len(e.Groups))
+			gSeen := make(map[string]bool, len(e.Groups))
+			for _, g := range e.Groups {
+				g = strings.TrimSpace(g)
+				if g == "" {
+					continue
+				}
+				if !apiKeyGroupRe.MatchString(g) {
+					return fmt.Errorf("%s.groups 含非法组名 %q：须匹配 %s（组名要与账号文件的 groups 精确相等才生效，不接受大写与空白）",
+						label, g, apiKeyGroupRe.String())
+				}
+				if gSeen[g] {
+					continue
+				}
+				gSeen[g] = true
+				norm = append(norm, g)
+			}
+			if len(norm) == 0 {
+				norm = nil
+			}
+			e.Groups = norm
+		}
+		if err := normalizeKeyProfiles(e, label); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// apiKeyProfiles 合法的 profile 取值（契约 §1 的 4 个，外加 "*" = 任意）。
+//
+// 白名单式校验，而不是「看起来像 cn-*/intl-* 就放行」：profiles 是**限制**，
+// 把拼错的值静默丢掉会让「本来想限制成 intl-cli」的密钥变成不限 —— 隔离静默
+// 失效。宁可启动失败，让人当场看到拼写错误。
+var apiKeyProfiles = map[string]bool{
+	"cn-cli": true, "cn-work": true, "intl-cli": true, "intl-work": true, "*": true,
+}
+
+// normalizeKeyProfiles 归一化单个密钥条目的 profiles：去空白/空串/去重，并校验取值。
+// 空集合 = nil（不限，与省略该键等价）。
+func normalizeKeyProfiles(e *APIKeyEntry, label string) error {
+	if len(e.Profiles) == 0 {
+		e.Profiles = nil
+		return nil
+	}
+	norm := make([]string, 0, len(e.Profiles))
+	seen := make(map[string]bool, len(e.Profiles))
+	for _, p := range e.Profiles {
+		p = strings.TrimSpace(p)
+		if p == "" {
 			continue
 		}
-		norm := make([]string, 0, len(e.Groups))
-		gSeen := make(map[string]bool, len(e.Groups))
-		for _, g := range e.Groups {
-			g = strings.TrimSpace(g)
-			if g == "" {
-				continue
-			}
-			if !apiKeyGroupRe.MatchString(g) {
-				return fmt.Errorf("%s.groups 含非法组名 %q：须匹配 %s（组名要与账号文件的 groups 精确相等才生效，不接受大写与空白）",
-					label, g, apiKeyGroupRe.String())
-			}
-			if gSeen[g] {
-				continue
-			}
-			gSeen[g] = true
-			norm = append(norm, g)
+		if !apiKeyProfiles[p] {
+			return fmt.Errorf("%s.profiles 含非法 profile %q：只能是 cn-cli / cn-work / intl-cli / intl-work，或 \"*\" 表示任意",
+				label, p)
 		}
-		if len(norm) == 0 {
-			norm = nil
+		if seen[p] {
+			continue
 		}
-		e.Groups = norm
+		seen[p] = true
+		norm = append(norm, p)
 	}
+	if len(norm) == 0 {
+		norm = nil
+	}
+	e.Profiles = norm
 	return nil
 }
 
@@ -1277,7 +1353,17 @@ func buildAuthKeys(cfg *Config) []server.AuthKey {
 		out = append(out, server.AuthKey{Key: k, Name: "主密钥"})
 	}
 	for _, e := range cfg.APIKeys {
-		out = append(out, server.AuthKey{Key: e.Key, Name: e.Name, Groups: e.Groups, Models: e.Models, Realm: e.Realm})
+		// Profiles 复制一份：handler 侧把它当**鉴权判据**用，共享底层数组会让
+		// 任何一次改写放宽全局白名单（Groups 的历史写法是共享，不动它以免改变
+		// 既有语义；新增字段从一开始就复制）。
+		var profiles []string
+		if len(e.Profiles) > 0 {
+			profiles = append([]string(nil), e.Profiles...)
+		}
+		out = append(out, server.AuthKey{
+			Key: e.Key, Name: e.Name, Groups: e.Groups, Models: e.Models, Realm: e.Realm,
+			Profiles: profiles,
+		})
 	}
 	return out
 }

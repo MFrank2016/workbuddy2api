@@ -99,6 +99,10 @@
   "mcp": {
     "enabled": false
   },
+  "profiles": {
+    "enabled": false,
+    "detect_only": true
+  },
   "auth": {
     "file_mode": ""
   },

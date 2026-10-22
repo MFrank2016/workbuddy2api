@@ -40,6 +40,9 @@ type AuthKey struct {
 	Models []string
 	// Realm 密钥级域绑定（"cn"/"global"）；空 = 不限。
 	Realm string
+	// Profiles 密钥级 profile 允许集（契约 §1 Selector）：空 = 不限；含 "*" = 任意。
+	// 校验点在选号入口（Todo 22），本结构只承载字段；匹配时必须深拷贝（见 matchAuthKey）。
+	Profiles []string
 }
 
 // Config handler 依赖。
@@ -443,6 +446,13 @@ func matchAuthKey(keys []AuthKey, authz string) *AuthKey {
 				g := make([]string, len(cp.Groups))
 				copy(g, cp.Groups)
 				cp.Groups = g
+			}
+			// Profiles 同理深拷贝：它是**鉴权判据**（allowed set），共享底层数组
+			// 意味着一次请求侧的改写就能放宽全局白名单。
+			if len(cp.Profiles) > 0 {
+				p := make([]string, len(cp.Profiles))
+				copy(p, cp.Profiles)
+				cp.Profiles = p
 			}
 			hit = &cp
 		}
