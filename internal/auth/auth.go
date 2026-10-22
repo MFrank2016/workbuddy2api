@@ -545,6 +545,13 @@ func Parse(raw []byte) (*Auth, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty auth storage")
 	}
+	// 客户端 at-rest 加密信封（WorkBuddy 5.6+）必须在反序列化**之前**识别：
+	// 信封是对象而非字符串，先让它撞进 json.Unmarshal 会得到
+	// 「cannot unmarshal object into ... type string」的 storage_parse_error，
+	// 把用户引向「文件坏了」的错误方向。见 envelope.go（不实现解密）。
+	if err := rejectEncryptedEnvelope(raw); err != nil {
+		return nil, err
+	}
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return nil, fmt.Errorf("storage_parse_error: %w", err)
