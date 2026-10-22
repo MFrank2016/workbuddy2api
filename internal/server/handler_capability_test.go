@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -209,5 +210,92 @@ func TestChatImagePolicyFlagOffBytesIdentical(t *testing.T) {
 	}
 	if n := upstream.CountImages(cap.last()); n != 17 {
 		t.Errorf("关闭态出站图片数=%d want 17（不得改写）", n)
+	}
+}
+
+// mixedImageChatBody 构造「混合 content 形态」的请求体：system 用**字符串** content
+// （OpenAI 客户端最常见的形状），user 用 content 数组携带一张 image_url。
+// 这是 A4(f) 缺陷的最小真实复现：字符串形态曾让单类型解码整包失败，
+// 预检与 11133 image hint 双双静默失效。
+func mixedImageChatBody(model string) string {
+	return `{"model":` + strconv.Quote(model) + `,"messages":[` +
+		`{"role":"system","content":"You are a careful assistant."},` +
+		`{"role":"user","content":[{"type":"text","text":"what is this?"},` +
+		`{"type":"image_url","image_url":{"url":"https://example.test/mixed.png"}}]}]}`
+}
+
+// toolResultImageChatBody 图片只出现在 tool 结果里（user 是纯字符串）：
+// tool 结果的 content 同样是 content 数组，计数与预检口径都不分 role。
+func toolResultImageChatBody(model string) string {
+	return `{"model":` + strconv.Quote(model) + `,"messages":[` +
+		`{"role":"user","content":"read that screenshot"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function",` +
+		`"function":{"name":"read_file","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":[{"type":"text","text":"here"},` +
+		`{"type":"image_url","image_url":"https://example.test/tool.png"}]}]}`
+}
+
+// TestChatCapabilityGuardMixedContentShapes 字符串 / null / 缺失 content 不得掩盖
+// 其他消息里的图片：显式 supportsImages=false + 带图 + 预检开 → 400，且零上游 chat。
+func TestChatCapabilityGuardMixedContentShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"system string + user array", mixedImageChatBody("deepseek-v3-0324")},
+		{"tool-result-only image", toolResultImageChatBody("deepseek-v3-0324")},
+		{"null content before image", `{"model":"deepseek-v3-0324","messages":[` +
+			`{"role":"assistant","content":null},` +
+			`{"role":"system"},` +
+			`{"role":"user","content":[{"type":"image_url","image_url":"https://example.test/x.png"}]}]}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resetModelsCache()
+			defer resetModelsCache()
+			seedModelsCache([]upstream.ModelInfo{
+				{ID: "deepseek-v3-0324", SupportsImagesSet: true, SupportsImages: false},
+			})
+			cap := &chatCapture{}
+			h := NewHandler(Config{
+				Pool:            testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+				Upstream:        captureUpstream(t, cap),
+				CapabilityGuard: true,
+			})
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(c.body)))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("code=%d want 400（混合 content 形态不得让预检 fail-open）body=%s", rec.Code, rec.Body)
+			}
+			if !strings.Contains(rec.Body.String(), "model_capability_mismatch") {
+				t.Errorf("code missing: %s", rec.Body)
+			}
+			if cap.count() != 0 {
+				t.Errorf("预检必须在选号前：chat 请求数=%d want 0", cap.count())
+			}
+		})
+	}
+}
+
+// TestChatCapabilityGuardMixedContentAbsentCapabilityAllows 同一混合 body，但目录
+// 未声明能力（Set=false）→ fail-open 放行（缺失 ≠ 不支持）。
+func TestChatCapabilityGuardMixedContentAbsentCapabilityAllows(t *testing.T) {
+	resetModelsCache()
+	defer resetModelsCache()
+	seedModelsCache([]upstream.ModelInfo{{ID: "deepseek-v3-0324"}}) // Set=false
+	cap := &chatCapture{}
+	h := NewHandler(Config{
+		Pool:            testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:        captureUpstream(t, cap),
+		CapabilityGuard: true,
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(mixedImageChatBody("deepseek-v3-0324"))))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d want 200（能力缺失必须 fail-open）body=%s", rec.Code, rec.Body)
+	}
+	if cap.count() != 1 {
+		t.Errorf("上游 chat 请求数=%d want 1", cap.count())
 	}
 }

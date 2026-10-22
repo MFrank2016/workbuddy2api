@@ -1991,30 +1991,6 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 	})
 }
 
-// hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态
-// messages[].content[] {type:"image_url"}）。畸形/其他形态一律 false（hint 侧
-// 宁缺勿滥：判不出带图就不给「模型不支持图片」指向）。
-func hasImagePart(body []byte) bool {
-	var peek struct {
-		Messages []struct {
-			Content []struct {
-				Type string `json:"type"`
-			} `json:"content"`
-		} `json:"messages"`
-	}
-	if json.Unmarshal(body, &peek) != nil {
-		return false
-	}
-	for _, m := range peek.Messages {
-		for _, p := range m.Content {
-			if p.Type == "image_url" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // hintContext 组装 chatCompletions 的 gateway_hint 判定上下文：请求裸模型名 +
 // 是否带图 + 模型目录 supports_images 声明（目录未收录 → ModelInCatalog=false，
 // 不做「不支持」判定，防查不到误判）。仅错误路径调用（成功请求零开销）。

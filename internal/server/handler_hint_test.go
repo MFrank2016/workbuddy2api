@@ -342,8 +342,17 @@ func TestHasImagePart(t *testing.T) {
 		want bool
 	}{
 		{"多模态 image_url part", `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"t"},{"type":"image_url","image_url":{"url":"data:image/png;base64,x"}}]}]}`, true},
+		{"image_url 字符串形态", `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":"https://e.test/a.png"}]}]}`, true},
 		{"字符串 content", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`, false},
+		{"混合：system 字符串 + user 数组图片", mixedImageChatBody("m"), true},
+		{"tool 结果图片", toolResultImageChatBody("m"), true},
+		{"null content 不掩盖后续图片", `{"model":"m","messages":[{"role":"assistant","content":null},{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}]}`, true},
+		{"content 缺失不掩盖后续图片", `{"model":"m","messages":[{"role":"assistant"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}]}`, true},
+		{"畸形消息项不影响其他消息", `{"model":"m","messages":[null,42,"x",{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}]}`, true},
+		{"非对象的 content part 忽略", `{"model":"m","messages":[{"role":"user","content":["text",1,null,{"type":"image_url"}]}]}`, true},
+		{"content 为空数组", `{"model":"m","messages":[{"role":"user","content":[]}]}`, false},
 		{"畸形 JSON", `not json`, false},
+		{"messages 非数组", `{"model":"m","messages":"hi"}`, false},
 		{"空 body", ``, false},
 		{"无 messages", `{"model":"m"}`, false},
 	}
@@ -387,4 +396,45 @@ func TestCachedModelsSnapshotZeroUpstreamCalls(t *testing.T) {
 		t.Errorf("expired cache must NOT claim supports_images fact: %v", e.Error.GatewayHint)
 	}
 	_ = calls
+}
+
+// TestChat11133HintMixedContentShapes 11133 + 显式 supportsImages=false + **混合
+// content 形态**（system 字符串 + user 数组图片）→ hint 必须点名图片。同一
+// hasImagePart 判定，字符串形态不得让 hint 退化成中性措辞。
+func TestChat11133HintMixedContentShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"system string + user array", mixedImageChatBody("deepseek-v3-0324")},
+		{"tool-result-only image", toolResultImageChatBody("deepseek-v3-0324")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resetModelsCache()
+			defer resetModelsCache()
+			seedModelsCache([]upstream.ModelInfo{
+				{ID: "deepseek-v3-0324", SupportsImagesSet: true, SupportsImages: false},
+			})
+			up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+				return 400, body11133Real, false
+			})
+			h := NewHandler(Config{
+				Pool:     testPoolWith(&auth.Auth{UID: "a1", AccessToken: "at1", ExpiresAt: 9999999999}),
+				Upstream: up,
+			})
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(c.body)))
+			var e hintEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+				t.Fatalf("resp not json: %v body=%s", err, rec.Body)
+			}
+			if e.Error.Message != body11133Real {
+				t.Errorf("message must be verbatim upstream body, got %q", e.Error.Message)
+			}
+			if e.Error.GatewayHint == nil || !strings.Contains(*e.Error.GatewayHint, "does not support images") {
+				t.Errorf("gateway_hint=%v want model-not-supports-images hint", e.Error.GatewayHint)
+			}
+		})
+	}
 }
