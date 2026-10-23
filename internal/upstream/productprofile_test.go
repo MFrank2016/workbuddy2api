@@ -322,6 +322,44 @@ func TestProductProfileInactiveIgnoresStoredProfile(t *testing.T) {
 	}
 }
 
+// TestCheckinCallSetUnchangedWhenProfilesInactive flag 非激活时，签到这条排程
+// 路径的**调用集**（请求数 + 目标 host/path）必须与 golden 一致——不是只看 chat URL。
+func TestCheckinCallSetUnchangedWhenProfilesInactive(t *testing.T) {
+	a := mustProfileAuth(t, profileAuthJSON("cn-work"))
+	var baseline []string
+	for _, tc := range []struct {
+		name       string
+		enabled    bool
+		detectOnly bool
+	}{
+		{"off", false, false},
+		{"enabled_false", false, true},
+		{"detect_only", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, cap := newProfileCaptureClient(func(c *Client) {
+				c.ProfilesEnabled = tc.enabled
+				c.ProfilesDetectOnly = tc.detectOnly
+			})
+			if err := c.DailyCheckin(a); err != nil {
+				t.Fatalf("DailyCheckin: %v", err)
+			}
+			if len(cap.urls) == 0 {
+				t.Fatal("checkin made no upstream call")
+			}
+			got := append([]string(nil), cap.urls...)
+			if baseline == nil {
+				baseline = got
+				return
+			}
+			if strings.Join(got, "\n") != strings.Join(baseline, "\n") {
+				t.Errorf("checkin call set changed under flag combo %s\nwant %v\ngot  %v",
+					tc.name, baseline, got)
+			}
+		})
+	}
+}
+
 // TestProductProfileOverrides 两个独立轴：override 只作用于对应 profile 类与对应 host。
 func TestProductProfileOverrides(t *testing.T) {
 	cnCLI := mustProfileAuth(t, profileAuthJSON("cn-cli"))
