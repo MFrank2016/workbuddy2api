@@ -253,6 +253,10 @@ type Handler struct {
 	// 短冷却：一次签到会对每个账号打 2~3 次上游（refresh / daily-checkin / balance），
 	// 被脚本连点会成倍放大上游压力（含住宅代理出口的 WAF 风险）。进程内状态、重启清零。
 	lastCheckinUnix atomic.Int64
+
+	// searchLimiter 工具端点的进程内固定窗口限流（search.go，每上游 key 600/min）。
+	// 恒非 nil（NewHandler 构造）；仅直接手搓 &Handler{} 时为 nil，此时 allow 直通。
+	searchLimiter *searchLimiter
 }
 
 // NewHandler 构建 handler。
@@ -270,10 +274,11 @@ func NewHandler(cfg Config) *Handler {
 		cfg.PromptMode = "passthrough" // 缺省 passthrough：透传客户端原始 system
 	}
 	h := &Handler{
-		cfg:         cfg,
-		mux:         http.NewServeMux(),
-		taskRunning: map[string]bool{},
-		budget:      newDailyBudget(cfg.BudgetLimit),
+		cfg:           cfg,
+		mux:           http.NewServeMux(),
+		taskRunning:   map[string]bool{},
+		budget:        newDailyBudget(cfg.BudgetLimit),
+		searchLimiter: newSearchLimiter(),
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
@@ -285,6 +290,9 @@ func NewHandler(cfg Config) *Handler {
 	// 不同量级，和 /v1/stats/reset 同类；且控制台要开箱可用，不该要求先开管理面。
 	// 仍需 api_key（withAuth）+ 30s 冷却，防脚本连点放大上游压力。
 	h.mux.HandleFunc("POST /v1/checkin", h.withAuth(h.checkin))
+	// 搜索工具端点（契约 §4）。flag 闸在 gatedSearch 内、withAuth 之外：
+	// search.enabled=false 时回纯文本 404，与「路由未注册」不可区分。
+	h.mux.HandleFunc("POST /v1/search", h.gatedSearch)
 	// 签到历史只读回放（GET /v1/checkin/history）：控制台据此画「今天签到了吗 /
 	// 还有多久自动签」——数据源是落盘的 data/checkin.json，不触发任何上游请求。
 	//
