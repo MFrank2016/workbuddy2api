@@ -27,6 +27,13 @@ func (p *Pool) PickExcludingForRealmGroups(tried map[string]bool, reqModel, real
 	return p.pickScoped(tried, reqModel, realm, groups)
 }
 
+// PickExcludingForRealmGroupsProfiles 在 realm/groups 之上再叠加产品 profile 过滤
+// （契约 §1 / Todo 22）。profile=="" 退化为 PickExcludingForRealmGroups。
+// 仅当 profiles 激活（enabled=true 且 detect_only=false）时调用方才会传非空 profile。
+func (p *Pool) PickExcludingForRealmGroupsProfiles(tried map[string]bool, reqModel, realm string, groups []string, profile string) *auth.Auth {
+	return p.pickScopedProfile(tried, reqModel, realm, groups, profile)
+}
+
 // AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
 // DeptestOnly: 仅 realm_test.go 引用；生产经 wiring.go 走
 // AvailableUIDsForModelRealm。保留作 ForModelRealm 的模型维度退化

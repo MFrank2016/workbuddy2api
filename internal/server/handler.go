@@ -257,6 +257,12 @@ type Handler struct {
 	// searchLimiter 工具端点的进程内固定窗口限流（search.go，每上游 key 600/min）。
 	// 恒非 nil（NewHandler 构造）；仅直接手搓 &Handler{} 时为 nil，此时 allow 直通。
 	searchLimiter *searchLimiter
+
+	// profileModels 产品 profile → 模型目录快照（Todo 22）。profiles 激活时，
+	// 能力预检按 profile 读不同目录（intl-cli 与 intl-work 的 supportsImages 可能
+	// 不同）。懒填充、1h TTL；冷缓存 fail-open（不回落 realm 目录）。
+	profileModelsMu sync.Mutex
+	profileModels   map[string]profileModelEntry
 }
 
 // NewHandler 构建 handler。
@@ -279,6 +285,7 @@ func NewHandler(cfg Config) *Handler {
 		taskRunning:   map[string]bool{},
 		budget:        newDailyBudget(cfg.BudgetLimit),
 		searchLimiter: newSearchLimiter(),
+		profileModels: map[string]profileModelEntry{},
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
@@ -966,19 +973,39 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer st.done()
 
 	// 密钥级模型白名单 + realm 绑定（吸收自 hub）：不匹配本地 400，零上游请求。
-	if ki := authKeyFrom(r.Context()); ki != nil {
-		if ki.Realm != "" && ki.Realm != realm {
+	key := authKeyFrom(r.Context())
+	if key != nil {
+		if key.Realm != "" && key.Realm != realm {
 			st.status = http.StatusBadRequest
 			writeOpenAIError(w, http.StatusBadRequest, "key_realm_mismatch",
-				"this api key is bound to realm "+ki.Realm+", but the requested model routes to "+realm)
+				"this api key is bound to realm "+key.Realm+", but the requested model routes to "+realm)
 			return
 		}
-		if len(ki.Models) > 0 && !matchModelPatterns(ki.Models, bareModel) {
+		if len(key.Models) > 0 && !matchModelPatterns(key.Models, bareModel) {
 			st.status = http.StatusBadRequest
 			writeOpenAIError(w, http.StatusBadRequest, "model_not_allowed",
 				"model "+bareModel+" is not allowed for this api key")
 			return
 		}
+	}
+	// 产品 profile（契约 §1 / Todo 22）：越界/未知 header 在选号前 400；
+	// profiles 未激活时恒为空，选号行为与迁移前逐字一致。
+	profile, perr := h.resolveRequestProfile(r, key)
+	if perr != nil {
+		st.status = http.StatusBadRequest
+		writeOpenAIError(w, http.StatusBadRequest, perr.Code, perr.Msg)
+		return
+	}
+	if profile != "" && auth.ProfileRealm(profile) != realm {
+		st.status = http.StatusBadRequest
+		writeOpenAIError(w, http.StatusBadRequest, "key_realm_mismatch",
+			"profile "+profile+" routes to realm "+auth.ProfileRealm(profile)+
+				", but the requested model routes to "+realm)
+		return
+	}
+	if profile != "" {
+		// 目录冷时异步补一次，供后续请求的能力预检使用；本次不阻塞。
+		go h.warmProfileModels(profile)
 	}
 
 	// 图片策略与能力预检（Todo 12）：**读 body 之后、选号之前**。
@@ -1009,7 +1036,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Set=true + false）时拒绝。能力缺失（Set=false）一律 fail-open——上游目录
 	// 大多数条目不下发 supportsImages，按「缺失 = 不支持」拦会把正常请求全挡掉。
 	if live.CapabilityGuard && hasImagePart(body) {
-		if cap := h.lookupModelCapability(realm, bareModel); cap.InCatalog && cap.SupportsImagesSet && !cap.SupportsImages {
+		if cap := h.lookupModelCapability(realm, bareModel, profile); cap.InCatalog && cap.SupportsImagesSet && !cap.SupportsImages {
 			st.status = http.StatusBadRequest
 			writeOpenAIErrorHint(w, http.StatusBadRequest, "model_capability_mismatch",
 				"model "+bareModel+" does not support images",
@@ -1261,8 +1288,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ★ 选号链路的每一处都必须带上它 ★（普通轮换、全冷却兜底、粘性命中），
 	// 漏掉任何一处就是一个隔离缺口，而且缺口只在特定时序下才暴露。
 	var keyGroups []string
-	if ki := authKeyFrom(r.Context()); ki != nil {
-		keyGroups = ki.Groups
+	if key != nil {
+		keyGroups = key.Groups
 	}
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
@@ -1270,8 +1297,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		var acct *auth.Auth
 		if stickyUID != "" {
 			// 粘性命中同样受分组约束：绑定号若属于其他密钥的分组，返回 nil → 解绑重分配。
-			acct = h.cfg.Pool.PickByUIDForModelGroups(stickyUID, bareModel, keyGroups)
-			if acct == nil || (realm != "" && acct.Realm() != realm) {
+			acct = h.cfg.Pool.PickByUIDForModelGroupsProfiles(stickyUID, bareModel, keyGroups, profile)
+			if acct == nil || (profile == "" && realm != "" && acct.Realm() != realm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）、realm 不符，
 				// 或不在本次密钥的可见分组内 → 解绑。
 				unbindSticky()
@@ -1280,7 +1307,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil {
 			// 模型感知 + realm 感知 + 分组感知选号：模型非空时启用 6004 模型级冷却
 			// 豁免（healthyForModel），realm 谓词过滤跨域账号，groups 谓词过滤跨组账号。
-			acct = h.cfg.Pool.PickExcludingForRealmGroups(tried, bareModel, realm, keyGroups)
+			acct = h.cfg.Pool.PickExcludingForRealmGroupsProfiles(tried, bareModel, realm, keyGroups, profile)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -2013,7 +2040,7 @@ func (h *Handler) hintContext(realm, bareModel string, hasImage bool) upstream.H
 	if bareModel == "" {
 		return ctx
 	}
-	if cap := h.lookupModelCapability(realm, bareModel); cap.InCatalog {
+	if cap := h.lookupModelCapability(realm, bareModel, ""); cap.InCatalog {
 		ctx.ModelInCatalog = true
 		ctx.ModelSupportsImages = cap.SupportsImages
 		ctx.ModelSupportsImagesSet = cap.SupportsImagesSet

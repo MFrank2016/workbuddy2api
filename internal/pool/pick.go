@@ -49,6 +49,15 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 // 两个谓词**正交**且 AND 组合：realm 是账号固有的技术域（决定去哪个上游域调），
 // groups 是运维自定义的业务标签（决定哪把密钥能用它）。互不替代、也不互相推导。
 func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups []string) *auth.Auth {
+	return p.pickScopedProfile(tried, reqModel, realm, groups, "")
+}
+
+// pickScopedProfile 在 realm/groups 之上再叠加**产品 profile** 过滤（契约 §1 / Todo 22）。
+//
+// profile=="" 表示该维度不过滤（profiles 未启用、或密钥不限 profile）；
+// 非空时只保留 a.Profile == profile 的账号。profile 与 realm/groups 仍是 AND：
+// profile 决定出站端点，realm 决定账号池，groups 是运维标签，三者互不替代。
+func (p *Pool) pickScopedProfile(tried map[string]bool, reqModel, realm string, groups []string, profile string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -63,11 +72,23 @@ func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups 
 		e.pruneExpiredModelCooldowns(now)
 		e.pruneExpiredModelCosts(now)
 	}
-	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
+	// realm 判定：profile 非空时以 profile 推导的 realm 为准（契约 §1：profile
+	// 决定出站端点；intl-cli 的 Domain 是 codebuddy.ai，不一定能被 isGlobalDomain
+	// 识别，不能拿 e.a.Realm() 去否定 profile）。profile 为空时保持原口径。
+	realmOK := func(e *entry) bool {
+		if realm == "" {
+			return true
+		}
+		if profile != "" {
+			return auth.ProfileRealm(profile) == realm
+		}
+		return e.a.Realm() == realm
+	}
 	groupsOK := func(e *entry) bool { return e.a.MatchesGroups(groups) }
-	healthyOf := func(e *entry) bool { return realmOK(e) && groupsOK(e) && e.healthy(now) }
+	profileOK := func(e *entry) bool { return profile == "" || e.a.Profile == profile }
+	healthyOf := func(e *entry) bool { return realmOK(e) && groupsOK(e) && profileOK(e) && e.healthy(now) }
 	if reqModel != "" {
-		healthyOf = func(e *entry) bool { return realmOK(e) && groupsOK(e) && e.healthyForModel(now, reqModel) }
+		healthyOf = func(e *entry) bool { return realmOK(e) && groupsOK(e) && profileOK(e) && e.healthyForModel(now, reqModel) }
 	}
 	var cands []*entry
 	for uid, e := range p.byUID {
@@ -91,7 +112,7 @@ func (p *Pool) pickScoped(tried map[string]bool, reqModel, realm string, groups 
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLockedScoped(tried, now, realm, groups, reqModel)
+		return p.pickEarliestExpiryLockedScopedProfile(tried, now, realm, groups, reqModel, profile)
 	}
 	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿
 	// 根本进不了短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -274,16 +295,32 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 // 其他组"借号"顶上——隔离恰好在本该最可靠的时候失效，且日志上只是一次正常的
 // fallback_earliest_expiry，看不出串组。故此处与 pickScoped 同口径过滤。
 func (p *Pool) pickEarliestExpiryLockedScoped(tried map[string]bool, now time.Time, realm string, groups []string, model string) *auth.Auth {
+	return p.pickEarliestExpiryLockedScopedProfile(tried, now, realm, groups, model, "")
+}
+
+// pickEarliestExpiryLockedScopedProfile 在兜底路径上同样叠加 profile 过滤。
+// 与 groups 同理：正常路径滤了 profile，兜底不滤就会在「本 profile 账号全部冷却」
+// 时从别的 profile 借号，出站端点随即错位。
+func (p *Pool) pickEarliestExpiryLockedScopedProfile(tried map[string]bool, now time.Time, realm string, groups []string, model string, profile string) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
 		}
-		if realm != "" && e.a.Realm() != realm {
-			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底
+		if realm != "" {
+			if profile != "" {
+				if auth.ProfileRealm(profile) != realm {
+					continue // profile 与 realm 不一致：兜底也不跨域
+				}
+			} else if e.a.Realm() != realm {
+				continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底
+			}
 		}
 		if !e.a.MatchesGroups(groups) {
 			continue // 分组过滤：其他密钥分组的冷却账号不参与本组兜底（见函数注释）
+		}
+		if profile != "" && e.a.Profile != profile {
+			continue // profile 过滤：兜底同样不能跨 profile 借号（出站端点会错）
 		}
 		if e.disabled || e.manualDisabled || e.paused {
 			continue // 禁用/手动停用/暂停的账号永不参与兜底

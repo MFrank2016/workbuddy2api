@@ -20,16 +20,28 @@ type modelCapability struct {
 	SupportsImagesSet bool // 上游是否显式下发该字段（tri-state：false = 未知）
 }
 
-// lookupModelCapability 按 realm 读模型目录的 supports_images 声明。
+// lookupModelCapability 按 realm（以及可选的 profile）读模型目录的
+// supports_images 声明。
 //
 // realm-aware：CN 读包级动态目录缓存（/v1/models 的 CN 探测结果），global 读
 // Client 的 global 探测快照。两者都**只读已有缓存、不触发上游探测**——预检在
 // 请求热路径上，为一个 400 去拉目录会把错误请求放大成上游请求（与 WAF IP
 // fail-fast 的「不放大请求量」同纪律）。缓存冷 → InCatalog=false → 预检放行。
 //
-// profile-aware 目录分支（Todo 22）**不在此处**：本阶段只有 CN/global 两域。
-func (h *Handler) lookupModelCapability(realm, bareModel string) modelCapability {
+// profile-aware（Todo 22）：profiles 激活且请求带 profile 时，读该 profile 的
+// 目录缓存（不同 profile 的模型清单/能力可能不同，例如 intl-cli 与 intl-work）。
+// 缓存冷同样 fail-open，**不回落 realm 目录**——回落到别的 profile 会拿错能力
+// 事实去拒绝一个本来可用的请求。缓存由 warmProfileModels 异步填充。
+func (h *Handler) lookupModelCapability(realm, bareModel, profile string) modelCapability {
 	if bareModel == "" {
+		return modelCapability{}
+	}
+	if profile != "" && h.profilesActive() {
+		for _, mi := range h.profileModelInfos(profile) {
+			if mi.ID == bareModel {
+				return capabilityOf(mi)
+			}
+		}
 		return modelCapability{}
 	}
 	if realm == "global" {

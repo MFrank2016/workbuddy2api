@@ -482,6 +482,14 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 // 同一个会话复用不同密钥（或账号被改过组）时会命中一个"本密钥不该看见"的号——
 // 不校验的话隔离会被粘性路径整条绕过，且表现为偶发而非必现，极难定位。
 func (p *Pool) PickByUIDForModelGroups(uid, model string, groups []string) *auth.Auth {
+	return p.PickByUIDForModelGroupsProfiles(uid, model, groups, "")
+}
+
+// PickByUIDForModelGroupsProfiles 是粘性命中路径的 profile-aware 版本
+// （契约 §1 / Todo 22）。profile=="" 退化为 PickByUIDForModelGroups。
+// 粘性绑定号若属于别的 profile，返回 nil → 调用方解绑并重新选号；
+// 不在这里静默忽略 profile，否则粘性会话会绕过 profile 约束。
+func (p *Pool) PickByUIDForModelGroupsProfiles(uid, model string, groups []string, profile string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
@@ -489,6 +497,9 @@ func (p *Pool) PickByUIDForModelGroups(uid, model string, groups []string) *auth
 		return nil
 	}
 	if !e.a.MatchesGroups(groups) {
+		return nil
+	}
+	if profile != "" && e.a.Profile != profile {
 		return nil
 	}
 	now := time.Now()
