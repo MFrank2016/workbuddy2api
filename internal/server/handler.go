@@ -300,6 +300,8 @@ func NewHandler(cfg Config) *Handler {
 	// 搜索工具端点（契约 §4）。flag 闸在 gatedSearch 内、withAuth 之外：
 	// search.enabled=false 时回纯文本 404，与「路由未注册」不可区分。
 	h.mux.HandleFunc("POST /v1/search", h.gatedSearch)
+	// MCP 工具端点（契约 §4 / Todo 27）：同样是 flag 闸在外、鉴权在内。
+	h.mux.HandleFunc("POST /v1/mcp", h.gatedMCP)
 	// 签到历史只读回放（GET /v1/checkin/history）：控制台据此画「今天签到了吗 /
 	// 还有多久自动签」——数据源是落盘的 data/checkin.json，不触发任何上游请求。
 	//

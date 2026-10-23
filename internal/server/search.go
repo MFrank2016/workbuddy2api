@@ -148,10 +148,53 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	results, accountLabel, lastErr := h.searchWithAccount(pick, keyName, query, maxResults)
+	if results != nil {
+		out := searchResponseBody{Object: "search_result", Results: make([]searchResultItem, 0, len(results))}
+		for _, r := range results {
+			out.Results = append(out.Results, searchResultItem{Title: r.Title, URL: r.URL, Snippet: r.Snippet})
+		}
+		writeJSON(obs, http.StatusOK, out)
+		return
+	}
+
+	var uerr *upstream.Error
+	if errors.As(lastErr, &uerr) {
+		if uerr.Kind == upstream.ErrSoftRate {
+			obs.Header().Set("Retry-After", "60")
+			writeOpenAIError(obs, http.StatusTooManyRequests, "rate_limit_exceeded",
+				"rate limited by upstream: "+uerr.Msg)
+			return
+		}
+		writeOpenAIError(obs, http.StatusBadGateway, "upstream_error", uerr.Msg)
+		return
+	}
+	if lastErr != nil {
+		writeOpenAIError(obs, http.StatusBadGateway, "upstream_error", lastErr.Error())
+		return
+	}
+	writeOpenAIError(obs, http.StatusServiceUnavailable, "no_healthy_account",
+		"all accounts are temporarily unavailable, please retry later")
+}
+
+// searchWithAccount 选号并执行一次搜索（失败换号轮转）。
+//
+// 成功返回 results + 账号标签；全部失败返回 (nil, "", lastErr)。lastErr 为 nil
+// 表示一个可用账号都没有（调用方回 503）。search 与 MCP tools/call 共用这一份
+// 选号/刷新/冷却逻辑（契约 §4：MCP 的 tools/call 必须复用同一判据）。
+//
+// profile 只在 profiles 激活（enabled=true 且 detect_only=false）时参与选号；
+// 否则恒传空，保持 flag-off 的等价行为（契约 §1）。
+func (h *Handler) searchWithAccount(pick searchPick, keyName, query string, maxResults int) ([]upstream.SearchResult, string, error) {
+	selProfile := pick.Profile
+	if !h.profilesActive() {
+		selProfile = ""
+	}
+
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.cfg.Pool.PickExcludingForRealmGroups(tried, "", pick.Realm, pick.Groups)
+		acct := h.cfg.Pool.PickExcludingForRealmGroupsProfiles(tried, "", pick.Realm, pick.Groups, selProfile)
 		if acct == nil {
 			break
 		}
@@ -183,32 +226,9 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
-		accountLabel = logfmt.Label(acct.UID, acct.Nickname)
-		out := searchResponseBody{Object: "search_result", Results: make([]searchResultItem, 0, len(results))}
-		for _, r := range results {
-			out.Results = append(out.Results, searchResultItem{Title: r.Title, URL: r.URL, Snippet: r.Snippet})
-		}
-		writeJSON(obs, http.StatusOK, out)
-		return
+		return results, logfmt.Label(acct.UID, acct.Nickname), nil
 	}
-
-	var uerr *upstream.Error
-	if errors.As(lastErr, &uerr) {
-		if uerr.Kind == upstream.ErrSoftRate {
-			obs.Header().Set("Retry-After", "60")
-			writeOpenAIError(obs, http.StatusTooManyRequests, "rate_limit_exceeded",
-				"rate limited by upstream: "+uerr.Msg)
-			return
-		}
-		writeOpenAIError(obs, http.StatusBadGateway, "upstream_error", uerr.Msg)
-		return
-	}
-	if lastErr != nil {
-		writeOpenAIError(obs, http.StatusBadGateway, "upstream_error", lastErr.Error())
-		return
-	}
-	writeOpenAIError(obs, http.StatusServiceUnavailable, "no_healthy_account",
-		"all accounts are temporarily unavailable, please retry later")
+	return nil, "", lastErr
 }
 
 // recordSearchUsage 把一次上游搜索尝试记入用量时序（无 token，只有请求数与延迟）。
