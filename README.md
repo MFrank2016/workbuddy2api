@@ -160,6 +160,34 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 - 共享同一账号池，由账号 `realm` 或请求模型名前缀（`cn:` / `global:`）决定路由；`global.enabled` 可一键锁死纯 CN 部署
 - 国际版支持注册激活、地区完善、一次性 trial 加油包领取（`./trial.sh`）
 
+### 产品 profile、图片策略与工具端点（2026-10 迁移）
+
+- **产品 profile**：账号可显式声明 `profile`（`cn-cli` / `cn-work` / `intl-cli` / `intl-work`），
+  或由 `profile_derived`（需 `profile_backfill_v1=true`）/ realm / domain 推导。只有
+  `profiles.enabled=true` 且 `profiles.detect_only=false` 时才按 profile 路由；其余组合
+  逐字走迁移前的 `chatBase` / `globalOn` 路径。`global.enabled=false` 时 `intl-*` 强制回落
+  `cn-*`（逃生门不得被 profile 绕过）。
+- **图片策略**：`upstream.max_images`（0 = 不限）+ `upstream.image_policy`
+  （`passthrough` / `truncate` / `error`）+ `upstream.capability_guard`（模型目录显式声明
+  不支持图片时提前 400）。默认全关。
+- **搜索 / MCP**：`POST /v1/search`（query + max_results 1–10）与 `POST /v1/mcp`
+  （JSON-RPC 2.0：`initialize` / `tools/list` / `tools/call`，工具 `web_search`）。
+  默认关闭；每上游 key 600/min；带 `Origin` 头一律 403；无会话状态。
+- **鉴权头**：`X-WB2A-Realm` / `X-WB2A-Profile` 只用于 search/MCP；chat 仍按密钥
+  realm + 模型前缀校验。
+
+core 侧相关 flag（默认值，改 `config.json` 后重启）：
+
+| flag | 默认 | 说明 |
+|---|---|---|
+| `upstream.max_images` | `0` | 单请求图片上限，0 = 不限 |
+| `upstream.image_policy` | `passthrough` | `passthrough` / `truncate` / `error` |
+| `upstream.capability_guard` | `false` | 图片能力预检 |
+| `profiles.enabled` | `false` | 产品 profile 路由总开关 |
+| `profiles.detect_only` | `true` | 只写字段，不改变 URL / 选号 |
+| `search.enabled` | `false` | `/v1/search` 是否存在 |
+| `mcp.enabled` | `false` | `/v1/mcp` 是否存在 |
+
 ### 辅助工具
 
 - 积分日报：`./credit.sh`（美化 / `-json`，realm 感知双域）
