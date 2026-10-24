@@ -791,8 +791,8 @@ func (s *Scheduler) runActivity(ctx context.Context, trigger string) {
 			t.skipped++
 			continue
 		}
-		if a.IsEnterprise() {
-			t.skipped++ // 企业版无个人成长体系，不发起活跃上报
+		if a.IsEnterpriseSession() {
+			t.skipped++ // 企业版 / 企业切换会话：无个人成长体系，不发起活跃上报
 			continue
 		}
 		// global 账号同样上报（PR #45 实测国际版 /v2/report 在 workbuddy.ai 上 code=0 OK，

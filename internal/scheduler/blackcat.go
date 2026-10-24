@@ -60,8 +60,8 @@ func (s *Scheduler) blackcatAccountPass() (ok, fail, skip int) {
 			skip++ // D4 门控：global 无 CN 任务体系，不发起任何上游调用
 			continue
 		}
-		if a.IsEnterprise() {
-			skip++ // 企业版门控：无成长体系（growth 403 / claim-gift 400「企业账号不支持该操作」）
+		if a.IsEnterpriseSession() {
+			skip++ // 企业版 / 企业切换会话：无成长体系
 			continue
 		}
 		need, err := s.cfg.Upstream.BlackcatNeed(a)
