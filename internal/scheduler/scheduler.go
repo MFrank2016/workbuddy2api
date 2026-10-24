@@ -963,9 +963,10 @@ func (s *Scheduler) claimGrowthBonus(a *auth.Auth) {
 	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil && credit > 0 {
 		log.Printf("activity %s: gift ok (+%d credit)", logfmt.Label(a.UID, a.Nickname), credit)
 	}
-	if credit, err := s.cfg.Upstream.ClaimCompensation(a); err == nil && credit > 0 {
-		log.Printf("activity %s: compensation ok (+%d credit)", logfmt.Label(a.UID, a.Nickname), credit)
-	}
+	// 补偿先查状态 → 待领才领（issue #189）：旧写法把「没有补偿」「已领过」与
+	// 「领取失败」压成同一形态，带截止日的补偿会静默过期。无待领不记日志，
+	// 状态查询失败与领取失败显式告警。
+	s.claimCompensationQuiet(a)
 }
 
 // makeupYesterday 昨日漏签且有补签卡时自动补签（保住连登连续天数，panel 口径）。

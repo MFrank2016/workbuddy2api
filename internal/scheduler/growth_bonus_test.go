@@ -91,6 +91,8 @@ func (s *bonusChainStub) handler() http.Handler {
 		case "/billing/meter/claim-gift":
 			s.giftCalls.Add(1)
 			fmt.Fprintf(w, `{"code":0,"data":{"credit":%d}}`, s.giftCredit)
+		case "/billing/meter/compensation-status":
+			fmt.Fprintf(w, `{"code":0,"data":{"active":true,"claimed":false,"credit_num":%d,"end_time":"2026-12-31 23:59:59"}}`, s.compCredit)
 		case "/billing/meter/claim-compensation":
 			s.compCalls.Add(1)
 			fmt.Fprintf(w, `{"code":0,"data":{"credit":%d}}`, s.compCredit)
