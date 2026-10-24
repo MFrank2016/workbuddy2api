@@ -41,6 +41,7 @@ const (
 	ErrWafBlock                        // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
 	ErrPromptTooLong                   // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                    // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrUpstreamBusy                    // 6021「queue.full.title」渠道级容量满载 → 不罚号、不轮转，末端 503 + upstream_busy
 	ErrModelEntitlement                // 11158「model not allowed for user type」（免费号不可用）→ 模型级权限，不罚号、仍轮换
 	ErrClient                          // 其他 4xx / 业务错误
 	ErrToolCallMismatch                // 11148 工具调用/结果历史错配 → 请求级错误：不罚号、不轮转
@@ -76,6 +77,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrImageInvalid:
 		return "image_invalid"
+	case ErrUpstreamBusy:
+		return "upstream_busy"
 	case ErrModelEntitlement:
 		return "model_entitlement"
 	case ErrToolCallMismatch:
@@ -235,6 +238,13 @@ var inactiveCheckinPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`活动.*(?:未开启|未开始|未开放|已结束|已关闭|已暂停)`),
 	regexp.MustCompile(`(?:签到|活动).*已过期`),
 	regexp.MustCompile(`当前无.*活动`),
+}
+
+// isQueueFullBody 判定渠道级容量满载文案（6021 queue.full.title 家族）。
+// 该形态表明上游推理集群排队队列打满，与具体账号无关；换号在任何时刻都会撞
+// 同一堵墙，正确处置是不罚号不轮转（见 Classify 的 6021 分支）。
+func isQueueFullBody(lower string) bool {
+	return strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full")
 }
 
 // accountFaultRule 账号级授权/配额故障关键词（大小写不敏感子串匹配）。
@@ -641,6 +651,11 @@ func Classify(status int, body string) ErrKind {
 	// 判定；无该 code 的 "credits exhausted" 文案仍保持普通 429 的软限流语义。
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
+	}
+	// 6021「queue.full.title」是渠道级容量满载，必须先于通用 429 兜底：
+	// 按限流逐号软冷却会在数秒内把整池健康号误杀，且换号也撞同一堵墙。
+	if (status == http.StatusTooManyRequests && hasBusinessCode(body, "6021")) || isQueueFullBody(lower) {
+		return ErrUpstreamBusy
 	}
 	// status==429 先于 hardRule（fork-scan-absorb T-3）：限流响应 body
 	// 高频携带 "quota exceeded"/"额度不足" 等跨两界措辞，hardRule 先判会误归
