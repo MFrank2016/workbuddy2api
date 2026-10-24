@@ -21,6 +21,7 @@ import (
 
 	"workbuddy2api/internal/alert"
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/credithist"
 	"workbuddy2api/internal/livecfg"
 	"workbuddy2api/internal/panel"
 	"workbuddy2api/internal/pool"
@@ -476,6 +477,14 @@ func main() {
 	// 表现为面板保存后某字段看起来没生效，而两边都不报错。
 	live := livecfg.New(liveSnapshot(cfg))
 
+	// 积分历史：把每次真实查到的余额与上一次比对，变动即留痕（新账号首次只建
+	// 基线）。挂载在余额查询路径上（upstream 的余额观察者），签到 / 活跃上报 /
+	// 旅行 / 保活 / 面板手动刷新全覆盖——上游只在少数渠道落金额日志，比对余额
+	// 是唯一可靠的口径。与 state/usage/request-logs 同目录，随 state_file 搬移。
+	creditHist := credithist.New(stateSibling(cfg.StateFile, "credit-history.json"), 2000)
+	up.SetCreditObserver(creditHist.Observe)
+	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Upstream:    up,
@@ -497,6 +506,8 @@ func main() {
 			return saveConfig(raw, *cfgPath, live, p, up, sch, write)
 		},
 		RestartRequiredPaths: restartRequiredPaths,
+		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
+		CreditHistory: creditHist,
 	})
 	// 成长任务队列（面板任务中心同管线）：独立排程（schedule.growth_hours，默认
 	// 01:00），到点由 scheduler.dispatch 调用；回调内部异步启动，不等执行完。
