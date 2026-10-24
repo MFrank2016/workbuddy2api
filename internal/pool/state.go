@@ -827,6 +827,11 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 	// 用 Contains 而非 == 常量：state.json 是持久化的，历史上/手工写入的 reason
 	// 文案可能有前后缀（"12153 session dead"/"上游 12153"），精确匹配会漏判。
 	st.NeedsRelogin = st.Disabled && (st.SessionDeadFails > 0 || strings.Contains(e.reason, "12153"))
+	// reason 仅在冷却/禁用中透出（issue #171）：软冷却到期后 until/coolKind/reason
+	// 字段按设计不主动清理，无条件透出会让面板把历史 429 与「可用」并排展示。
+	if st.Cooling || st.Disabled {
+		st.Reason = e.reason
+	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
 		st.DisabledReason = e.reason
