@@ -91,6 +91,10 @@ type Schedule struct {
 	// 每 N 分钟并发刷新全池余额与到期快照，供面板展示与积分保底判定；缺省 true / 5。
 	BalanceRefreshEnabled bool `json:"balance_refresh_enabled"`
 	BalanceRefreshMinutes int  `json:"balance_refresh_minutes"`
+	// TaskSweepEnabled / TaskSweepMinutes 任务补领清扫：每 N 分钟把「已达标未领」的
+	// 成长任务奖励领掉（accept/claim 幂等读改，不跑行为链路）；缺省 true / 15。
+	TaskSweepEnabled bool `json:"task_sweep_enabled"`
+	TaskSweepMinutes int  `json:"task_sweep_minutes"`
 	// IncludeDisabledInTasks 让保号类任务（签到/活跃/保活/余额刷新）对已禁用账号也执行
 	// （panel 语义：禁用只关选号，不停保号）。缺省 false 保持现状。
 	IncludeDisabledInTasks bool `json:"include_disabled_in_tasks"`
@@ -127,6 +131,8 @@ func DefaultSchedule() Schedule {
 		RetryMaxPerDay:        1, // 只写了 retry_delay_minutes 时的保守默认：每天补跑一次
 		BalanceRefreshEnabled: true,
 		BalanceRefreshMinutes: 5,
+		TaskSweepEnabled:      true,
+		TaskSweepMinutes:      15,
 	}
 }
 
@@ -205,6 +211,9 @@ func (s *Schedule) Normalize() error {
 	}
 	if s.BalanceRefreshMinutes <= 0 {
 		s.BalanceRefreshMinutes = 5
+	}
+	if s.TaskSweepEnabled && s.TaskSweepMinutes <= 0 {
+		s.TaskSweepMinutes = 15
 	}
 	return s.validateHours()
 }

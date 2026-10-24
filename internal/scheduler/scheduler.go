@@ -102,6 +102,12 @@ type Config struct {
 	// server（成环），映射成 HTTP 口径由 cmd/server 的 buildCheckinReport 负责。
 	// started/finished 为本次签到起止时刻。nil = 不落盘（老调用方/测试零改动）。
 	OnCheckinDone func(outcomes []CheckinOutcome, started, finished time.Time)
+
+	// GrowthHook 成长任务队列执行回调（panel.RunGrowthQueueOnce）。
+	GrowthHook func()
+
+	// TaskSweepHook 任务补领清扫回调（panel.RunTaskSweepOnce）。
+	TaskSweepHook func()
 }
 
 // Scheduler 调度器。
@@ -137,6 +143,10 @@ type Scheduler struct {
 	// 面板在线改配置（Reconfigure/SetExpiringSoonWindow）与 Run 重算并发访问。
 	schedMu    sync.Mutex
 	growthHook func()
+	// rearmSweep 「清扫间隔已变」通知：StartTaskSweep 循环消费。
+	rearmSweep chan struct{}
+	// sweepInterval 任务补领清扫间隔（纳秒；0 = 暂停）。
+	sweepInterval atomic.Int64
 }
 
 // Ledger 返回任务执行台账（只读视图），供 server 的 /status 与 /metrics 渲染。
@@ -178,6 +188,7 @@ func New(cfg Config) *Scheduler {
 		rearmBalance:  make(chan struct{}, 1),
 		rewardClaimed: make(map[string]string),
 		ledger:        taskledger.New(cfg.LedgerFile),
+		rearmSweep:    make(chan struct{}, 1),
 	}
 }
 
@@ -1229,6 +1240,74 @@ func (s *Scheduler) SetExpiringSoonWindow(d time.Duration) {
 	if changed && poolRef != nil {
 		poolRef.ClearExpiringSnapshots()
 	}
+}
+
+// StartTaskSweep 后台周期性任务补领清扫（独立 ticker goroutine，ctx 取消即停）。
+// interval<=0 不启动；运行期可用 SetTaskSweepInterval 热改间隔（下一轮生效）。
+func (s *Scheduler) StartTaskSweep(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	s.sweepInterval.Store(int64(interval))
+	go func() {
+		var logged time.Duration
+		for {
+			cur := time.Duration(s.sweepInterval.Load())
+			if cur != logged {
+				log.Printf("scheduler: 任务补领清扫每 %s（暂停中显示 0s）", cur)
+				logged = cur
+			}
+			if cur <= 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.rearmSweep:
+					continue
+				}
+			}
+			timer := time.NewTimer(cur)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-s.rearmSweep:
+				timer.Stop()
+			case <-timer.C:
+				s.schedMu.Lock()
+				hook := s.cfg.TaskSweepHook
+				s.schedMu.Unlock()
+				if hook != nil {
+					hook()
+				}
+			}
+		}
+	}()
+}
+
+// RunTaskSweepNow 立刻跑一轮任务补领清扫（手动触发/测试用）。
+func (s *Scheduler) RunTaskSweepNow() {
+	s.schedMu.Lock()
+	hook := s.cfg.TaskSweepHook
+	s.schedMu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+// SetTaskSweepHook 挂载/替换任务补领清扫回调（panel 构造晚于 scheduler，事后接线）。
+func (s *Scheduler) SetTaskSweepHook(fn func()) {
+	s.schedMu.Lock()
+	s.cfg.TaskSweepHook = fn
+	s.schedMu.Unlock()
+}
+
+// SetTaskSweepInterval 热改任务补领清扫间隔；<=0 表示暂停循环。
+func (s *Scheduler) SetTaskSweepInterval(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	s.sweepInterval.Store(int64(d))
+	poke(s.rearmSweep)
 }
 
 // SetBalanceInterval 热改余额后台刷新间隔（<=0 = 暂停）。

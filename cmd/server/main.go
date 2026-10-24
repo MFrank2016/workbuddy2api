@@ -423,6 +423,13 @@ func main() {
 	} else {
 		log.Printf("当日失败重试已关闭（schedule.retry_delay_minutes=%d retry_max_per_day=%d；全灭只记 WARN 与台账，不自动补跑）",
 			cfg.Schedule.RetryDelayMinutes, cfg.Schedule.RetryMaxPerDay)
+
+		switch {
+		case !cfg.Schedule.TaskSweepEnabled:
+			log.Printf("任务补领清扫已禁用（schedule.task_sweep_enabled=false）")
+		case cfg.TaskSweepInterval > 0:
+			log.Printf("任务补领清扫：每 %s（补领已达标未领的成长任务奖励）", cfg.TaskSweepInterval)
+		}
 	}
 
 	// 管理操作审计（config admin.audit_enabled，默认关闭）：把 /admin 下每个动作
@@ -496,6 +503,7 @@ func main() {
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 	// 面板日志镜像（吸收自 panel）：log 输出（stderr）与聊天表格日志（stdout）
 	// 同时写进环形缓冲，/panel/ 日志页可见；环形缓冲有界，不额外占盘。
+	sch.SetTaskSweepHook(func() { pn.RunTaskSweepOnce() })
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
@@ -560,6 +568,7 @@ func main() {
 	defer stop()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, balanceIntervalFor(cfg)) // 余额后台刷新（schedule.balance_refresh_*）
+	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)
 
 	// 可用性阈值告警（config alerting.enabled，默认关闭）：独立 ticker 评估只读健康
 	// 快照，越界时 POST 到运维自备的 webhook。与请求路径完全隔离，且从不调用上游。
@@ -818,6 +827,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetAccountFaultPolicy(newCfg.AccountFaultHoldDur, newCfg.Pool.AccountFaultDisableAfter)
 	p.SetCrossDomainFallback(newCfg.Pool.CrossDomainFallback) // 裸名跨域回退热生效（issue #135）
 	_ = p.SetScheduling(newCfg.Pool.Strategy, newCfg.Pool.AccountOrder)
+	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	sch.Reconfigure(

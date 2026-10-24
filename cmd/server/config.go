@@ -413,6 +413,7 @@ type Config struct {
 	DegradeCooldownMaxD time.Duration `json:"-"`
 	SessionTTL          time.Duration `json:"-"`
 	SessionGCInterval   time.Duration `json:"-"`
+	TaskSweepInterval   time.Duration `json:"-"` // 0 = 不启动（task_sweep_enabled=false）
 	ExpiringSoonDur     time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100，吸收自 panel）；
 	// 0 = 不限制。
@@ -1071,6 +1072,9 @@ func (c *Config) normalize() error {
 	// 由 internal/config 统一实现，cmd/server 与 cmd/activity 共用同一份语义。
 	if err := c.Schedule.Normalize(); err != nil {
 		return err
+	}
+	if c.Schedule.TaskSweepEnabled {
+		c.TaskSweepInterval = time.Duration(c.Schedule.TaskSweepMinutes) * time.Minute
 	}
 	// 分组密钥表归一并 fail-fast（空密钥 / 非法组名 / 密钥重复）。放在最后：它要用
 	// 主 api_key 的**最终值**（env 覆盖之后）做去重比对。
