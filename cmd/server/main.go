@@ -690,6 +690,7 @@ func liveSnapshot(c *Config) livecfg.Snapshot {
 		CapabilityGuard:      c.Upstream.CapabilityGuard,
 		SearchEnabled:        c.Search.Enabled,
 		MCPEnabled:           c.MCP.Enabled,
+		HiddenModels:         livecfg.NormalizeHiddenModels(c.Models.Hidden),
 	}
 }
 
