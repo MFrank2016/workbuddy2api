@@ -49,3 +49,31 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 	return p.availableUIDsLocked(realm,
 		func(e *entry, now time.Time) bool { return e.healthyForModel(now, model) })
 }
+
+// ServableForModelRealm 返回 realm 内此刻**真正能服务该模型**的账号数。
+//
+// 与 pick 的候选口径一致（healthyForModel 的 6004/11102 模型级冷却豁免、在途租约、
+// 积分保底都计入），但**不含 pick 的全冷却兜底**——跨域回退（issue #135）要的正是
+// 「这个域此刻有没有健康号」，兜底把冷却号捞回来的乐观语义会掩盖这一点。
+func (p *Pool) ServableForModelRealm(model, realm string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	n := 0
+	for _, e := range p.byUID {
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthyForModel(now, model) {
+			continue
+		}
+		if p.inFlightFull(e) {
+			continue
+		}
+		if p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue
+		}
+		n++
+	}
+	return n
+}

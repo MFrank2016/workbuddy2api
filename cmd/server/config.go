@@ -379,6 +379,8 @@ type Config struct {
 		AccountFaultHold string `json:"account_fault_hold"`
 		// AccountFaultDisableAfter 连续 N 次 11140 后升级永久禁用（默认 3；<=0 = 不升级）。
 		AccountFaultDisableAfter int `json:"account_fault_disable_after"`
+		// CrossDomainFallback 裸模型名跨域回退开关（issue #135），默认 false（零回归）。
+		CrossDomainFallback bool `json:"cross_domain_fallback"`
 	} `json:"pool"`
 
 	// Panel 管理面板鉴权（吸收自 hub 的独立面板密码）：password_hash 非空时启用

@@ -973,7 +973,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/账本/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
-	realm, bareModel := resolveModel(peek.Model)
+	realm, bareModel, realmExplicit := resolveModelDetail(peek.Model)
+	modelRate := ""
+	if h.cfg.Upstream != nil {
+		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
+	}
 	// 模型别名/后台任务重定向（upstream.model_aliases，默认空 = 不启用）：桌面客户端
 	// 后台任务会硬编码付费模型，可在此改写到免费目标（省积分）。命中记日志；realm
 	// 前缀保持，选号/账本/粘性都用改写后的目标模型。
@@ -981,6 +985,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		log.Printf("alias: model %s -> %s", bareModel, target)
 		bareModel = target
 	}
+	// 跨域回退（issue #135）：只有裸模型名 + 显式开启 pool.cross_domain_fallback 时生效。
+	// 语义 = 「裸名不绑定单一域」：首选域（裸名默认 cn）选不到可用号（账号级冷却/熔断/
+	// 在途占满，或该域账号对这个模型 11102 后进入模型级负缓存）时，改用另一域再选一次；
+	// 显式 cn:/global: 前缀保持原语义，永不回退。
+	crossRealm := !realmExplicit && h.cfg.Pool.CrossDomainFallback()
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream, h.budget)
@@ -1231,6 +1240,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				HasLatency:       delta.HasLatencyMs,
 				TokensPerSecond:  delta.TokensPerSecond,
 				HasTPS:           delta.HasTokensPerSecond,
+				ModelRate:        modelRate,
 			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
 		}
 	}
@@ -1323,16 +1333,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if stickyUID != "" {
 			// 粘性命中同样受分组约束：绑定号若属于其他密钥的分组，返回 nil → 解绑重分配。
 			acct = h.cfg.Pool.PickByUIDForModelGroupsProfiles(stickyUID, bareModel, keyGroups, profile)
-			if acct == nil || (profile == "" && realm != "" && acct.Realm() != realm) {
+			if acct == nil || (realm != "" && acct.Realm() != realm && !crossRealm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）、realm 不符，
 				// 或不在本次密钥的可见分组内 → 解绑。
 				unbindSticky()
 			}
 		}
 		if acct == nil {
-			// 模型感知 + realm 感知 + 分组感知选号：模型非空时启用 6004 模型级冷却
-			// 豁免（healthyForModel），realm 谓词过滤跨域账号，groups 谓词过滤跨组账号。
-			acct = h.cfg.Pool.PickExcludingForRealmGroupsProfiles(tried, bareModel, realm, keyGroups, profile)
+			pickRealm := realm
+			if crossRealm && h.cfg.Pool.ServableForModelRealm(bareModel, realm) == 0 &&
+				h.cfg.Pool.ServableForModelRealm(bareModel, otherRealm(realm)) > 0 {
+				pickRealm = otherRealm(realm)
+			}
+			acct = h.cfg.Pool.PickExcludingForRealmGroupsProfiles(tried, bareModel, pickRealm, keyGroups, profile)
+			if acct == nil && crossRealm {
+				acct = h.cfg.Pool.PickExcludingForRealmGroupsProfiles(tried, bareModel, otherRealm(pickRealm), keyGroups, profile)
+			}
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -1350,6 +1366,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
+		if crossRealm && h.cfg.Upstream != nil && acct.Realm() != realm {
+			// 跨域回退命中：按实际服务域取积分倍率，用量/账本记的是真实域口径，
+			// 而不是请求前缀声明的域。
+			modelRate = h.cfg.Upstream.ModelRate(acct.Realm(), bareModel)
+		}
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。

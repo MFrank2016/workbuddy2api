@@ -202,6 +202,7 @@ func main() {
 	p.SetThrottleDefaults(cfg.Pool.WeightDefault, cfg.Pool.MaxConcurrencyDefault, cfg.Pool.MinIntervalDefault, cfg.Pool.MaxTotalConcurrency)
 	// 11140 账号级风控处置（pool.account_fault_hold / disable_after；默认 24h / 3 次）。
 	p.SetAccountFaultPolicy(cfg.AccountFaultHoldDur, cfg.Pool.AccountFaultDisableAfter)
+	p.SetCrossDomainFallback(cfg.Pool.CrossDomainFallback) // 裸名跨域回退（issue #135，默认关闭）
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -814,6 +815,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetThrottleDefaults(newCfg.Pool.WeightDefault, newCfg.Pool.MaxConcurrencyDefault, newCfg.Pool.MinIntervalDefault, newCfg.Pool.MaxTotalConcurrency)
 	p.SetAccountFaultPolicy(newCfg.AccountFaultHoldDur, newCfg.Pool.AccountFaultDisableAfter)
+	p.SetCrossDomainFallback(newCfg.Pool.CrossDomainFallback) // 裸名跨域回退热生效（issue #135）
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	sch.Reconfigure(
