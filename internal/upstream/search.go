@@ -39,12 +39,26 @@ const (
 // searchType 上游要求的检索类型（参考实现 request_body 固定值）。
 const searchType = "text2text"
 
-// SearchResult 一条搜索结果（上游条目只取三个稳定字段；site 等其余字段忽略）。
+// SearchResult 一条搜索结果（site / favicon 是上游可选字段，有才带）。
 type SearchResult struct {
-	Title   string
-	URL     string
-	Snippet string
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Snippet string `json:"snippet,omitempty"`
+	Site    string `json:"site,omitempty"`
+	Favicon string `json:"favicon,omitempty"`
 }
+
+// SearchOutcome 一次搜索的完整结果，字段名与上游响应一致，便于直接透出。
+type SearchOutcome struct {
+	Query          string         `json:"query"`
+	Results        []SearchResult `json:"results"`
+	TotalResults   int            `json:"total_results"`
+	Provider       string         `json:"provider,omitempty"`
+	ResponseTimeMs int64          `json:"response_time_ms,omitempty"`
+}
+
+// SearchMinQueryLen 官方 zod schema 的 query.min(2)。
+const SearchMinQueryLen = 2
 
 // searchBody 出站请求体（字段名与参考实现一致）。
 type searchBody struct {
