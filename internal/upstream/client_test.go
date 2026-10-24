@@ -33,6 +33,17 @@ func TestClassify(t *testing.T) {
 		// 限流文案（issue #28）：状态码不是 429 时也必须识别为软限流，
 		// 否则账号不会被冷却，下次请求仍会被选中。
 		{200, `{"code":11140,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}`, ErrSoftRate},
+		// 11128 与 11140 的 msg 同为 "request illegal"，必须按业务码分流：
+		//   11128 = 通道校验失败（上游认为不是官方客户端发出），账号健康 → 不罚号。
+		//   11140 = 账号被上游限制（异常行为/风控）→ account_fault。
+		// 只看文案会把健康账号误禁用，只按 code 会把 11140 的限流变体误判。
+		{400, `{"code":"11-128","msg":"request illegal","displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client."}}`, ErrChannelRefused},
+		{403, `{"code":"11-128","msg":"request illegal"}`, ErrChannelRefused},
+		{400, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		{403, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		// 无 code 的裸 "request illegal" 不归属任何账号级判定（宁可走通用 4xx 兜底，
+		// 也不能凭一句文案硬禁用账号）。
+		{400, `{"msg":"request illegal"}`, ErrClient},
 		{400, `rate limit`, ErrSoftRate},
 		{403, `usage limit reached`, ErrSoftRate},
 		// "model usage limit exceeded" 不是余额语义（无 credit/quota/积分/额度 等计费词），
@@ -42,7 +53,7 @@ func TestClassify(t *testing.T) {
 		{500, `rate-limited upstream`, ErrSoftRate}, // 限流文案优先于 5xx 分类
 		// 内容策略拦截（HTTP 400 + 审核文案）：误报信号，不罚账号，走降级重试。
 		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
-		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
+		{400, `{"code":"11-128","msg":"blocked by security policy"}`, ErrContentBlocked},
 		{400, `unapproved channel`, ErrContentBlocked},
 		// 11148 tool-call sequence mismatch is request-scoped, including nested/quoted code fields.
 		{400, "{\"code\":11148,\"msg\":\"tool calls and tool results do not match\"}", ErrToolCallMismatch},
@@ -77,7 +88,7 @@ func TestClassify(t *testing.T) {
 		// 注意：11140 不按 code 单独判定——该 code 也承载 rate-limiting 软限流文案
 		// （上方 {200, "code":11140 rate-limiting} 必须仍是 ErrSoftRate），只能靠 msg 区分。
 		{403, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, ErrAccountFault},
-		{403, `request illegal`, ErrAccountFault},
+		{403, `request illegal`, ErrWafBlock}, // 无 code 的裸文案不再按账号封禁处理（防误禁）
 		{429, `{"error":{"data":{"code":14017,"msg":"The trial version is not yet activated. Please log out of your current account and log in again to activate it immediately and start your free trial."}}}`, ErrAccountFault},
 		{400, `{"code":14017,"msg":"trial not activated"}`, ErrAccountFault},
 		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。
@@ -136,7 +147,7 @@ func TestClassify(t *testing.T) {
 		{403, `{"message":"blocked by waf"}`, ErrWafBlock},
 		{403, `<head><script>...</script></head><body>blocked</body>`, ErrWafBlock},
 		// 403 带业务信封的仍走既有分类（P0-1 约束：不劫持业务 403）。
-		{403, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
+		{403, `{"code":"11-128","msg":"blocked by security policy"}`, ErrContentBlocked},
 		{403, `{"code":60001,"msg":"quota exceeded"}`, ErrHardCredit},
 		{403, `{"code":1,"msg":"unknown business error"}`, ErrClient},
 		// 非 403 的无信封错误体不进 WAF 分类（WAF 判定绑定 403 形态）。
@@ -1063,8 +1074,8 @@ func TestClassifyChannelVerificationNotAccountFault(t *testing.T) {
 	channel := `{"code":11-128,"msg":"request illegal","displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client. Please resend from the official client."}}`
 	if got := Classify(400, channel); got == ErrAccountFault {
 		t.Fatalf("渠道校验失败被归 ErrAccountFault（会误禁健康账号）: got=%v", got)
-	} else if got != ErrBadParams {
-		t.Fatalf("渠道校验失败 = %v, want ErrBadParams（请求级、不罚号）", got)
+	} else if got != ErrChannelRefused {
+		t.Fatalf("渠道校验失败 = %v, want ErrChannelRefused（不罚号）", got)
 	}
 	// 变体：msg=first message is not system prompt（同属渠道校验）也应请求级。
 	channel2 := `{"code":11-128,"msg":"first message is not system prompt","displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client."}}`
@@ -1075,8 +1086,24 @@ func TestClassifyChannelVerificationNotAccountFault(t *testing.T) {
 	if got := Classify(403, `{"code":11140,"msg":"request illegal"}`); got != ErrAccountFault {
 		t.Fatalf("11140 = %v, want ErrAccountFault", got)
 	}
-	// 对照 2：裸 "request illegal"（无渠道标记）维持 ErrAccountFault（既有语义不回归）。
-	if got := Classify(403, `request illegal`); got != ErrAccountFault {
-		t.Fatalf("bare request illegal = %v, want ErrAccountFault", got)
+	// 对照 2：裸 "request illegal"（无业务码）不再按账号封禁处理——防误禁；
+	// 403 无业务信封走 WAF 软冷却。
+	if got := Classify(403, `request illegal`); got != ErrWafBlock {
+		t.Fatalf("bare request illegal = %v, want ErrWafBlock", got)
+	}
+}
+
+// TestClassifyRealChannelRefusedBody 用上游**真实** 11-128 响应体（code 为字符串
+// "11-128"，带连字符，见 issue #197）钉住分流。护栏来历：PR #233 提交时字面量里的
+// 连字符丢失（实现与测试同写成 11-128），双方自洽所以测试全绿，但线上永远命中不了
+// 真实业务码——本用例用字节构造业务码，防止「实现和测试一起写错」再次通过。
+func TestClassifyRealChannelRefusedBody(t *testing.T) {
+	code := string([]rune{49, 49, 45, 49, 50, 56}) // "11-128"
+	body := `{"code":"` + code + `","msg":"request illegal","requestId":"b1bc87ea","displayTips":{"en":"This call failed channel verification."}}`
+	if got := Classify(400, body); got != ErrChannelRefused {
+		t.Fatalf("Classify(real 11-128)=%v want ErrChannelRefused", got)
+	}
+	if got := Classify(403, `{"code":"`+code+`","msg":"request illegal"}`); got != ErrChannelRefused {
+		t.Fatalf("Classify(real 11-128, 403)=%v want ErrChannelRefused", got)
 	}
 }

@@ -68,8 +68,8 @@ func TestChatHeadersConversationNoConvID(t *testing.T) {
 	c := &Client{}
 	c.ChatHeaders(req, a, "", ChatMeta{ConversationRequestID: "convreq-1"})
 
-	if got := req.Header.Get("X-Conversation-ID"); got != "" {
-		t.Errorf("X-Conversation-ID = %q want empty (client didn't send one)", got)
+	if got := req.Header.Get("X-Conversation-ID"); !hex32Re.MatchString(got) {
+		t.Errorf("X-Conversation-ID = %q want synthesized 32 hex", got)
 	}
 	if got := req.Header.Get("X-Conversation-Request-ID"); got != "convreq-1" {
 		t.Errorf("X-Conversation-Request-ID = %q want convreq-1", got)
@@ -97,8 +97,8 @@ func TestChatHeadersConversationEmptyMeta(t *testing.T) {
 	if got := req.Header.Get("X-B3-TraceId"); got != convReqID {
 		t.Errorf("X-B3-TraceId = %q want %q", got, convReqID)
 	}
-	if got := req.Header.Get("X-Conversation-ID"); got != "" {
-		t.Errorf("X-Conversation-ID = %q want empty", got)
+	if got := req.Header.Get("X-Conversation-ID"); !hex32Re.MatchString(got) {
+		t.Errorf("X-Conversation-ID = %q want synthesized 32 hex", got)
 	}
 }
 

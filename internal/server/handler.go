@@ -1957,8 +1957,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// msg 同为 "request illegal"，但渠道失败 body 含 "channel verification" 标记。
 		// Classify 已在 ErrAccountFault 之前按该标记分流为 ErrBadParams，正常走不到本
 		// 分支；此处再挡一次，防未来 Classify 规则序被改回时健康账号被误 Disable。
-		bodyLower := strings.ToLower(body)
-		if strings.Contains(bodyLower, "request illegal") && !strings.Contains(bodyLower, "channel verification") {
+		if upstream.IsAccountRestricted(body) {
 			// 处置策略可配（pool.account_fault_hold / account_fault_disable_after）：
 			// 默认长冷却 24h 后自动重试（上游风控通常 1–3 个工作日解除），连续 N 次
 			// 才升级永久禁用；hold=0 保持旧行为（立即禁用）。
@@ -1966,6 +1965,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
+	case upstream.ErrChannelRefused:
+		// 11128 通道校验失败（上游判定请求可能不是官方客户端发出，displayMsg 就是
+		// 「请求被拦截，请重新发送」）。账号本身健康——官方客户端可正常使用同一账号，
+		// 这不是账号级故障，**不罚账号**（无冷却/熔断/NoteFailures）。与
+		// ErrContentBlocked 同待遇，由轮转继续尝试（换号不改变通道指纹，若全池同错
+		// 会把上游原文透传给客户端，提示排查客户端指纹）。
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)
