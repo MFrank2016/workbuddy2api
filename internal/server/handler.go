@@ -1686,17 +1686,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			log.Printf("WARN: [server] non-stream model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
 				bareModel, m, len(declaredTools))
 		}
-		// metrics 采集（非流式）：与流式同口径，从同一份 usage 带出（含 cache 写入段）。
-		fillStatFromUsage(st, resp)
-		// 缓存三段（别名感知）：上游字段名存在若干变体（normalizeUsageCacheAliases
-		// 已在 usage.go 汇总），这里覆盖 fillStatFromUsage 的原始键读取。
-		if u, ok := resp["usage"].(map[string]any); ok {
-			if hit, okH := upstream.UsageCacheHitTokens(u); okH {
-				miss, _ := upstream.UsageCacheMissTokens(u)
+		credit, total, hasCredit := usageCreditTotal(resp)
+		if usage, ok := resp["usage"].(map[string]any); ok {
+			if hit, miss, okC := cacheTokensFromUsage(usage); okC {
 				st.cacheHit, st.cacheMiss, st.hasCache = int(hit), int(miss), true
 			}
 		}
-		credit, total, hasCredit := usageCreditTotal(resp)
 		recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, 0)
 		// WARN 信号放 recordAttempt 之后：st.prompt 此时才是本次的观测值。
 		if st.hasCache {

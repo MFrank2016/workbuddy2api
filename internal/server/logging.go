@@ -152,11 +152,16 @@ func (s *chatStatsReader) CacheTotals() (hit, miss, write int, ok bool) {
 	if !s.hasCache {
 		return 0, 0, 0, false
 	}
-	miss = s.cacheMiss
-	if miss <= 0 && s.cacheHit > 0 && s.prompt > s.cacheHit {
-		miss = s.prompt - s.cacheHit
+	hit, miss = s.cacheHit, s.cacheMiss
+	if miss <= 0 && hit > 0 && s.prompt > hit {
+		miss = s.prompt - hit
 	}
-	return s.cacheHit, miss, s.cacheWr, true
+	// 对称反推（issue #170）：接近全命中时上游可能回 hit=0 + miss=3，
+	// 不反推会被误判为整段未命中。prompt <= miss 时保持 hit=0（真实未命中）。
+	if hit == 0 && miss > 0 && s.prompt > miss {
+		hit = s.prompt - miss
+	}
+	return hit, miss, s.cacheWr, true
 }
 
 // Usage 返回本次流观测到的 usage 增量（RecordTokenUsage / 用量时序共用）。
@@ -272,6 +277,25 @@ func usageCreditTotal(resp map[string]any) (credit float64, total int, ok bool) 
 		return 0, 0, false
 	}
 	return c, int(pt) + int(ct), true
+}
+
+// cacheTokensFromUsage 从非流式聚合响应的 usage 里提取缓存命中 / 未命中 token
+// 数，与流式侧 CacheTokens 的推导口径对称：hit 不可得（缺失或 0）但 miss 显式
+// 存在时，按 prompt - miss 反推 hit（issue #170）；prompt <= miss 时保持 hit=0
+// （真实的整段未命中）。两个方向都不可得时 ok=false。
+func cacheTokensFromUsage(usage map[string]any) (hit, miss int64, ok bool) {
+	h, okH := upstream.UsageCacheHitTokens(usage)
+	m, okM := upstream.UsageCacheMissTokens(usage)
+	switch {
+	case okH:
+		return int64(h), int64(m), true
+	case okM:
+		if p, okP := upstream.UsagePromptTokens(usage); okP && p > m {
+			return int64(p - m), int64(m), true
+		}
+		return 0, int64(m), true
+	}
+	return 0, 0, false
 }
 
 // usageDeltaFromResponse 从聚合响应的 usage 提取 token 增量（记录账号台账 / 用量
