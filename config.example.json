@@ -164,7 +164,15 @@
     "max_concurrency_default": 0,
     "min_interval_default": 0,
     "max_total_concurrency": 0,
-    "cross_domain_fallback": false
+    "cross_domain_fallback": false,
+    "strategy": {
+      "domestic": "weighted_random",
+      "international": "weighted_random"
+    },
+    "account_order": {
+      "domestic": [],
+      "international": []
+    }
   },
   "session_sticky": {
     "enabled": true,

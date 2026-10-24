@@ -96,6 +96,10 @@ type Pool struct {
 	// 生产恒 nil，零开销（nil 函数调用分支预测友好）。
 	weightOfHook    func()
 	weightOfMaxHook func(maxCredits int64)
+	// 地区级选号策略（config pool.strategy / account_order）。
+	strategies   RegionStrategies
+	accountOrder RegionAccountOrder
+	scheduling   map[string]scheduleCursor
 	// pickSeq 选号单调序号源：仅 pick 在持 p.mu 写锁时自增并赋给 entry.usedSeq，
 	// 无需 atomic。见 entry.usedSeq 注释（解决 Windows 时钟精度导致的 LRU 失效）。
 	pickSeq uint64
@@ -110,6 +114,7 @@ type Pool struct {
 func New(stateFp string) *Pool {
 	p := &Pool{
 		byUID:                    map[string]*entry{},
+		scheduling:               map[string]scheduleCursor{},
 		stateFp:                  stateFp,
 		breakerThreshold:         defaultBreakerThreshold,
 		breakerCooldown:          defaultBreakerCooldown,

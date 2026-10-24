@@ -88,7 +88,9 @@ func (p *Pool) pickScopedProfile(tried map[string]bool, reqModel, realm string, 
 	profileOK := func(e *entry) bool { return profile == "" || e.a.Profile == profile }
 	healthyOf := func(e *entry) bool { return realmOK(e) && groupsOK(e) && profileOK(e) && e.healthy(now) }
 	if reqModel != "" {
-		healthyOf = func(e *entry) bool { return realmOK(e) && groupsOK(e) && profileOK(e) && e.healthyForModel(now, reqModel) }
+		healthyOf = func(e *entry) bool {
+			return realmOK(e) && groupsOK(e) && profileOK(e) && e.healthyForModel(now, reqModel)
+		}
 	}
 	var cands []*entry
 	for uid, e := range p.byUID {
@@ -110,6 +112,10 @@ func (p *Pool) pickScopedProfile(tried map[string]bool, reqModel, realm string, 
 		cands = append(cands, e)
 	}
 	if len(cands) == 0 {
+		// 有序策略（round_robin / sequential_exhaust）等待恢复，不提前试探冷却号。
+		if p.strategyForRealmLocked(realm) != WeightedRandom {
+			return nil
+		}
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLockedScopedProfile(tried, now, realm, groups, reqModel, profile)
@@ -191,6 +197,20 @@ func (p *Pool) pickScopedProfile(tried map[string]bool, reqModel, realm string, 
 			// 默认 1.0 时 = weightOf 逐字一致；0 已在候选收集阶段被排除。
 			ws = append(ws, weighted{e: e, w: p.weightOf(e, maxCredits, now) * p.effectiveWeight(e), tier: ti, cost1k: ci})
 		}
+	}
+	if strategy := p.strategyForRealmLocked(realm); strategy != WeightedRandom {
+		ordered := make([]*entry, 0, len(ws))
+		for _, w := range ws {
+			ordered = append(ordered, w.e)
+		}
+		e := p.pickOrderedLocked(ordered, tried, reqModel, realm, strategy, explored, now)
+		e.lastUsed = now
+		p.pickSeq++
+		e.usedSeq = p.pickSeq
+		if explored {
+			log.Printf("[pool] cost explore model=%s realm=%q acct=%s window=%s", reqModel, realm, logfmt.Label(e.a.UID, e.a.Nickname), p.costExploreInterval)
+		}
+		return e.a
 	}
 	// 等权重洗牌：仅当存在权重并列（epsilon 比较，防浮点微差让洗牌静默失效）且
 	// 候选数超过 top5 时，才对 ws 做 Fisher-Yates 洗牌（且**不消耗 p.randInt64N

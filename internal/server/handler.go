@@ -1121,7 +1121,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 恒剥出 realm=cn，跨 realm 粘性会话会被错误钉回 CN 集合；完整前缀才能让
 		// 闭包正确过滤到 global 集合（见 cmd/server/wiring.go realmAwareAvailableForModel）。
 		// 模型名也参与成本账本与选号过滤，不能用 "-" 占位污染模型键。
-		if uid, ok := h.cfg.Session.ResolveForModel(stickyKey, peek.Model); ok {
+		resolve := h.cfg.Session.ResolveForModel
+		if h.cfg.Pool.StrategyForRealm(realm) != pool.WeightedRandom {
+			resolve = h.cfg.Session.LookupForModel
+		}
+		if uid, ok := resolve(stickyKey, peek.Model); ok {
 			stickyUID = uid
 		}
 	}

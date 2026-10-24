@@ -17,6 +17,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/config"
+	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/server"
 )
@@ -324,11 +325,13 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
-		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		Strategy           pool.RegionStrategies   `json:"strategy"`
+		AccountOrder       pool.RegionAccountOrder `json:"account_order,omitempty"`
+		MaxInFlight        int                     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal  int                     `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
+		BreakerThreshold   int                     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown    string                  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax string                  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114「累计错误率高/连续失败 N 次的账号移出候选池一段时间」）：
 		// ErrClient/传输层这类「不罚号」失败连续计数，达阈临时出池。与冷却/熔断
 		// 并存取更长者不叠加。默认 5 次 / 10m。
@@ -802,6 +805,9 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	if c.Pool.Strategy, err = c.Pool.Strategy.Normalize(); err != nil {
+		return fmt.Errorf("pool.strategy: %w", err)
+	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
 	}

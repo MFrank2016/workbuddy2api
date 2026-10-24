@@ -626,7 +626,8 @@ type modelCooldown struct {
 
 // stateFile 持久化格式。
 type stateFile struct {
-	Accounts map[string]stateAccount `json:"accounts"`
+	Accounts   map[string]stateAccount   `json:"accounts"`
+	Scheduling map[string]scheduleCursor `json:"scheduling,omitempty"`
 }
 
 // defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
