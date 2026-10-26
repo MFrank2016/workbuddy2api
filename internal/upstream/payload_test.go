@@ -267,3 +267,75 @@ func TestNormalizeImageURL(t *testing.T) {
 		})
 	}
 }
+
+// TestDropReasoningContentParts 验证 reasoning_text / reasoning 片段在出站前被剔除。
+// 上游 content 类型白名单不含这两个 type，命中即 HTTP 400 code=11101
+// "unsupported content type at index 0: reasoning_text"（Codex 经
+// responses→chat 转换器透传助手历史时必现）。
+func TestDropReasoningContentParts(t *testing.T) {
+	body := `{
+		"model":"glm-5.2",
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"hi"}]},
+			{"role":"assistant","content":[
+				{"type":"reasoning_text","text":"thinking"},
+				{"type":"text","text":"answer"}
+			]},
+			{"role":"assistant","content":[{"type":"reasoning","text":"alias only"}]},
+			{"role":"assistant","content":[{"type":"reasoning_text","text":"with tools"}],"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"c1","content":[{"type":"text","text":"ok"}]}
+		]
+	}`
+
+	obj, err := decodeBody(PrepareBodyOpt([]byte(body), false))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages not array: %T", obj["messages"])
+	}
+	// 第 3 条（只有 reasoning、无 tool_calls）整条被删；其余保留。
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages after drop, got %d", len(msgs))
+	}
+	for i, raw := range msgs {
+		m, _ := raw.(map[string]any)
+		parts, ok := m["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rp := range parts {
+			p, _ := rp.(map[string]any)
+			ptype, _ := p["type"].(string)
+			if ptype == "reasoning_text" || ptype == "reasoning" {
+				t.Fatalf("message %d still carries %q part", i, ptype)
+			}
+		}
+	}
+	// 带 tool_calls 的助手消息必须保留 tool_calls 且 content 变成空数组。
+	var withTools map[string]any
+	for _, raw := range msgs {
+		m, _ := raw.(map[string]any)
+		if _, has := m["tool_calls"]; has {
+			withTools = m
+		}
+	}
+	if withTools == nil {
+		t.Fatal("assistant message carrying tool_calls was dropped")
+	}
+	if tc, _ := withTools["tool_calls"].([]any); len(tc) != 1 {
+		t.Fatalf("tool_calls must survive intact, got %v", withTools["tool_calls"])
+	}
+
+	// 无 content 数组的 body 必须逐字不变。
+	plain := `{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`
+	got := PrepareBodyOpt([]byte(plain), false)
+	gotObj, err := decodeBody(got)
+	if err != nil {
+		t.Fatalf("decode plain: %v", err)
+	}
+	if string(gotObj["messages"].([]any)[0].(map[string]any)["content"].(string)) != "hi" {
+		t.Fatalf("string content must be untouched, got %v", gotObj["messages"])
+	}
+}
