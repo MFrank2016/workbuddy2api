@@ -425,7 +425,7 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 		}
 		return errResponsesStreamFailed
 	}
-	if validEvents == 0 && !sawDone {
+	if validEvents == 0 {
 		if err := emitFailure("empty upstream stream", "upstream_error", "upstream_parse"); err != nil {
 			return err
 		}
@@ -438,9 +438,14 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 		return errResponsesStreamFailed
 	}
 
-	// Emit any delayed tool item headers before the done-event pass.
+	// Emit any delayed tool item headers before the done-event pass. Fully
+	// malformed calls (no name and no call id) are dropped rather than emitted
+	// with empty fields.
 	for _, it := range items {
 		if it.kind == "function_call" && !it.added {
+			if it.name == "" && it.callID == "" {
+				continue
+			}
 			if err := ensureToolAdded(it); err != nil {
 				return err
 			}
@@ -513,6 +518,9 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 			}
 			output = append(output, item)
 		case "function_call":
+			if !it.added {
+				continue // fully malformed call: nothing addressable to emit
+			}
 			arguments := it.args.String()
 			if err := writeEvent("response.function_call_arguments.done", map[string]any{
 				"item_id":      it.id,
@@ -563,6 +571,10 @@ func mergeToolCallName(current, next string) string {
 		return next
 	case strings.HasPrefix(current, next):
 		return current
+	case strings.HasSuffix(current, next):
+		return current
+	case strings.HasSuffix(next, current) && len(next) > len(current):
+		return next
 	default:
 		return current + next
 	}

@@ -505,21 +505,24 @@ func TestResponsesStreamEmpty(t *testing.T) {
 
 func TestResponsesStreamDoneOnly(t *testing.T) {
 	rec := httptest.NewRecorder()
-	if err := streamResponses(rec, io.NopCloser(strings.NewReader("data: [DONE]\n\n")), &responsesMeta{Model: "glm-5.2"}); err != nil {
-		t.Fatalf("done-only stream should succeed: %v", err)
+	err := streamResponses(rec, io.NopCloser(strings.NewReader("data: [DONE]\n\n")), &responsesMeta{Model: "glm-5.2"})
+	if !errors.Is(err, errResponsesStreamFailed) {
+		t.Fatalf("done-only stream must be an empty-stream failure, got err=%v", err)
 	}
 	events, done := parseResponsesSSE(t, rec.Body.String())
 	if done != 1 {
 		t.Fatalf("[DONE] count=%d want 1", done)
 	}
-	if n := responsesCountEvent(events, "response.completed"); n != 1 {
-		t.Fatalf("response.completed count=%d want 1", n)
+	if n := responsesCountEvent(events, "response.completed"); n != 0 {
+		t.Fatalf("response.completed count=%d want 0", n)
 	}
-	if n := responsesCountEvent(events, "response.failed"); n != 0 {
-		t.Fatalf("response.failed count=%d want 0", n)
+	if n := responsesCountEvent(events, "response.failed"); n != 1 {
+		t.Fatalf("response.failed count=%d want 1", n)
 	}
-	if output := responsesCompletedOutput(t, events); len(output) != 0 {
-		t.Fatalf("output items=%d want 0", len(output))
+	failed := responsesFindEvent(t, events, "response.failed")["response"].(map[string]any)
+	errObj := failed["error"].(map[string]any)
+	if errObj["code"] != "upstream_parse" {
+		t.Fatalf("error code=%v want upstream_parse", errObj["code"])
 	}
 }
 
@@ -713,5 +716,53 @@ func TestScanSSEWithDoneReportsDone(t *testing.T) {
 	}
 	if sawDone {
 		t.Fatal("sawDone=true want false when callback aborts")
+	}
+}
+
+func TestMergeToolCallName(t *testing.T) {
+	cases := []struct {
+		name    string
+		current string
+		next    string
+		want    string
+	}{
+		{"empty-current", "", "Bash", "Bash"},
+		{"empty-next", "Bash", "", "Bash"},
+		{"repeat-full", "Bash", "Bash", "Bash"},
+		{"prefix-fragment", "get_", "weather", "get_weather"},
+		{"prefix-full-replaces-fragment", "get_", "get_weather", "get_weather"},
+		{"prefix-fragment-after-full", "get_weather", "get_", "get_weather"},
+		{"suffix-duplicate", "get_weather", "weather", "get_weather"},
+		{"suffix-full-replaces-fragment", "weather", "get_weather", "get_weather"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mergeToolCallName(tc.current, tc.next); got != tc.want {
+				t.Fatalf("merge(%q,%q)=%q want %q", tc.current, tc.next, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResponsesStreamToolCallMalformedSkipped(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader(
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"stop\"}]}\n\n" +
+			"data: [DONE]\n\n"))
+	rec := httptest.NewRecorder()
+	if err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+	events, done := parseResponsesSSE(t, rec.Body.String())
+	if done != 1 {
+		t.Fatalf("[DONE] count=%d want 1", done)
+	}
+	if n := responsesCountEvent(events, "response.output_item.added"); n != 0 {
+		t.Fatalf("output_item.added count=%d want 0 for fully malformed call", n)
+	}
+	if n := responsesCountEvent(events, "response.output_item.done"); n != 0 {
+		t.Fatalf("output_item.done count=%d want 0 for fully malformed call", n)
+	}
+	if output := responsesCompletedOutput(t, events); len(output) != 0 {
+		t.Fatalf("output items=%d want 0", len(output))
 	}
 }
