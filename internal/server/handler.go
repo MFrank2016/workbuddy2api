@@ -289,6 +289,8 @@ func NewHandler(cfg Config) *Handler {
 		profileModels: map[string]profileModelEntry{},
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	h.mux.HandleFunc("POST /responses", h.withAuth(h.responses))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
