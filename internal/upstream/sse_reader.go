@@ -16,6 +16,14 @@ const sseMaxLine = 4 * 1024 * 1024
 // ignored, the "data:" prefix is stripped, and scanning stops at the terminal
 // "[DONE]" frame without invoking fn for it.
 func ScanSSE(r io.Reader, fn func(payload string) error) error {
+	_, err := ScanSSEWithDone(r, fn)
+	return err
+}
+
+// ScanSSEWithDone is ScanSSE plus a report of whether the terminal [DONE]
+// frame was observed. Callers that must distinguish a clean upstream finish
+// from a truncated EOF use sawDone instead of inferring it from finish_reason.
+func ScanSSEWithDone(r io.Reader, fn func(payload string) error) (sawDone bool, err error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), sseMaxLine)
 	for sc.Scan() {
@@ -28,14 +36,14 @@ func ScanSSE(r io.Reader, fn func(payload string) error) error {
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
-			return nil
+			return true, nil
 		}
 		if payload == "" {
 			continue
 		}
 		if err := fn(payload); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return sc.Err()
+	return false, sc.Err()
 }

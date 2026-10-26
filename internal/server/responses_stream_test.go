@@ -83,6 +83,16 @@ func responsesCountEvent(events []responsesSSEEvent, typ string) int {
 	return n
 }
 
+func responsesCompletedOutput(t *testing.T, events []responsesSSEEvent) []any {
+	t.Helper()
+	completed := responsesFindEvent(t, events, "response.completed")["response"].(map[string]any)
+	output, ok := completed["output"].([]any)
+	if !ok {
+		t.Fatalf("completed output is not an array: %v", completed["output"])
+	}
+	return output
+}
+
 func assertResponsesSequence(t *testing.T, events []responsesSSEEvent) {
 	t.Helper()
 	last := -1
@@ -167,7 +177,7 @@ func TestResponsesStreamEventSequence(t *testing.T) {
 	if usage["input_tokens"].(float64) != 3 || usage["output_tokens"].(float64) != 2 || usage["total_tokens"].(float64) != 5 {
 		t.Fatalf("usage=%v", usage)
 	}
-	output := completed["output"].([]any)
+	output := responsesCompletedOutput(t, events)
 	if len(output) != 1 {
 		t.Fatalf("output items=%d want 1", len(output))
 	}
@@ -246,8 +256,7 @@ func TestResponsesStreamToolCalls(t *testing.T) {
 		t.Fatalf("response.completed count=%d want 1", n)
 	}
 
-	completed := responsesFindEvent(t, events, "response.completed")["response"].(map[string]any)
-	output := completed["output"].([]any)
+	output := responsesCompletedOutput(t, events)
 	if len(output) != 2 {
 		t.Fatalf("output items=%d want 2", len(output))
 	}
@@ -274,14 +283,126 @@ func TestResponsesStreamToolCalls(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamToolCallRepeatedName(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader(
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"a\"}}]}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"b\"}}]}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"c\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+			"data: [DONE]\n\n"))
+	rec := httptest.NewRecorder()
+	if err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := parseResponsesSSE(t, rec.Body.String())
+	output := responsesCompletedOutput(t, events)
+	if len(output) != 1 {
+		t.Fatalf("output items=%d want 1", len(output))
+	}
+	call := output[0].(map[string]any)
+	if call["name"] != "Bash" {
+		t.Fatalf("name=%v want Bash (must not duplicate repeated full name)", call["name"])
+	}
+	if call["arguments"] != "abc" {
+		t.Fatalf("arguments=%v want abc", call["arguments"])
+	}
+	if n := responsesCountEvent(events, "response.output_item.added"); n != 1 {
+		t.Fatalf("output_item.added count=%d want 1", n)
+	}
+}
+
+func TestResponsesStreamToolCallDelayedAdded(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader(
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"a\\\":\"}}]}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_late\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"1}\"}}]},\"finish_reason\":\"stop\"}]}\n\n" +
+			"data: [DONE]\n\n"))
+	rec := httptest.NewRecorder()
+	if err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := parseResponsesSSE(t, rec.Body.String())
+	assertResponsesOrder(t, events, []string{
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.output_item.done",
+		"response.completed",
+		"DONE",
+	})
+	added := responsesFindEvent(t, events, "response.output_item.added")["item"].(map[string]any)
+	if added["name"] != "lookup" || added["call_id"] != "call_late" {
+		t.Fatalf("delayed added item=%v want full name/call_id", added)
+	}
+	output := responsesCompletedOutput(t, events)
+	call := output[0].(map[string]any)
+	if call["arguments"] != `{"a":1}` {
+		t.Fatalf("arguments=%v want {\"a\":1}", call["arguments"])
+	}
+}
+
+func TestResponsesStreamToolCallLateID(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader(
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"a\\\":\"}}]}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_late\",\"function\":{\"name\":\"lookup\",\"arguments\":\"1}\"}}]},\"finish_reason\":\"stop\"}]}\n\n" +
+			"data: [DONE]\n\n"))
+	rec := httptest.NewRecorder()
+	if err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := parseResponsesSSE(t, rec.Body.String())
+	if n := responsesCountEvent(events, "response.output_item.added"); n != 1 {
+		t.Fatalf("output_item.added count=%d want 1 (late id must attach, not fork)", n)
+	}
+	added := responsesFindEvent(t, events, "response.output_item.added")["item"].(map[string]any)
+	if added["call_id"] != "call_late" || added["name"] != "lookup" {
+		t.Fatalf("added item=%v", added)
+	}
+	output := responsesCompletedOutput(t, events)
+	if len(output) != 1 {
+		t.Fatalf("output items=%d want 1", len(output))
+	}
+	call := output[0].(map[string]any)
+	if call["call_id"] != "call_late" || call["name"] != "lookup" || call["arguments"] != `{"a":1}` {
+		t.Fatalf("function_call=%v", call)
+	}
+}
+
+func TestResponsesStreamToolCallNoIndexParallel(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader(
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"alpha\",\"arguments\":\"a1\"}}]}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"beta\",\"arguments\":\"b1\"}}]}}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"b2\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+			"data: [DONE]\n\n"))
+	rec := httptest.NewRecorder()
+	if err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := parseResponsesSSE(t, rec.Body.String())
+	output := responsesCompletedOutput(t, events)
+	if len(output) != 2 {
+		t.Fatalf("output items=%d want 2", len(output))
+	}
+	first := output[0].(map[string]any)
+	second := output[1].(map[string]any)
+	if first["call_id"] != "call_a" || first["name"] != "alpha" || first["arguments"] != "a1" {
+		t.Fatalf("first function_call=%v", first)
+	}
+	if second["call_id"] != "call_b" || second["name"] != "beta" || second["arguments"] != "b1b2" {
+		t.Fatalf("second function_call=%v", second)
+	}
+}
+
 func TestResponsesStreamUpstreamErrorFrame(t *testing.T) {
 	rc := io.NopCloser(strings.NewReader(
 		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
 			"data: {\"error\":{\"message\":\"rate limited\",\"type\":\"rate_limit_error\",\"code\":\"6004\"}}\n\n" +
 			"data: [DONE]\n\n"))
 	rec := httptest.NewRecorder()
-	if err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"}); err != nil {
-		t.Fatalf("upstream error frame should be handled without returning an error: %v", err)
+	err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"})
+	if !errors.Is(err, errResponsesStreamFailed) {
+		t.Fatalf("err=%v want errResponsesStreamFailed", err)
 	}
 	events, done := parseResponsesSSE(t, rec.Body.String())
 	if done != 1 {
@@ -301,21 +422,66 @@ func TestResponsesStreamUpstreamErrorFrame(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamErrorFrameNestedData(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader(
+		"data: {\"error\":{\"data\":{\"code\":11140,\"msg\":\"blocked\"}}}\n\n" +
+			"data: [DONE]\n\n"))
+	rec := httptest.NewRecorder()
+	err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"})
+	if !errors.Is(err, errResponsesStreamFailed) {
+		t.Fatalf("err=%v want errResponsesStreamFailed", err)
+	}
+	events, _ := parseResponsesSSE(t, rec.Body.String())
+	failed := responsesFindEvent(t, events, "response.failed")["response"].(map[string]any)
+	errObj := failed["error"].(map[string]any)
+	if errObj["message"] != "blocked" {
+		t.Fatalf("message=%v want blocked", errObj["message"])
+	}
+	if errObj["code"] != "11140" {
+		t.Fatalf("code=%v want \"11140\" (numeric code must be stringified)", errObj["code"])
+	}
+	if errObj["type"] != "upstream_error" {
+		t.Fatalf("type=%v want upstream_error", errObj["type"])
+	}
+}
+
+func TestResponsesStreamErrorExtraction(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      any
+		message string
+		errType string
+		code    string
+	}{
+		{"nested-message", map[string]any{"message": map[string]any{"message": "deep"}}, "deep", "upstream_error", "upstream_error"},
+		{"numeric-code", map[string]any{"msg": "bad", "code": float64(11102)}, "bad", "upstream_error", "11102"},
+		{"data-object", map[string]any{"data": map[string]any{"code": float64(7), "msg": "denied"}}, "denied", "upstream_error", "7"},
+		{"string", "plain failure", "plain failure", "upstream_error", "upstream_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			message, errType, code := responsesStreamError(tc.in)
+			if message != tc.message || errType != tc.errType || code != tc.code {
+				t.Fatalf("got (%q,%q,%q) want (%q,%q,%q)", message, errType, code, tc.message, tc.errType, tc.code)
+			}
+		})
+	}
+}
+
 func TestResponsesStreamEmpty(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
 	}{
 		{"empty", ""},
-		{"done-only", "data: [DONE]\n\n"},
 		{"comments-only", ": keepalive\n\n: still here\n\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			err := streamResponses(rec, io.NopCloser(strings.NewReader(tc.body)), &responsesMeta{Model: "glm-5.2"})
-			if err == nil {
-				t.Fatal("empty stream should return an error")
+			if !errors.Is(err, errResponsesStreamFailed) {
+				t.Fatalf("err=%v want errResponsesStreamFailed", err)
 			}
 			events, done := parseResponsesSSE(t, rec.Body.String())
 			if done != 1 {
@@ -337,29 +503,122 @@ func TestResponsesStreamEmpty(t *testing.T) {
 	}
 }
 
-func TestResponsesStreamTruncated(t *testing.T) {
-	rc := io.NopCloser(strings.NewReader(
-		"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+func TestResponsesStreamDoneOnly(t *testing.T) {
 	rec := httptest.NewRecorder()
-	err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"})
-	if err == nil {
-		t.Fatal("truncated stream should return an error")
+	if err := streamResponses(rec, io.NopCloser(strings.NewReader("data: [DONE]\n\n")), &responsesMeta{Model: "glm-5.2"}); err != nil {
+		t.Fatalf("done-only stream should succeed: %v", err)
 	}
 	events, done := parseResponsesSSE(t, rec.Body.String())
 	if done != 1 {
 		t.Fatalf("[DONE] count=%d want 1", done)
 	}
-	assertResponsesSequence(t, events)
-	if n := responsesCountEvent(events, "response.failed"); n != 1 {
-		t.Fatalf("response.failed count=%d want 1", n)
+	if n := responsesCountEvent(events, "response.completed"); n != 1 {
+		t.Fatalf("response.completed count=%d want 1", n)
 	}
-	if n := responsesCountEvent(events, "response.completed"); n != 0 {
-		t.Fatalf("response.completed count=%d want 0", n)
+	if n := responsesCountEvent(events, "response.failed"); n != 0 {
+		t.Fatalf("response.failed count=%d want 0", n)
 	}
-	failed := responsesFindEvent(t, events, "response.failed")["response"].(map[string]any)
-	errObj := failed["error"].(map[string]any)
-	if errObj["code"] != "upstream_truncated" {
-		t.Fatalf("error code=%v want upstream_truncated", errObj["code"])
+	if output := responsesCompletedOutput(t, events); len(output) != 0 {
+		t.Fatalf("output items=%d want 0", len(output))
+	}
+}
+
+func TestResponsesStreamDoneWithoutFinishReason(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader(
+		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+			"data: [DONE]\n\n"))
+	rec := httptest.NewRecorder()
+	if err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"}); err != nil {
+		t.Fatalf("sawDone should be sufficient for success: %v", err)
+	}
+	events, done := parseResponsesSSE(t, rec.Body.String())
+	if done != 1 {
+		t.Fatalf("[DONE] count=%d want 1", done)
+	}
+	if n := responsesCountEvent(events, "response.completed"); n != 1 {
+		t.Fatalf("response.completed count=%d want 1", n)
+	}
+	if n := responsesCountEvent(events, "response.failed"); n != 0 {
+		t.Fatalf("response.failed count=%d want 0", n)
+	}
+}
+
+func TestResponsesStreamTruncated(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			"no-finish-no-done",
+			"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+		},
+		{
+			"finish-without-done",
+			"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"stop\"}]}\n\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			err := streamResponses(rec, io.NopCloser(strings.NewReader(tc.body)), &responsesMeta{Model: "glm-5.2"})
+			if !errors.Is(err, errResponsesStreamFailed) {
+				t.Fatalf("err=%v want errResponsesStreamFailed", err)
+			}
+			events, done := parseResponsesSSE(t, rec.Body.String())
+			if done != 1 {
+				t.Fatalf("[DONE] count=%d want 1", done)
+			}
+			assertResponsesSequence(t, events)
+			if n := responsesCountEvent(events, "response.failed"); n != 1 {
+				t.Fatalf("response.failed count=%d want 1", n)
+			}
+			if n := responsesCountEvent(events, "response.completed"); n != 0 {
+				t.Fatalf("response.completed count=%d want 0", n)
+			}
+			failed := responsesFindEvent(t, events, "response.failed")["response"].(map[string]any)
+			errObj := failed["error"].(map[string]any)
+			if errObj["code"] != "upstream_truncated" {
+				t.Fatalf("error code=%v want upstream_truncated", errObj["code"])
+			}
+		})
+	}
+}
+
+func TestResponsesStreamNonDeltaMessage(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader(
+		"data: {\"choices\":[{\"message\":{\"role\":\"assistant\",\"reasoning_content\":\"why\",\"content\":\"answer\"," +
+			"\"tool_calls\":[{\"id\":\"call_x\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]}," +
+			"\"finish_reason\":\"stop\"}]}\n\n" +
+			"data: [DONE]\n\n"))
+	rec := httptest.NewRecorder()
+	if err := streamResponses(rec, rc, &responsesMeta{Model: "glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+	events, done := parseResponsesSSE(t, rec.Body.String())
+	if done != 1 {
+		t.Fatalf("[DONE] count=%d want 1", done)
+	}
+	if n := responsesCountEvent(events, "response.completed"); n != 1 {
+		t.Fatalf("response.completed count=%d want 1", n)
+	}
+	output := responsesCompletedOutput(t, events)
+	if len(output) != 3 {
+		t.Fatalf("output items=%d want reasoning+message+function_call", len(output))
+	}
+	reasoning := output[0].(map[string]any)
+	message := output[1].(map[string]any)
+	call := output[2].(map[string]any)
+	if reasoning["type"] != "reasoning" || reasoning["summary"].([]any)[0].(map[string]any)["text"] != "why" {
+		t.Fatalf("reasoning item=%v", reasoning)
+	}
+	if message["type"] != "message" || message["content"].([]any)[0].(map[string]any)["text"] != "answer" {
+		t.Fatalf("message item=%v", message)
+	}
+	if call["type"] != "function_call" || call["call_id"] != "call_x" || call["name"] != "lookup" {
+		t.Fatalf("function_call item=%v", call)
+	}
+	if call["arguments"] != `{"q":"x"}` {
+		t.Fatalf("function_call arguments=%v", call["arguments"])
 	}
 }
 
@@ -418,5 +677,41 @@ func TestScanSSEPropagatesCallbackError(t *testing.T) {
 	})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v want sentinel", err)
+	}
+}
+
+func TestScanSSEWithDoneReportsDone(t *testing.T) {
+	var got []string
+	sawDone, err := upstream.ScanSSEWithDone(
+		strings.NewReader("data: one\n\ndata: [DONE]\n\ndata: two\n\n"),
+		func(payload string) error {
+			got = append(got, payload)
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawDone {
+		t.Fatal("sawDone=false want true")
+	}
+	if strings.Join(got, ",") != "one" {
+		t.Fatalf("payloads=%v want [one]", got)
+	}
+
+	sawDone, err = upstream.ScanSSEWithDone(strings.NewReader("data: one\n\n"), func(string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sawDone {
+		t.Fatal("sawDone=true want false for EOF without [DONE]")
+	}
+
+	sentinel := errors.New("boom")
+	sawDone, err = upstream.ScanSSEWithDone(strings.NewReader("data: one\n\n"), func(string) error { return sentinel })
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v want sentinel", err)
+	}
+	if sawDone {
+		t.Fatal("sawDone=true want false when callback aborts")
 	}
 }

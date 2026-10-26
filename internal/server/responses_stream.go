@@ -5,25 +5,33 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"workbuddy2api/internal/upstream"
 )
 
+// errResponsesStreamFailed marks an in-band stream failure: response.failed and
+// [DONE] were already written to the client, but the caller should still treat
+// the request as failed (logging/account policy).
+var errResponsesStreamFailed = errors.New("responses stream failed")
+
 // responsesStreamItem tracks one output item while its deltas are replayed from
 // the upstream chat stream. Items are ordered by first appearance so output
 // indexes stay stable for the whole stream.
 type responsesStreamItem struct {
-	kind      string
-	index     int
-	id        string
-	callID    string
-	name      strings.Builder
-	text      strings.Builder
-	args      strings.Builder
-	added     bool
-	partAdded bool
+	kind          string
+	index         int
+	upstreamIndex int
+	id            string
+	callID        string
+	name          string
+	text          strings.Builder
+	args          strings.Builder
+	pendingArgs   []string
+	added         bool
+	partAdded     bool
 }
 
 // streamResponses converts an upstream chat SSE stream into Responses API
@@ -163,9 +171,42 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 		return it, nil
 	}
 
+	handleReasoning := func(text string) error {
+		if text == "" {
+			return nil
+		}
+		it, err := startReasoning()
+		if err != nil {
+			return err
+		}
+		it.text.WriteString(text)
+		return writeEvent("response.reasoning_summary_text.delta", map[string]any{
+			"item_id":       it.id,
+			"output_index":  it.index,
+			"summary_index": 0,
+			"delta":         text,
+		})
+	}
+	handleContent := func(text string) error {
+		if text == "" {
+			return nil
+		}
+		it, err := startMessage()
+		if err != nil {
+			return err
+		}
+		it.text.WriteString(text)
+		return writeEvent("response.output_text.delta", map[string]any{
+			"item_id":       it.id,
+			"output_index":  it.index,
+			"content_index": 0,
+			"delta":         text,
+		})
+	}
+
 	toolByIndex := map[int]*responsesStreamItem{}
 	toolIDIndex := map[string]int{}
-	lastToolIdx := -1
+	var lastToolItem *responsesStreamItem
 	toolSeq := 0
 	nextToolIndex := func() int {
 		for {
@@ -177,8 +218,113 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 		}
 	}
 
+	// ensureToolAdded emits the delayed output_item.added for a function call and
+	// flushes any argument deltas buffered while the item was not yet addressable.
+	ensureToolAdded := func(it *responsesStreamItem) error {
+		if it.added {
+			return nil
+		}
+		it.added = true
+		if err := writeEvent("response.output_item.added", map[string]any{
+			"output_index": it.index,
+			"item": map[string]any{
+				"id":        it.id,
+				"type":      "function_call",
+				"call_id":   it.callID,
+				"name":      it.name,
+				"arguments": "",
+				"status":    "in_progress",
+			},
+		}); err != nil {
+			return err
+		}
+		for _, delta := range it.pendingArgs {
+			if err := writeEvent("response.function_call_arguments.delta", map[string]any{
+				"item_id":      it.id,
+				"output_index": it.index,
+				"delta":        delta,
+			}); err != nil {
+				return err
+			}
+		}
+		it.pendingArgs = nil
+		return nil
+	}
+
+	processToolCalls := func(rawCalls []any, deltas []chatToolCall) error {
+		for i, raw := range rawCalls {
+			var tc chatToolCall
+			if i < len(deltas) {
+				tc = deltas[i]
+			}
+			idx := -1
+			if m, ok := raw.(map[string]any); ok {
+				if v, ok := m["index"].(float64); ok {
+					idx = int(v)
+				}
+			}
+			if idx < 0 {
+				switch {
+				case tc.ID != "":
+					if seen, ok := toolIDIndex[tc.ID]; ok {
+						idx = seen
+					} else if lastToolItem != nil && lastToolItem.callID == "" {
+						// Late id: the previous fragment already opened the call.
+						idx = lastToolItem.upstreamIndex
+					} else {
+						idx = nextToolIndex()
+					}
+				case lastToolItem != nil:
+					idx = lastToolItem.upstreamIndex
+				default:
+					idx = nextToolIndex()
+				}
+			}
+
+			it := toolByIndex[idx]
+			if it == nil {
+				it = newItem("function_call")
+				it.id = "fc_" + randomHex(8)
+				it.upstreamIndex = idx
+				toolByIndex[idx] = it
+			}
+			lastToolItem = it
+			if tc.ID != "" {
+				if it.callID == "" {
+					it.callID = tc.ID
+				}
+				toolIDIndex[tc.ID] = idx
+			}
+			if tc.Name != "" {
+				it.name = mergeToolCallName(it.name, tc.Name)
+			}
+			if tc.Arguments != "" {
+				it.args.WriteString(tc.Arguments)
+				if it.added {
+					if err := writeEvent("response.function_call_arguments.delta", map[string]any{
+						"item_id":      it.id,
+						"output_index": it.index,
+						"delta":        tc.Arguments,
+					}); err != nil {
+						return err
+					}
+				} else {
+					it.pendingArgs = append(it.pendingArgs, tc.Arguments)
+				}
+			}
+			// A call needs both a name and a call id before it is addressable to
+			// clients; wait for both (or finish) so added never carries empty ids.
+			if it.name != "" && it.callID != "" && !it.added {
+				if err := ensureToolAdded(it); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
 	validEvents := 0
-	sawFinish := false
+	sawDone := false
 	var usage map[string]any
 	failureSent := false
 	abort := errors.New("responses stream aborted")
@@ -215,7 +361,7 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 	var scanErr error
 	if rc != nil {
 		defer rc.Close()
-		scanErr = upstream.ScanSSE(rc, func(payload string) error {
+		sawDone, scanErr = upstream.ScanSSEWithDone(rc, func(payload string) error {
 			var chunk map[string]any
 			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 				// Non-JSON data (keepalive noise) is not a usable upstream event.
@@ -236,125 +382,40 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 
 			delta := firstDelta(chunk)
 			if delta != nil {
-				if reasoning, _ := delta["reasoning_content"].(string); reasoning != "" {
-					it, err := startReasoning()
-					if err != nil {
-						return err
-					}
-					it.text.WriteString(reasoning)
-					if err := writeEvent("response.reasoning_summary_text.delta", map[string]any{
-						"item_id":       it.id,
-						"output_index":  it.index,
-						"summary_index": 0,
-						"delta":         reasoning,
-					}); err != nil {
-						return err
-					}
+				if err := handleReasoning(stringField(delta["reasoning_content"])); err != nil {
+					return err
 				}
-				if content, _ := delta["content"].(string); content != "" {
-					it, err := startMessage()
-					if err != nil {
-						return err
-					}
-					it.text.WriteString(content)
-					if err := writeEvent("response.output_text.delta", map[string]any{
-						"item_id":       it.id,
-						"output_index":  it.index,
-						"content_index": 0,
-						"delta":         content,
-					}); err != nil {
-						return err
-					}
+				if err := handleContent(stringField(delta["content"])); err != nil {
+					return err
 				}
 				if rawCalls, ok := delta["tool_calls"].([]any); ok && len(rawCalls) > 0 {
-					deltas := toolCallDeltas(delta)
-					for i, raw := range rawCalls {
-						var tc chatToolCall
-						if i < len(deltas) {
-							tc = deltas[i]
-						}
-						idx := -1
-						if m, ok := raw.(map[string]any); ok {
-							if v, ok := m["index"].(float64); ok {
-								idx = int(v)
-							}
-						}
-						if idx < 0 {
-							switch {
-							case tc.ID != "":
-								if seen, ok := toolIDIndex[tc.ID]; ok {
-									idx = seen
-								} else {
-									idx = nextToolIndex()
-								}
-							case lastToolIdx >= 0:
-								idx = lastToolIdx
-							default:
-								idx = nextToolIndex()
-							}
-						}
-						lastToolIdx = idx
-						if tc.ID != "" {
-							toolIDIndex[tc.ID] = idx
-						}
-
-						it := toolByIndex[idx]
-						if it == nil {
-							it = newItem("function_call")
-							it.id = "fc_" + randomHex(8)
-							toolByIndex[idx] = it
-						}
-						if tc.ID != "" && it.callID == "" {
-							it.callID = tc.ID
-						}
-						if tc.Name != "" {
-							it.name.WriteString(tc.Name)
-						}
-						if !it.added {
-							it.added = true
-							if err := writeEvent("response.output_item.added", map[string]any{
-								"output_index": it.index,
-								"item": map[string]any{
-									"id":        it.id,
-									"type":      "function_call",
-									"call_id":   it.callID,
-									"name":      it.name.String(),
-									"arguments": "",
-									"status":    "in_progress",
-								},
-							}); err != nil {
-								return err
-							}
-						}
-						if tc.Arguments != "" {
-							it.args.WriteString(tc.Arguments)
-							if err := writeEvent("response.function_call_arguments.delta", map[string]any{
-								"item_id":      it.id,
-								"output_index": it.index,
-								"delta":        tc.Arguments,
-							}); err != nil {
-								return err
-							}
-						}
+					if err := processToolCalls(rawCalls, toolCallDeltas(delta)); err != nil {
+						return err
+					}
+				}
+			}
+			// Some providers send a full non-delta message instead of deltas.
+			if msg := firstChoiceMessage(chunk); msg != nil && !deltaHasPayload(delta) {
+				if err := handleReasoning(stringField(msg["reasoning_content"])); err != nil {
+					return err
+				}
+				if err := handleContent(stringField(msg["content"])); err != nil {
+					return err
+				}
+				if rawCalls, ok := msg["tool_calls"].([]any); ok && len(rawCalls) > 0 {
+					if err := processToolCalls(rawCalls, toolCalls(msg)); err != nil {
+						return err
 					}
 				}
 			}
 
-			if choices, ok := chunk["choices"].([]any); ok {
-				for _, rawChoice := range choices {
-					choice, _ := rawChoice.(map[string]any)
-					if fr, _ := choice["finish_reason"].(string); fr != "" {
-						sawFinish = true
-					}
-				}
-			}
 			return nil
 		})
 	}
 
 	if failureSent {
 		if errors.Is(scanErr, abort) {
-			return nil
+			return errResponsesStreamFailed
 		}
 		return scanErr
 	}
@@ -362,21 +423,28 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 		if err := emitFailure(scanErr.Error(), "upstream_error", "upstream_parse"); err != nil {
 			return err
 		}
-		return scanErr
+		return errResponsesStreamFailed
 	}
-	if validEvents == 0 {
-		const message = "empty upstream stream"
-		if err := emitFailure(message, "upstream_error", "upstream_parse"); err != nil {
+	if validEvents == 0 && !sawDone {
+		if err := emitFailure("empty upstream stream", "upstream_error", "upstream_parse"); err != nil {
 			return err
 		}
-		return errors.New(message)
+		return errResponsesStreamFailed
 	}
-	if !sawFinish {
-		const message = "upstream stream ended before completion"
-		if err := emitFailure(message, "upstream_error", "upstream_truncated"); err != nil {
+	if !sawDone {
+		if err := emitFailure("upstream stream ended before completion", "upstream_error", "upstream_truncated"); err != nil {
 			return err
 		}
-		return errors.New(message)
+		return errResponsesStreamFailed
+	}
+
+	// Emit any delayed tool item headers before the done-event pass.
+	for _, it := range items {
+		if it.kind == "function_call" && !it.added {
+			if err := ensureToolAdded(it); err != nil {
+				return err
+			}
+		}
 	}
 
 	output := make([]any, 0, len(items))
@@ -457,7 +525,7 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 				"id":        it.id,
 				"type":      "function_call",
 				"call_id":   it.callID,
-				"name":      it.name.String(),
+				"name":      it.name,
 				"arguments": arguments,
 				"status":    "completed",
 			}
@@ -480,16 +548,73 @@ func streamResponses(w http.ResponseWriter, rc io.ReadCloser, meta *responsesMet
 	return writeDone()
 }
 
+// mergeToolCallName folds one upstream name fragment into the accumulated tool
+// name. Upstreams either send the name once, repeat the full name on every
+// frame, or split it across frames; all three must yield the same final name.
+func mergeToolCallName(current, next string) string {
+	switch {
+	case next == "":
+		return current
+	case current == "":
+		return next
+	case next == current:
+		return current
+	case strings.HasPrefix(next, current) && len(next) > len(current):
+		return next
+	case strings.HasPrefix(current, next):
+		return current
+	default:
+		return current + next
+	}
+}
+
+// deltaHasPayload reports whether a delta already carried usable content, so a
+// non-delta message frame in the same chunk is not applied twice.
+func deltaHasPayload(delta map[string]any) bool {
+	if delta == nil {
+		return false
+	}
+	if stringField(delta["content"]) != "" || stringField(delta["reasoning_content"]) != "" {
+		return true
+	}
+	if calls, ok := delta["tool_calls"].([]any); ok && len(calls) > 0 {
+		return true
+	}
+	return false
+}
+
 // responsesStreamError extracts the message/type/code trio from an upstream
-// error value, tolerating both object and string shapes.
+// error value, tolerating string, object, numeric-code and nested data shapes.
 func responsesStreamError(v any) (message, errType, code string) {
 	switch e := v.(type) {
-	case map[string]any:
-		message, _ = e["message"].(string)
-		errType, _ = e["type"].(string)
-		code, _ = e["code"].(string)
 	case string:
 		message = e
+	case map[string]any:
+		message = firstNonEmpty(stringField(e["message"]), stringField(e["msg"]))
+		errType = stringField(e["type"])
+		code = stringField(e["code"])
+		if data, ok := e["data"].(map[string]any); ok {
+			if message == "" {
+				message = firstNonEmpty(stringField(data["message"]), stringField(data["msg"]))
+			}
+			if errType == "" {
+				errType = stringField(data["type"])
+			}
+			if code == "" {
+				code = stringField(data["code"])
+			}
+		}
+		if nested, ok := e["message"].(map[string]any); ok {
+			if message == "" {
+				message = firstNonEmpty(stringField(nested["message"]), stringField(nested["msg"]))
+			}
+			if errType == "" {
+				errType = stringField(nested["type"])
+			}
+			if code == "" {
+				code = stringField(nested["code"])
+			}
+		}
 	}
 	if message == "" {
 		message = "upstream stream failed"
@@ -501,4 +626,32 @@ func responsesStreamError(v any) (message, errType, code string) {
 		code = "upstream_error"
 	}
 	return message, errType, code
+}
+
+// stringField converts string and numeric JSON values to a string; anything
+// else (including objects) yields "".
+func stringField(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(x)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case json.Number:
+		return x.String()
+	default:
+		return ""
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
