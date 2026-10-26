@@ -504,3 +504,74 @@ func TestRepackToolResultBlocksTrailingNoticeIsNoop(t *testing.T) {
 		t.Fatalf("trailing notice should be a no-op: changed=%v out=%#v", changed, out)
 	}
 }
+
+// TestCleanupOrphanEmptyToolName 验证 function.name 为空的 tool_call 被剔除。
+// 上游流式响应在 name 分片到达前异常结束时，聚合器会产出 name:"" 的条目；
+// 带配对结果的脏条目命中 keepCalls 原样出站，被上游判 11133
+// "tool_calls[i].function.name must be a non-empty string"，整条会话报废。
+func TestCleanupOrphanEmptyToolName(t *testing.T) {
+	mkCall := func(id, name string) map[string]any {
+		return map[string]any{
+			"id":   id,
+			"type": "function",
+			"function": map[string]any{
+				"name":      name,
+				"arguments": "{}",
+			},
+		}
+	}
+	mkResult := func(id string) map[string]any {
+		return map[string]any{"role": "tool", "tool_call_id": id, "content": "ok"}
+	}
+	msgs := []any{
+		map[string]any{"role": "assistant", "tool_calls": []any{
+			mkCall("c1", "ok"),
+			mkCall("c2", ""),
+			mkCall("c3", "   "),
+		}},
+		mkResult("c1"),
+		mkResult("c2"),
+		mkResult("c3"),
+	}
+
+	out, changed := cleanupOrphanToolCalls(msgs)
+	if !changed {
+		t.Fatal("want changed=true, got false")
+	}
+	var keptIDs []string
+	for _, m := range out {
+		msg, _ := m.(map[string]any)
+		if tcs, ok := msg["tool_calls"].([]any); ok {
+			for _, tci := range tcs {
+				tc, _ := tci.(map[string]any)
+				id, _ := tc["id"].(string)
+				keptIDs = append(keptIDs, id)
+			}
+		}
+	}
+	if len(keptIDs) != 1 || keptIDs[0] != "c1" {
+		t.Fatalf("want only c1 to survive, got %v", keptIDs)
+	}
+	var resultIDs []string
+	for _, m := range out {
+		msg, _ := m.(map[string]any)
+		if msg["role"] == "tool" {
+			id, _ := msg["tool_call_id"].(string)
+			resultIDs = append(resultIDs, id)
+		}
+	}
+	if len(resultIDs) != 1 || resultIDs[0] != "c1" {
+		t.Fatalf("want only c1's result to survive, got %v", resultIDs)
+	}
+
+	// 缺 function / 缺 name 字段的占位条目不得判脏（上游不因此拒参）。
+	msgs2 := []any{
+		map[string]any{"role": "assistant", "tool_calls": []any{
+			map[string]any{"id": "c9", "type": "function"},
+		}},
+		mkResult("c9"),
+	}
+	if _, changed2 := cleanupOrphanToolCalls(msgs2); changed2 {
+		t.Fatal("placeholder call without function/name must not be treated as dirty")
+	}
+}
