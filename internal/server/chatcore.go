@@ -21,11 +21,12 @@ import (
 )
 
 type ChatExecOptions struct {
-	Body     []byte
-	Stream   bool
-	Protocol string
-	OnError  func(status int, code, msg, hint string)
-	Stat     *chatStat
+	Body      []byte
+	Stream    bool
+	Protocol  string
+	OnError   func(status int, code, msg, hint string)
+	OnAccount func(*auth.Auth)
+	Stat      *chatStat
 }
 
 type ChatExecution struct {
@@ -60,6 +61,7 @@ type preparedChat struct {
 	Stream     bool
 	Protocol   string
 	OnError    func(status int, code, msg, hint string)
+	OnAccount  func(*auth.Auth)
 	Peek       chatPeek
 	Realm      string
 	BareModel  string
@@ -244,6 +246,7 @@ func (h *Handler) prepareChatRequest(r *http.Request, opt ChatExecOptions) (*pre
 		Stream:        opt.Stream,
 		Protocol:      opt.Protocol,
 		OnError:       opt.OnError,
+		OnAccount:     opt.OnAccount,
 		Peek:          peek,
 		Realm:         realm,
 		BareModel:     bareModel,
@@ -811,6 +814,9 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 				break // ctx 取消：终止轮转（分类错误换号退避，WAF P0-2）
 			}
 			continue
+		}
+		if prep.OnAccount != nil {
+			prep.OnAccount(acct)
 		}
 		// 成功判定与粘性绑定一律**延后到调用方真正成功写出之后**：
 		// 上游「200 已开流 + 一帧 error」是真实形态（6004 限流、内容拦截、审核），

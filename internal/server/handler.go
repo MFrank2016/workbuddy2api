@@ -971,6 +971,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		OnError: func(status int, code, msg, hint string) {
 			writeOpenAIErrorHint(w, status, code, msg, hint)
 		},
+		OnAccount: func(a *auth.Auth) { w.Header().Set("X-Wb-Account", a.UID) },
 	})
 	if cerr != nil {
 		st.status = cerr.Status
@@ -1007,7 +1008,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 看到「这次是谁在答」。uid 是十六进制 ASCII，可直接进响应头；昵称可能
 	// 含非 ASCII，不入头（消费方按 uid 自行映射）。此时尚未写任何字节，
 	// 流式（首帧前）与非流式（writeJSON 前）都生效。
-	w.Header().Set("X-Wb-Account", acct.UID)
 	if prep.Stream {
 		// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 		st.status = http.StatusOK
