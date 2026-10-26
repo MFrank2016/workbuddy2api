@@ -46,16 +46,18 @@ func peekChatBody(body []byte) (chatPeek, error) {
 
 // preparedChat 是预检后的协议无关请求上下文。
 type preparedChat struct {
-	Body          []byte
-	Stream        bool
-	Protocol      string
-	OnError       func(status int, code, msg, hint string)
-	Peek          chatPeek
-	Realm         string
-	BareModel     string
-	ModelRate     string
-	Profile       string
-	CrossRealm    bool
+	Body       []byte
+	Stream     bool
+	Protocol   string
+	OnError    func(status int, code, msg, hint string)
+	Peek       chatPeek
+	Realm      string
+	BareModel  string
+	ModelRate  string
+	Profile    string
+	CrossRealm bool
+	// ChatMeta / StickyKey / ReqHasImage / KeyGroups 由 executeChat（Task 4）
+	// 在轮转段填充；prepareChatRequest 不设置它们。
 	ChatMeta      upstream.ChatMeta
 	StickyKey     string
 	DeclaredTools map[string]bool
@@ -65,10 +67,12 @@ type preparedChat struct {
 
 // ChatExecError 是预检阶段产生的协议无关错误。
 type ChatExecError struct {
-	Status int
-	Code   string
-	Msg    string
-	Hint   string
+	Status     int
+	Code       string
+	Msg        string
+	Hint       string
+	ImageCount int
+	MaxImages  int
 }
 
 func (e *ChatExecError) Error() string { return e.Code + ": " + e.Msg }
@@ -184,6 +188,8 @@ func (h *Handler) prepareChatRequest(r *http.Request, opt ChatExecOptions) (*pre
 				Code:   "too_many_images",
 				Msg: fmt.Sprintf("request contains %d images, which exceeds upstream.max_images=%d; reduce the number of images in messages",
 					limitErr.ImageCount, limitErr.MaxImages),
+				ImageCount: limitErr.ImageCount,
+				MaxImages:  limitErr.MaxImages,
 			}
 		}
 		// 其他错误（当前不可达：ApplyImagePolicy 只在超限且 policy=error 时报错）

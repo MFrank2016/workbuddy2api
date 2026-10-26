@@ -975,7 +975,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if cerr != nil {
 		st.status = cerr.Status
 		if cerr.Code == "too_many_images" {
-			writeTooManyImages(w, upstream.CountImages(body), h.loadLive().MaxImages)
+			writeTooManyImages(w, cerr.ImageCount, cerr.MaxImages)
 			return
 		}
 		writeOpenAIErrorHint(w, cerr.Status, cerr.Code, cerr.Msg, cerr.Hint)
