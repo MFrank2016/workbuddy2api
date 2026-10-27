@@ -101,6 +101,74 @@ func TestResponsesEndpointRecordsUsageAndSticky(t *testing.T) {
 	}
 }
 
+func TestResponsesEndpointStreamUsageBookkeeping(t *testing.T) {
+	const sseUsageThenError = "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":1000,\"credit\":2.0}}\n\n" +
+		"data: {\"error\":{\"message\":\"rate limited\",\"type\":\"rate_limit_error\",\"code\":\"6004\"}}\n\n"
+
+	t.Run("success records completion tokens and credit", func(t *testing.T) {
+		resetMetricsForTest(t)
+		up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+			return 200, sseWithCredit, true
+		})
+		p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+		h := NewHandler(Config{Pool: p, Upstream: up})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses",
+			strings.NewReader(`{"model":"glm-5.2","input":"hi","stream":true}`)))
+		if rec.Code != 200 {
+			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+		}
+		snap := MetricsSnapshotOf()
+		if snap.Total.CompletionTokens != 1000 {
+			t.Fatalf("completion_tokens=%d want 1000 (completion-only, not prompt+completion)", snap.Total.CompletionTokens)
+		}
+		if snap.Total.PromptTokens != 1000 {
+			t.Fatalf("prompt_tokens=%d want 1000", snap.Total.PromptTokens)
+		}
+		if snap.Total.Credit != 2.0 {
+			t.Fatalf("credit=%v want 2.0", snap.Total.Credit)
+		}
+		per1k, ok := p.ModelCost("u1", "glm-5.2")
+		if !ok || per1k != 1.0 {
+			t.Fatalf("ModelCost(u1,glm-5.2)=%v ok=%v want 1.0 true", per1k, ok)
+		}
+		used, _, _ := h.budget.snapshot()
+		if used != 2.0 {
+			t.Fatalf("budget used=%v want 2.0", used)
+		}
+	})
+
+	t.Run("failed stream still records credit", func(t *testing.T) {
+		resetMetricsForTest(t)
+		up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+			return 200, sseUsageThenError, true
+		})
+		p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+		h := NewHandler(Config{Pool: p, Upstream: up})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses",
+			strings.NewReader(`{"model":"glm-5.2","input":"hi","stream":true}`)))
+		if rec.Code != 200 {
+			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+		}
+		events, _ := parseResponsesSSE(t, rec.Body.String())
+		responsesFindEvent(t, events, "response.failed")
+		per1k, ok := p.ModelCost("u1", "glm-5.2")
+		if !ok || per1k != 1.0 {
+			t.Fatalf("ModelCost(u1,glm-5.2)=%v ok=%v want 1.0 true", per1k, ok)
+		}
+		used, _, _ := h.budget.snapshot()
+		if used != 2.0 {
+			t.Fatalf("budget used=%v want 2.0", used)
+		}
+		st, _ := p.Status("u1")
+		if st.SuccessCount != 0 {
+			t.Fatalf("failed stream must not mark success, success_count=%d", st.SuccessCount)
+		}
+	})
+}
+
 func TestResponsesEndpointStreamFailureNoDoubleWrite(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 200, "", true

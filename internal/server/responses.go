@@ -105,17 +105,21 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ex.Release()
 
-	markSuccess := func(credit float64, total int, hasCredit bool) {
+	recordCredit := func(credit float64, total int, hasCredit bool) {
+		if !hasCredit {
+			return
+		}
+		st.credit = credit
+		st.hasCredit = true
+		h.cfg.Pool.NoteModelCost(ex.Account.UID, ex.BareModel, credit, total)
+	}
+
+	markSuccess := func() {
 		h.cfg.Pool.NoteSuccess(ex.Account.UID)
 		h.cfg.Pool.ClearModelEntitlement(ex.Realm, ex.BareModel)
 		h.cfg.Pool.BlockModelClear(ex.Account.UID, ex.BareModel)
 		if prep.StickyKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(prep.StickyKey, ex.Account.UID)
-		}
-		if hasCredit {
-			st.credit = credit
-			st.hasCredit = true
-			h.cfg.Pool.NoteModelCost(ex.Account.UID, ex.BareModel, credit, total)
 		}
 	}
 
@@ -133,14 +137,15 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		if st.hasCache {
 			cacheMissWarn.noteCacheTokens(ex.BareModel, int64(st.prompt), int64(st.cacheHit), int64(st.cacheMiss))
 		}
+		recordCredit(credit, stats.TotalTokens(), hasCredit)
 		if streamErr != nil {
 			st.status = http.StatusBadGateway
 			return
 		}
-		if _, hasUsage := stats.Tokens(); hasUsage {
-			st.toks = stats.TotalTokens()
+		if toks, hasUsage := stats.Tokens(); hasUsage {
+			st.toks = toks
 		}
-		markSuccess(credit, stats.TotalTokens(), hasCredit)
+		markSuccess()
 		return
 	}
 
@@ -156,7 +161,8 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		cacheMissWarn.noteCacheTokens(ex.BareModel, int64(st.prompt), int64(st.cacheHit), int64(st.cacheMiss))
 	}
 	st.toks = completionTokens(ex.Aggregated)
-	markSuccess(credit, total, hasCredit)
+	recordCredit(credit, total, hasCredit)
+	markSuccess()
 	writeJSON(w, http.StatusOK, buildResponsesObject(ex.Aggregated, meta))
 	st.status = http.StatusOK
 }
