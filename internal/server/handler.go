@@ -291,6 +291,8 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	h.mux.HandleFunc("POST /responses", h.withAuth(h.responses))
+	h.mux.HandleFunc("POST /v1/messages", h.withAnthropicAuth(h.anthropicMessages))
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAnthropicAuth(h.anthropicCountTokens))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
@@ -494,6 +496,16 @@ func authKeyFrom(ctx context.Context) *AuthKey {
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
+	return h.withAuthWriter(next, writeOpenAIError)
+}
+
+func (h *Handler) withAnthropicAuth(next http.HandlerFunc) http.HandlerFunc {
+	return h.withAuthWriter(next, func(w http.ResponseWriter, status int, code, msg string) {
+		writeAnthropicErrorStatus(w, status, code, msg, "")
+	})
+}
+
+func (h *Handler) withAuthWriter(next http.HandlerFunc, writeErr func(http.ResponseWriter, int, string, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		keys := h.authKeyTable()
 		if len(keys) == 0 {
@@ -508,7 +520,7 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			// 多密钥遍历的时序约束见 matchAuthKey 注释。
 			matched := matchAuthKey(keys, r.Header.Get("Authorization"))
 			if matched == nil {
-				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+				writeErr(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 				return
 			}
 			// 把命中的密钥（含其可见分组）带进上下文，供选号链路取用。
