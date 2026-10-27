@@ -33,11 +33,11 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 - 通过 **OAuth 设备授权**（`login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
-- 对客户端暴露 **OpenAI Chat / Responses 兼容接口**，现有 SDK / 前端 / 工具 **零改造接入**。
+- 对客户端暴露 **OpenAI Chat / Responses 与 Anthropic Messages 兼容接口**，现有 SDK / 前端 / 工具 **零改造接入**。
 
 ### 本项目不做什么
 
-- **以 OpenAI 兼容为主，不追求全协议覆盖** — 本项目核心是 OpenAI Chat + Responses；Anthropic Messages、Gemini 等其他协议仍应由下游网关负责；
+- **以 OpenAI / Anthropic 兼容为主，不追求全协议覆盖** — 本项目核心是 OpenAI Chat + Responses + Anthropic Messages；Gemini 等其他协议仍应由下游网关负责；
 - **内嵌 Web 管理面板（本分支新增）** — 吸收社区项目 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的能力：内置 `/panel/` 管理面板（账号池 / 用量 / 积分构成 / 任务中心 / 模型与档位 / 在线改配置 / 运行日志），与网关同二进制、`go:embed` 内嵌、Bearer 鉴权。
 
 ### 内嵌管理面板（吸收自社区项目）
@@ -118,6 +118,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 - **流式 + 非流式** — 出站强制 `stream:true`；SSE 帧按 OpenAI 规范白名单重建；非流式由本地聚合为单响应
 - **OpenAI Responses API** — `POST /v1/responses`（别名 `/responses`）：支持 `instructions` / `input` item 数组、function / custom / web_search 工具、reasoning 回放、`response.*` 流式事件与 Responses usage；与 Chat 共用同一账号池、选号、重试与错误处置内核
+- **Anthropic Messages API** — `POST /v1/messages`（流式 + 非流式）与 `POST /v1/messages/count_tokens`：支持 system、文本/图片 content block、tool_use / tool_result、thinking、stop_reason 映射与 Anthropic 错误形状；与 `/v1/search/messages`（DSH 搜索壳）并存
 - **DeepSeek 思维链注入** — 出站请求体注入 `thinking.type=enabled` + 默认档位，`reasoning_content` 多轮回填，`reasoning_effort` 按模型档位自动降级
 - **系统提示词三模式**（`prompt.mode`，缺省 `passthrough`） —
   - `passthrough`（缺省）：透传客户端原始 system，遇内容拦截自动降级中性提示词重试
