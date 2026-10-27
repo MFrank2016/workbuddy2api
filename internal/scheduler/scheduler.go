@@ -631,7 +631,10 @@ func checkinHasBusinessCode(msg, want string) bool {
 	return walk(root)
 }
 
-// checkinRetryable 报告签到错误是否属于上游瞬时拒绝（值得退避重试）。
+// checkinRetryable 报告签到错误是否属于上游瞬时拒绝（值得调度层退避重试）。
+//
+// 只认 4xx 业务码 10001：5xx 已由 upstream.DailyCheckin 内部的 retryBillingTransient
+// 重试（最多补打 2 次），调度层再重试会叠成 1+2 次 × 最多 4 轮，放大到 12 次上游请求。
 // 单号手动签到都能成功而批量偶发失败，说明 10001 在这里表达的是"稍后重试"，
 // 而不是账号或参数问题——这类错误直接记 fail 只能等下一轮定时，白白错过当天。
 func checkinRetryable(err error) bool {
@@ -639,14 +642,15 @@ func checkinRetryable(err error) bool {
 	if !errors.As(err, &ue) {
 		return false
 	}
-	if ue.Status >= 500 && ue.Status <= 599 {
-		return true
+	if ue.Status < 400 || ue.Status > 499 {
+		return false
 	}
 	return checkinHasBusinessCode(ue.Msg, "10001")
 }
 
-// dailyCheckinWithRetry 执行签到，遇到上游瞬时失败（HTTP 5xx / code 10001）
+// dailyCheckinWithRetry 执行签到，遇到 4xx 业务码 10001（上游短时限流）
 // 按 checkinRetryDelays 退避重试；ctx 取消立即返回最后一次错误。
+// HTTP 5xx 交给 upstream.DailyCheckin 内部重试，这里不重复放大。
 func (s *Scheduler) dailyCheckinWithRetry(ctx context.Context, a *auth.Auth, label string) error {
 	err := s.cfg.Upstream.DailyCheckin(a)
 	for i, delay := range checkinRetryDelays {
