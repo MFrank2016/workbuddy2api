@@ -178,10 +178,11 @@ func TestRunActivityNowReportsGlobalAccounts(t *testing.T) {
 func TestRunActivityGlobalDoesNotAdoptBuddy(t *testing.T) {
 	fastActivity(t)
 
-	var buddyCalls atomic.Int32
+	var reportCalls, buddyCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v2/report":
+			reportCalls.Add(1)
 			w.Write([]byte(`{"code":0,"msg":"OK"}`))
 		case strings.Contains(r.URL.Path, "/activity/growth/buddy/"):
 			buddyCalls.Add(1)
@@ -195,12 +196,17 @@ func TestRunActivityGlobalDoesNotAdoptBuddy(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
 		Domain: "www.workbuddy.ai"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL,
-		BillingBaseGlobal: srv.URL, GlobalEnabled: true}
+	// ChatBaseGlobal 必须指向 fake server：buddy/streak 走 chatBase(a)，缺省会打到真实
+	// workbuddy.ai——测试会变成「没打到本地服务器也算过」，删掉 gate 也发现不了。
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, ChatBaseGlobal: srv.URL,
+		BillingBaseCN: srv.URL, BillingBaseGlobal: srv.URL, GlobalEnabled: true}
 	s := New(Config{Pool: p, Upstream: up, ActivityReportCount: 1})
 
 	s.RunActivityNow()
 
+	if n := reportCalls.Load(); n != 1 {
+		t.Fatalf("global account report calls=%d want 1（/v2/report 应打到 fake server）", n)
+	}
 	if n := buddyCalls.Load(); n != 0 {
 		t.Errorf("global account buddy calls=%d want 0（国际版没有领养任务）", n)
 	}
