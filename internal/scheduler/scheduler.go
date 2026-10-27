@@ -4,10 +4,12 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -581,6 +583,85 @@ func (s *Scheduler) runCheckin(trigger string) ([]CheckinOutcome, error) {
 	return out, err
 }
 
+// checkinAccountDelay 相邻账号之间的最小间隔（issue #256）。
+//
+// 12 个账号一轮里，3 个国内版的签到请求落在 3 秒窗口内，上游直接回
+// `http 500 {"code":10001,"msg":"签到失败，请稍后重试"}`；同一批账号当天稍后
+// 手动单独点击全部成功，因此不是账号问题而是短时并发被限流。串行 + 固定间隔
+// 把一轮 12 个号摊到 30 秒以上，远低于上游限流窗口。
+// 配置了 account-delay-min/max 的定时遍历会在此基础上再叠加随机抖动（accountGap）。
+// 测试可置 0。
+var checkinAccountDelay = 3 * time.Second
+
+// checkinRetryDelays 签到遇到上游瞬时拒绝时的退避序列（issue #256）。
+//
+// 只对 HTTP 5xx 与业务码 10001 生效；"今天已签到"（同样是 10001）在判定前已按
+// 幂等成功处理，不会走到这里。重试次数 = len(checkinRetryDelays)，全部失败才
+// 记 fail_checkin。测试可置空。
+var checkinRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 60 * time.Second}
+
+// checkinHasBusinessCode 报告上游错误信封（顶层或嵌套）是否带指定业务 code。
+// 与 upstream 内部 hasBusinessCode 同口径；上游未导出该函数，故在调度侧保留一份。
+func checkinHasBusinessCode(msg, want string) bool {
+	var root any
+	if err := json.Unmarshal([]byte(msg), &root); err != nil {
+		return false
+	}
+	var walk func(any) bool
+	walk = func(value any) bool {
+		switch node := value.(type) {
+		case map[string]any:
+			if code, ok := node["code"]; ok && strings.TrimSpace(fmt.Sprint(code)) == want {
+				return true
+			}
+			for _, child := range node {
+				if walk(child) {
+					return true
+				}
+			}
+		case []any:
+			for _, child := range node {
+				if walk(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(root)
+}
+
+// checkinRetryable 报告签到错误是否属于上游瞬时拒绝（值得退避重试）。
+// 单号手动签到都能成功而批量偶发失败，说明 10001 在这里表达的是"稍后重试"，
+// 而不是账号或参数问题——这类错误直接记 fail 只能等下一轮定时，白白错过当天。
+func checkinRetryable(err error) bool {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	if ue.Status >= 500 && ue.Status <= 599 {
+		return true
+	}
+	return checkinHasBusinessCode(ue.Msg, "10001")
+}
+
+// dailyCheckinWithRetry 执行签到，遇到上游瞬时失败（HTTP 5xx / code 10001）
+// 按 checkinRetryDelays 退避重试；ctx 取消立即返回最后一次错误。
+func (s *Scheduler) dailyCheckinWithRetry(ctx context.Context, a *auth.Auth, label string) error {
+	err := s.cfg.Upstream.DailyCheckin(a)
+	for i, delay := range checkinRetryDelays {
+		if err == nil || upstream.IsAlreadyCheckin(err) || !checkinRetryable(err) {
+			return err
+		}
+		log.Printf("checkin %s: %v — %s 后重试(%d/%d)", label, err, delay, i+1, len(checkinRetryDelays))
+		if !sleepCtx(ctx, delay) {
+			return err
+		}
+		err = s.cfg.Upstream.DailyCheckin(a)
+	}
+	return err
+}
+
 // CheckinAll 全量签到：按需刷新 token → daily-checkin → 查余额 → 解冻冷却账号。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
 // 同一时刻只允许一次签到在跑，重复调用返回 ErrBusy（防止手动触发与定时撞车重复打上游）。
@@ -594,10 +675,23 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	defer s.checkinMu.Unlock()
 
 	started := time.Now()
+	// CheckinAll 无外部 ctx（手动/定时入口均同步跑完）：用背景 ctx 承载
+	// 账号间隔与退避重试的取消语义，保持与引入前一致的不可取消行为。
+	ctx := context.Background()
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
-	var okN, alreadyN, inactiveN, failN, skipN int
+	var okN, alreadyN, inactiveN, failCheckinN, failResourceN, skipN int
 	includeDisabled := s.includeDisabledInTasks()
+	first := true
+	// pace 相邻账号之间的间隔：签到与只读余额查询都会打上游，global 账号也要限速。
+	// 返回 false 表示 ctx 已取消。
+	pace := func() bool {
+		if first {
+			first = false
+			return true
+		}
+		return sleepCtx(ctx, s.accountGap(ctx, checkinAccountDelay))
+	}
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled && !includeDisabled {
@@ -632,6 +726,9 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			// 因子对 global 完全失效，选号退化成纯轮询（issue #228）。
 			// UserResourceDetailedWithExpiry 只调 billing/meter 只读接口，
 			// 不碰签到，风控语义与 D4 门控一致。
+			if !pace() {
+				return out, ctx.Err()
+			}
 			if remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, s.ExpiringSoonWindow()); err != nil {
 				log.Printf("user-resource(global) %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			} else {
@@ -641,6 +738,12 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			}
 			out = append(out, oc)
 			continue
+		}
+		if !pace() {
+			return out, ctx.Err()
+		}
+		if ctx.Err() != nil {
+			return out, ctx.Err()
 		}
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
 		if a.NeedsRefresh(checkinRefreshSkew) {
@@ -657,7 +760,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 				// 会让本可成功的签到被白白跳过）；真正过期才判定失败。
 				if a.NeedsRefresh(0) {
 					oc.Status, oc.Detail = CheckinFail, "refresh: "+err.Error()
-					failN++
+					failCheckinN++
 					out = append(out, oc)
 					continue
 				}
@@ -671,9 +774,10 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			}
 		}
 		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
+		// 瞬时失败（HTTP 5xx / 10001）先在原地退避重试，避免错过当天签到。
 		if a.IsEnterprise() {
 			oc.Status = CheckinOK // 企业版无个人签到体系；余额仍走企业口径查询
-		} else if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+		} else if err := s.dailyCheckinWithRetry(ctx, a, logfmt.Label(st.UID, st.Nickname)); err != nil {
 			// 判定顺序 inactive > already > ok：活动未开启/已结束是活动级正常态，
 			// 不是「今天已签到」（不能记成 already，否则账号当天实际没签却显示正常），
 			// 也不是账号故障（不计 fail、不排重试、不喂熔断）。
@@ -700,7 +804,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			oc.Status = CheckinFail
 			oc.Detail = joinDetail(oc.Detail, "resource: "+err.Error())
-			failN++
+			failResourceN++
 			out = append(out, oc)
 			continue
 		}
@@ -717,12 +821,14 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			// 也不进熔断（账号本身健康）。inactiveN 仅用于日志汇总。
 			inactiveN++
 		default:
-			failN++
+			failCheckinN++
 		}
 		out = append(out, oc)
 	}
-	log.Printf("checkin done: total=%d ok=%d already=%d inactive=%d fail=%d skipped=%d",
-		len(statuses), okN, alreadyN, inactiveN, failN, skipN)
+	// fail 保留原有语义（签到 + 余额查询失败合计）供既有解析器/面板统计口径不变；
+	// 末尾追加拆分字段，排障时能直接区分「上游限流」与「账号/余额异常」。
+	log.Printf("checkin done: total=%d ok=%d already=%d inactive=%d fail=%d skipped=%d fail_checkin=%d fail_resource=%d",
+		len(statuses), okN, alreadyN, inactiveN, failCheckinN+failResourceN, skipN, failCheckinN, failResourceN)
 	// 顺带做一次签到活动到期预警（只读探测，不影响签到结果；见 checkin_activity.go）。
 	s.warnCheckinActivity(statuses)
 	// 结果回调（落盘供控制台回放）：手动入口与定时排程共用此处，两条路径口径一致。
