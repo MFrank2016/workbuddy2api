@@ -1,5 +1,7 @@
 package server
 
+import "encoding/json"
+
 func buildResponsesObject(chat map[string]any, meta *responsesMeta) map[string]any {
 	id := "resp_" + randomHex(12)
 	output := []any{}
@@ -17,10 +19,18 @@ func buildResponsesObject(chat map[string]any, meta *responsesMeta) map[string]a
 			})
 		}
 		for _, tc := range toolCalls(msg) {
-			output = append(output, map[string]any{
-				"type": "function_call", "id": "fc_" + randomHex(8), "call_id": tc.ID,
-				"name": tc.Name, "arguments": tc.Arguments, "status": "completed",
-			})
+			switch meta.ToolKinds[tc.Name] {
+			case "custom":
+				output = append(output, map[string]any{
+					"type": "custom_tool_call", "id": "ctc_" + randomHex(8), "call_id": tc.ID,
+					"name": tc.Name, "input": customToolInput(tc.Arguments),
+				})
+			default:
+				output = append(output, map[string]any{
+					"type": "function_call", "id": "fc_" + randomHex(8), "call_id": tc.ID,
+					"name": tc.Name, "arguments": tc.Arguments, "status": "completed",
+				})
+			}
 		}
 	}
 	return map[string]any{
@@ -28,4 +38,14 @@ func buildResponsesObject(chat map[string]any, meta *responsesMeta) map[string]a
 		"status": "completed", "model": meta.Model,
 		"output": output, "usage": responsesUsage(chat["usage"]),
 	}
+}
+
+func customToolInput(arguments string) string {
+	var in struct {
+		Input string `json:"input"`
+	}
+	if json.Unmarshal([]byte(arguments), &in) == nil {
+		return in.Input
+	}
+	return arguments
 }

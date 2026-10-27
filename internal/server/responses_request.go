@@ -95,6 +95,32 @@ func translateResponsesTools(in []responsesTool, meta *responsesMeta) []any {
 				"description": t.Description,
 				"parameters":  t.Parameters,
 			}})
+		case "custom":
+			meta.ToolKinds[t.Name] = "custom"
+			out = append(out, map[string]any{"type": "function", "function": map[string]any{
+				"name":        t.Name,
+				"description": t.Description,
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"input": map[string]any{"type": "string"},
+					},
+					"required": []string{"input"},
+				},
+			}})
+		case "web_search":
+			meta.ToolKinds["web_search"] = "web_search"
+			out = append(out, map[string]any{"type": "function", "function": map[string]any{
+				"name":        "web_search",
+				"description": "Search the web",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{"type": "string"},
+					},
+					"required": []string{"query"},
+				},
+			}})
 		}
 	}
 	return out
