@@ -232,3 +232,107 @@ func TestAnthropicRequestMultipleToolResults(t *testing.T) {
 		t.Fatalf("image url=%v", url["url"])
 	}
 }
+
+func TestAnthropicRequestToolResultsConsecutive(t *testing.T) {
+	raw := `{
+	  "model":"claude-sonnet","max_tokens":16,
+	  "messages":[
+	    {"role":"assistant","content":[
+	      {"type":"tool_use","id":"toolu_1","name":"first","input":{}},
+	      {"type":"tool_use","id":"toolu_2","name":"second","input":{}}
+	    ]},
+	    {"role":"user","content":[
+	      {"type":"tool_result","tool_use_id":"toolu_1","content":[
+	        {"type":"image","source":{"type":"url","url":"https://example.com/first.png"}}
+	      ]},
+	      {"type":"tool_result","tool_use_id":"toolu_2","content":"two"}
+	    ]}
+	  ]
+	}`
+	got, _ := mustAnthropicBody(t, raw)
+	msgs := anthropicMessages(t, got)
+	if len(msgs) != 4 {
+		t.Fatalf("messages=%d want assistant+tool1+tool2+user(image)", len(msgs))
+	}
+	asst := anthropicMessageMap(t, msgs[0])
+	calls, ok := asst["tool_calls"].([]any)
+	if !ok || len(calls) != 2 {
+		t.Fatalf("assistant tool_calls=%v", asst["tool_calls"])
+	}
+	first := anthropicMessageMap(t, msgs[1])
+	if first["role"] != "tool" || first["tool_call_id"] != "toolu_1" {
+		t.Fatalf("first tool msg=%v", first)
+	}
+	second := anthropicMessageMap(t, msgs[2])
+	if second["role"] != "tool" || second["tool_call_id"] != "toolu_2" {
+		t.Fatalf("second tool msg=%v", second)
+	}
+	imageMsg := anthropicMessageMap(t, msgs[3])
+	if imageMsg["role"] != "user" {
+		t.Fatalf("image msg=%v", imageMsg)
+	}
+	parts, ok := imageMsg["content"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("image content=%v", imageMsg["content"])
+	}
+	img := anthropicMessageMap(t, parts[0])
+	if img["type"] != "image_url" {
+		t.Fatalf("image part=%v", img)
+	}
+	url := anthropicMessageMap(t, img["image_url"])
+	if url["url"] != "https://example.com/first.png" {
+		t.Fatalf("image url=%v", url["url"])
+	}
+}
+
+func TestAnthropicRequestToolResultThenText(t *testing.T) {
+	raw := `{
+	  "model":"claude-sonnet","max_tokens":16,
+	  "messages":[{"role":"user","content":[
+	    {"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},
+	    {"type":"text","text":"thanks"}
+	  ]}]
+	}`
+	got, _ := mustAnthropicBody(t, raw)
+	msgs := anthropicMessages(t, got)
+	if len(msgs) != 2 {
+		t.Fatalf("messages=%d want tool+user text", len(msgs))
+	}
+	tool := anthropicMessageMap(t, msgs[0])
+	if tool["role"] != "tool" || tool["tool_call_id"] != "toolu_1" {
+		t.Fatalf("tool msg=%v", tool)
+	}
+	user := anthropicMessageMap(t, msgs[1])
+	if user["role"] != "user" || user["content"] != "thanks" {
+		t.Fatalf("user msg=%v", user)
+	}
+}
+
+func TestAnthropicRequestParallelToolUse(t *testing.T) {
+	raw := `{
+	  "model":"claude-sonnet","max_tokens":16,
+	  "messages":[{"role":"assistant","content":[
+	    {"type":"tool_use","id":"toolu_1","name":"first","input":{"a":1}},
+	    {"type":"tool_use","id":"toolu_2","name":"second","input":{"b":2}}
+	  ]}]
+	}`
+	got, _ := mustAnthropicBody(t, raw)
+	msgs := anthropicMessages(t, got)
+	if len(msgs) != 1 {
+		t.Fatalf("messages=%d want one assistant message", len(msgs))
+	}
+	asst := anthropicMessageMap(t, msgs[0])
+	if asst["role"] != "assistant" {
+		t.Fatalf("assistant msg=%v", asst)
+	}
+	calls, ok := asst["tool_calls"].([]any)
+	if !ok || len(calls) != 2 {
+		t.Fatalf("tool_calls=%v", asst["tool_calls"])
+	}
+	for i, wantID := range []string{"toolu_1", "toolu_2"} {
+		call := anthropicMessageMap(t, calls[i])
+		if call["id"] != wantID {
+			t.Fatalf("call %d id=%v want %s", i, call["id"], wantID)
+		}
+	}
+}

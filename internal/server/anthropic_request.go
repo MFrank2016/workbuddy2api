@@ -162,33 +162,17 @@ func anthropicAssistantMessage(blocks []anthropicContentBlock) map[string]any {
 	return msg
 }
 
-// anthropicUserMessages 收集 user 的 text/image，遇到 tool_result 时先落盘前序内容，
-// 再输出 tool 消息；tool_result 内图片提升为紧随其后的 user 多模态消息。
+// anthropicUserMessages 把 user content 翻译成 Chat 消息。
+//
+// OpenAI 要求同一 assistant 的 tool 消息连续，因此所有 tool_result 先按顺序
+// 输出为连续 tool 消息；tool_result 内图片汇总为一条紧随其后的 user 多模态消息；
+// 其余 user 文本/图片排在最后。无 tool_result 时保持原有形态（纯文本为字符串，
+// 带图时为 parts 数组）。
 func anthropicUserMessages(blocks []anthropicContentBlock) []any {
-	out := []any{}
+	toolMsgs := []any{}
+	toolImages := []any{}
 	parts := []any{}
 	hasImage := false
-
-	flush := func() {
-		if len(parts) == 0 {
-			return
-		}
-		if hasImage {
-			out = append(out, map[string]any{"role": "user", "content": parts})
-		} else {
-			texts := make([]string, 0, len(parts))
-			for _, p := range parts {
-				if pm, ok := p.(map[string]any); ok {
-					if t, _ := pm["text"].(string); t != "" {
-						texts = append(texts, t)
-					}
-				}
-			}
-			out = append(out, map[string]any{"role": "user", "content": strings.Join(texts, "\n")})
-		}
-		parts = nil
-		hasImage = false
-	}
 
 	for _, b := range blocks {
 		switch b.Type {
@@ -202,15 +186,31 @@ func anthropicUserMessages(blocks []anthropicContentBlock) []any {
 				hasImage = true
 			}
 		case "tool_result":
-			flush()
 			text, images := anthropicToolResultContent(b.Content)
-			out = append(out, map[string]any{"role": "tool", "tool_call_id": b.ToolUseID, "content": text})
-			if len(images) > 0 {
-				out = append(out, map[string]any{"role": "user", "content": images})
-			}
+			toolMsgs = append(toolMsgs, map[string]any{"role": "tool", "tool_call_id": b.ToolUseID, "content": text})
+			toolImages = append(toolImages, images...)
 		}
 	}
-	flush()
+
+	out := toolMsgs
+	if len(toolImages) > 0 {
+		out = append(out, map[string]any{"role": "user", "content": toolImages})
+	}
+	if len(parts) > 0 {
+		if hasImage {
+			out = append(out, map[string]any{"role": "user", "content": parts})
+		} else {
+			texts := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if pm, ok := p.(map[string]any); ok {
+					if t, _ := pm["text"].(string); t != "" {
+						texts = append(texts, t)
+					}
+				}
+			}
+			out = append(out, map[string]any{"role": "user", "content": strings.Join(texts, "\n")})
+		}
+	}
 	return out
 }
 
