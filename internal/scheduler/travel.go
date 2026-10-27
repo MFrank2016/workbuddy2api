@@ -200,6 +200,9 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) travelOutcome {
 //
 // 结果不进活跃上报的台账（那是活动上报自己的账），故丢弃返回值。
 func (s *Scheduler) travelAdoptForce(a *auth.Auth) {
+	if a.IsGlobal() {
+		return // D4 门控：国际版任务中心没有 first_buddy / chat_5，不发起领养调用
+	}
 	buddy, err := s.cfg.Upstream.BuddyInfo(a)
 	if err != nil {
 		log.Printf("activity %s: buddy-info: %v", logfmt.Label(a.UID, a.Nickname), err)
