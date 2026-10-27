@@ -271,20 +271,26 @@ func TestMessagesSearchUpstreamErrorShape(t *testing.T) {
 	}
 }
 
-// TestMessagesRouteDoesNotShadowV1Messages 断言搜索端点没有占用 /v1/messages
-// （该路径保留给 Anthropic 模型对话）。
-func TestMessagesRouteDoesNotShadowV1Messages(t *testing.T) {
+// TestV1MessagesIsAnthropicChatRoute 断言 /v1/messages 已由 Anthropic 对话入口接管，
+// 搜索端点仍挂在 /v1/search/messages（见 search 相关测试）。
+func TestV1MessagesIsAnthropicChatRoute(t *testing.T) {
 	up := newMessagesSearchUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Error("不得打上游")
+		t.Error("invalid request must not reach upstream")
 	})
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream: up})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(`{}`)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(`{"messages":"bad"}`)))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("POST /v1/messages code=%d want 404（该路径留给模型对话）", rec.Code)
+	if rec.Code == http.StatusNotFound {
+		t.Fatal("POST /v1/messages must be registered as the Anthropic chat route")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"type":"error"`) {
+		t.Fatalf("want Anthropic error shape, body=%s", rec.Body.String())
 	}
 }
 
