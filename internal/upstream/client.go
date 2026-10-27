@@ -50,6 +50,16 @@ const (
 	// 这是**配置错误**，换多少个号都一样：不罚号、不轮转、不喂熔断，直接失败。
 	// 此前它被当成普通 error 走「网络抖动」分支，一次拼错就能把整池打空并最终 503。
 	ErrRouteConfig
+	// ErrAuthRejected 401 但**不带 12153**：上游网关的拦截页 / 空体 / 纯 HTML 401
+	// （APISIX 常见形态，body 里没有任何业务信封）。
+	//
+	// 为什么不能落 ErrClient：那条路只换号 + 连败降权（10 分钟后自动回池），坏号
+	// 会一直留在池里被反复选中，表现为「面板显示健康、每次命中都 503」。
+	// 为什么不能直接判 ErrSessionDead：chat 路径上的 ErrSessionDead 一次即
+	// Disable（applyErrorPolicy），而纯 401 可能是网关抖动或 token 轮换竞态，
+	// 一次误判就是永久杀号。故单列一类，由 handler 走「连续 N 次才禁用」的计数
+	// 路径（与 12153 的 NoteSessionDead 同口径、共用计数器）。
+	ErrAuthRejected
 )
 
 func (k ErrKind) String() string {
@@ -88,6 +98,8 @@ func (k ErrKind) String() string {
 		return "tool_call_mismatch"
 	case ErrRouteConfig:
 		return "route_config"
+	case ErrAuthRejected:
+		return "auth_rejected"
 	case ErrClient:
 		return "client"
 	default:
@@ -764,6 +776,15 @@ func Classify(status int, body string) ErrKind {
 		}
 		if badParamsRule.hit(body, lower) {
 			return ErrBadParams
+		}
+		// 401 兜底（**无 12153** 的纯 401）：上游网关拦截页、空体、纯 HTML 都落到
+		// 这里。单列 ErrAuthRejected 而不是 ErrClient —— 见该 errkind 的注释：
+		// ErrClient 只换号不罚号，坏号会在池里反复被选中；而这一类的正确处置是
+		// 「连续 N 次后禁用」（handler.applyErrorPolicy 走 NoteAuthFailure）。
+		// 放在具体分类之后：401 若带 11140/11158 等业务码或命中请求级规则，仍走
+		// 原有语义，只有无更具体归类的裸 401 才进入连续计数。
+		if status == http.StatusUnauthorized {
+			return ErrAuthRejected
 		}
 		return ErrClient
 	}
