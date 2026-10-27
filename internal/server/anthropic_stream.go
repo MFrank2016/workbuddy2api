@@ -225,9 +225,11 @@ func streamAnthropic(w http.ResponseWriter, rc io.ReadCloser, meta *anthropicMet
 					b.pendingArgs = append(b.pendingArgs, tc.Arguments)
 				}
 			}
-			// Open once the name is addressable. Name-only fragments keep
-			// accumulating until arguments arrive or the stream finishes.
-			if !b.opened && b.name != "" && (b.args.Len() > 0 || tc.Arguments != "") {
+			// Open only on an argument-only chunk. A chunk that introduces a name
+			// fragment may be part of a split name, so its arguments stay buffered
+			// until the next argument-only chunk or the finish flush supplies the
+			// fully accumulated name.
+			if !b.opened && tc.Name == "" && b.name != "" && b.args.Len() > 0 {
 				if err := openBlock(b); err != nil {
 					return err
 				}

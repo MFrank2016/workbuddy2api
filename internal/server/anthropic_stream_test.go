@@ -270,6 +270,44 @@ func TestAnthropicStreamToolUseSplitNameAtFinish(t *testing.T) {
 	}
 }
 
+func TestAnthropicStreamToolUseSplitNameWithArguments(t *testing.T) {
+	input := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_3","function":{"name":"get_","arguments":""}}]}}]}` + "\n\n" +
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"weather","arguments":"{\"city\""}}]}}]}` + "\n\n" +
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"SF\"}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	events, body, err := runAnthropicStream(t, input, &anthropicMeta{Model: "m"})
+	if err != nil {
+		t.Fatalf("streamAnthropic() error = %v\n%s", err, body)
+	}
+	assertAnthropicSequence(t, events,
+		"message_start",
+		"content_block_start", "content_block_delta", "content_block_delta", "content_block_stop",
+		"message_delta", "message_stop",
+	)
+
+	start := anthropicEventsOf(events, "content_block_start")[0]
+	cb := start["content_block"].(map[string]any)
+	if cb["name"] != "get_weather" {
+		t.Fatalf("content_block_start name = %v, want get_weather", cb["name"])
+	}
+
+	var partial strings.Builder
+	for _, d := range anthropicEventsOf(events, "content_block_delta") {
+		delta := d["delta"].(map[string]any)
+		if delta["type"] != "input_json_delta" {
+			t.Fatalf("delta type = %v", delta["type"])
+		}
+		partial.WriteString(delta["partial_json"].(string))
+	}
+	if partial.String() != `{"city":"SF"}` {
+		t.Fatalf("partial_json = %q", partial.String())
+	}
+	if !json.Valid([]byte(partial.String())) {
+		t.Fatalf("partial_json is not valid JSON: %q", partial.String())
+	}
+}
+
 func TestAnthropicStreamErrorFrame(t *testing.T) {
 	input := `data: {"error":{"message":"boom","type":"upstream_error"}}` + "\n\n" +
 		"data: [DONE]\n\n"
