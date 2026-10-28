@@ -104,18 +104,21 @@ func TestChannelBlockExpires(t *testing.T) {
 	}
 }
 
-// TestIsChannelCheckMatchesPlain11128 issue #296 的现场报文（code 11128）。
-func TestIsChannelCheckMatchesPlain11128(t *testing.T) {
-	body := `{"code":11128,"msg":"request illegal","requestId":"x",` +
-		`"displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client."}}`
+// TestIsChannelCheckBusinessCode issue #296 的现场报文：业务码是**字符串**
+// "11-128"（带连字符），且不依赖 displayTips 的 channel verification 文案。
+func TestIsChannelCheckBusinessCode(t *testing.T) {
+	body := `{"code":"11-128","msg":"request illegal","requestId":"x"}`
+	// 业务码分支必须自己成立：没有 channel verification 标记也能命中。
+	if !isChannelRefused(body) {
+		t.Fatal("code=\"11-128\" + request illegal 必须命中业务码分支")
+	}
 	if !IsChannelCheck(body) {
-		t.Fatal("11128 + channel verification 必须识别为渠道校验")
+		t.Fatal("11-128 业务码必须识别为渠道校验")
 	}
 	// 本地语义：渠道校验是独立分类 ErrChannelRefused（不是 ErrAccountFault），
 	// 这样 handler 不会把它当成 11140 账号级故障去罚号。
 	if got := Classify(400, body); got != ErrChannelRefused {
 		t.Fatalf("11-128 渠道校验应归 ErrChannelRefused，got %v", got)
-		t.Fatalf("11128 渠道校验应归 ErrAccountFault，got %v", got)
 	}
 }
 
@@ -200,5 +203,14 @@ func TestChatStreamGzipFallbackOn415(t *testing.T) {
 	}
 	if !bytes.Equal(bodies[1], decoded) {
 		t.Fatal("重发 body 应等于首发解压后的原文")
+	}
+}
+
+// TestChatPathsNilAccount nil 账号按 CN 处理，且不得因 a.UID 解引用 panic。
+func TestChatPathsNilAccount(t *testing.T) {
+	c := &Client{}
+	got := c.chatPaths(nil)
+	if len(got) != 2 || got[0] != chatCompletionsPath || got[1] != chatConsolePath {
+		t.Fatalf("nil 账号应回 CN 候选 [/v2, /console]，got %v", got)
 	}
 }
