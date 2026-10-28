@@ -127,6 +127,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
   - `prompt.file`（custom/append 生效）指向自定义提示词文件，空 = 内置默认
 - **会话头族注入** — 出站携带官方客户端会话头族（`X-Conversation-Request-ID` 聚合主键 · `X-Conversation-ID` 透传，客户端缺省会话 ID 时用轮级聚合键兜底合成、**该头恒发**（上游渠道校验要求，缺头会被判非官方客户端并拒收，见 #36） · B3 链路），轮转 / 重试 / 路径回退复用同键，后台按对话轮聚合不再碎片化（issue #35）
 - **指纹脱敏** — 出站请求体黑名单指纹字段清洗（可开关），与提示词体系两层叠加
+- **反 11-128 出站兼容** — `identity.enabled`（默认关闭）替换 system/assistant 文本中的客户端身份词（Claude Code / DeepSeek Harness / Codex / ZCode 等），并归一 DSH GUI 环境句；`upstream.request_profile=official`（默认 `legacy`）对 CN 站启用官方桌面头、gzip 与 `deepseek-v4.1-flash` 默认参数，INTL 始终走 legacy
 
 ### 选号语义
 
