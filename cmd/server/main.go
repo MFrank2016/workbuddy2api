@@ -236,6 +236,8 @@ func main() {
 	}
 
 	up := upstream.New()
+	// 出站身份替换（反 11-128）：默认关闭，关闭时逐字透传（零回归）。
+	up.SetIdentity(identityOptionsFrom(cfg.Identity))
 	// 额外根证书（upstream.ca_bundle，企业代理/Clash TLS 解密）：启动期加载，失败即退出。
 	if p := strings.TrimSpace(cfg.Upstream.CABundle); p != "" {
 		if err := up.SetCABundle(p); err != nil {
@@ -720,6 +722,16 @@ func liveSnapshot(c *Config) livecfg.Snapshot {
 	}
 }
 
+// identityOptionsFrom 把 config 的 identity 段映射成 upstream 出站身份替换快照。
+// 启动与热更新共用，避免两处映射漂移。
+func identityOptionsFrom(c IdentityConfig) upstream.IdentityOptions {
+	return upstream.IdentityOptions{
+		Enabled:      c.Enabled,
+		Target:       c.Target,
+		Replacements: c.Replacements,
+	}
+}
+
 // applyIncoming 深合并提交的配置，并返回「确实变了、且必须重启才生效」的字段。
 //
 // **必须在这里做深拷贝**：`mergeConfigMaps` 是**原地深合并**（直接改 cur），
@@ -830,6 +842,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// auth.file_mode 不在其中：它 restart-only，改值只落盘，重启才生效。
 	live.Store(liveSnapshot(newCfg))
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	up.SetIdentity(identityOptionsFrom(newCfg.Identity))
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)

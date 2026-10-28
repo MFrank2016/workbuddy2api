@@ -27,6 +27,8 @@ type ChatExecOptions struct {
 	OnError   func(status int, code, msg, hint string)
 	OnAccount func(*auth.Auth)
 	Stat      *chatStat
+	// RequestProfile 出站兼容 profile 覆盖（空 = 用 livecfg 的 upstream.request_profile）。
+	RequestProfile upstream.RequestProfile
 }
 
 type ChatExecution struct {
@@ -70,12 +72,13 @@ type preparedChat struct {
 	CrossRealm bool
 	// ChatMeta / StickyKey / ReqHasImage / KeyGroups 由 executeChat（Task 4）
 	// 在轮转段填充；prepareChatRequest 不设置它们。
-	ChatMeta      upstream.ChatMeta
-	StickyKey     string
-	DeclaredTools map[string]bool
-	ReqHasImage   bool
-	KeyGroups     []string
-	Stat          *chatStat
+	ChatMeta       upstream.ChatMeta
+	StickyKey      string
+	DeclaredTools  map[string]bool
+	ReqHasImage    bool
+	KeyGroups      []string
+	Stat           *chatStat
+	RequestProfile upstream.RequestProfile
 }
 
 // ChatExecError 是预检阶段产生的协议无关错误。
@@ -241,20 +244,25 @@ func (h *Handler) prepareChatRequest(r *http.Request, opt ChatExecOptions) (*pre
 		}
 	}
 
+	requestProfile := upstream.RequestProfile(h.loadLive().RequestProfile)
+	if opt.RequestProfile != "" {
+		requestProfile = opt.RequestProfile
+	}
 	return &preparedChat{
-		Body:          body,
-		Stream:        opt.Stream,
-		Protocol:      opt.Protocol,
-		OnError:       opt.OnError,
-		OnAccount:     opt.OnAccount,
-		Peek:          peek,
-		Realm:         realm,
-		BareModel:     bareModel,
-		ModelRate:     modelRate,
-		Profile:       profile,
-		CrossRealm:    crossRealm,
-		DeclaredTools: declaredTools,
-		Stat:          opt.Stat,
+		Body:           body,
+		Stream:         opt.Stream,
+		Protocol:       opt.Protocol,
+		OnError:        opt.OnError,
+		OnAccount:      opt.OnAccount,
+		Peek:           peek,
+		Realm:          realm,
+		BareModel:      bareModel,
+		ModelRate:      modelRate,
+		Profile:        profile,
+		RequestProfile: requestProfile,
+		CrossRealm:     crossRealm,
+		DeclaredTools:  declaredTools,
+		Stat:           opt.Stat,
 	}, nil
 }
 
@@ -517,7 +525,7 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 	//       也空走 NewMessageID 请求级（TurnRequestID 空键行为）——轮转内捕获
 	//       一次即共享。
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
-	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
+	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body), RequestProfile: prep.RequestProfile}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
