@@ -885,6 +885,10 @@ type Client struct {
 	// creditObserver 余额查询观察者（见 CreditObserver / SetCreditObserver）。
 	// atomic：启动期挂载、运行期并发读，不参与任何出站决策。
 	creditObserver atomic.Pointer[CreditObserver]
+
+	// identity 出站身份替换快照（见 identity.go）。atomic：热更新与在途请求并发读写，
+	// 同一请求在 prepareBody 阶段取一次快照即可保证中途不混用。
+	identity atomic.Pointer[IdentityOptions]
 }
 
 // CreditObserver 余额查询观察者：每次**真实查到**余额后回调（uid + 余额绝对值）。
