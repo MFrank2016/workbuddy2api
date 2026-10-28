@@ -58,6 +58,15 @@ func ApplyIdentity(body []byte, opt IdentityOptions) []byte {
 	if !opt.Enabled || len(opt.Replacements) == 0 {
 		return body
 	}
+	return applyMessageTextTransform(body, func(text string) string {
+		return ReplaceIdentityText(text, opt)
+	})
+}
+
+// applyMessageTextTransform 遍历 system/assistant/developer 消息的字符串内容与
+// 标准 text block，对每段文本调用 transform。user、tool、reasoning、图片与工具
+// 参数不参与；未发生任何变化时返回原始 body 字节。
+func applyMessageTextTransform(body []byte, transform func(string) string) []byte {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil {
 		return body
@@ -88,7 +97,7 @@ func ApplyIdentity(body []byte, opt IdentityOptions) []byte {
 			continue
 		}
 		if text, ok := decodeJSONString(contentRaw); ok {
-			if next := ReplaceIdentityText(text, opt); next != text {
+			if next := transform(text); next != text {
 				msg["content"] = mustMarshal(next)
 				changed = true
 			}
@@ -119,7 +128,7 @@ func ApplyIdentity(body []byte, opt IdentityOptions) []byte {
 			if !ok || text == "" {
 				continue
 			}
-			if next := ReplaceIdentityText(text, opt); next != text {
+			if next := transform(text); next != text {
 				part["text"] = mustMarshal(next)
 				partsChanged = true
 			}
@@ -187,6 +196,14 @@ func ReplaceIdentityText(text string, opt IdentityOptions) string {
 	sort.SliceStable(reps, func(i, j int) bool {
 		return len(reps[i].key) > len(reps[j].key)
 	})
+	return transformProseLines(text, func(line string) string {
+		return replaceIdentityLine(line, reps, opt.Target)
+	})
+}
+
+// transformProseLines 对每一行非代码文本调用 transform。跳过 fenced code block
+// （```）、行首 4 空格/Tab 的缩进代码行。
+func transformProseLines(text string, transform func(string) string) string {
 	lines := strings.Split(text, "\n")
 	inFence := false
 	for i, line := range lines {
@@ -204,7 +221,7 @@ func ReplaceIdentityText(text string, opt IdentityOptions) string {
 		if strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "    ") {
 			continue
 		}
-		lines[i] = replaceIdentityLine(line, reps, opt.Target)
+		lines[i] = transform(line)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -235,9 +252,9 @@ func replaceLeadingIdentity(line string, reps []identityReplacement, target stri
 	return line
 }
 
-// replaceOutsideInlineCode 逐段处理非 inline code 区域；`...`（任意长度反引号串）
+// transformOutsideInlineCode 逐段处理非 inline code 区域；`...`（任意长度反引号串）
 // 原样保留。未闭合的反引号按普通字符处理。
-func replaceOutsideInlineCode(line string, reps []identityReplacement) string {
+func transformOutsideInlineCode(line string, transform func(string) string) string {
 	var b strings.Builder
 	for i := 0; i < len(line); {
 		if line[i] == '`' {
@@ -257,16 +274,22 @@ func replaceOutsideInlineCode(line string, reps []identityReplacement) string {
 		}
 		j := strings.IndexByte(line[i:], '`')
 		if j < 0 {
-			b.WriteString(wholeWordReplace(line[i:], reps))
+			b.WriteString(transform(line[i:]))
 			break
 		}
 		if j == 0 {
 			continue
 		}
-		b.WriteString(wholeWordReplace(line[i:i+j], reps))
+		b.WriteString(transform(line[i : i+j]))
 		i += j
 	}
 	return b.String()
+}
+
+func replaceOutsideInlineCode(line string, reps []identityReplacement) string {
+	return transformOutsideInlineCode(line, func(s string) string {
+		return wholeWordReplace(s, reps)
+	})
 }
 
 func findBacktickRun(s string, from, n int) int {
