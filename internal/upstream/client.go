@@ -1627,13 +1627,18 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 // cn → [/v2, /console]（/v2 优先，/console 兜底渠道校验），被渠道校验拦过的
 // 账号把 /console 提到首位（issue #296 的路径记忆），TTL 到期自动回落。
 func (c *Client) chatPaths(a *auth.Auth) []string {
-	if a == nil || !a.IsGlobal() {
-		if c.channelBlockedFor(a.UID) {
-			return []string{chatConsolePath, chatCompletionsPath}
-		}
+	// nil 账号按 CN 处理（测试/防御路径）：必须在 a.IsGlobal()/a.UID 之前分流，
+	// 否则 nil 会在后面解引用 panic。
+	if a == nil {
 		return []string{chatCompletionsPath, chatConsolePath}
 	}
-	return []string{chatCompletionsPath}
+	if a.IsGlobal() {
+		return []string{chatCompletionsPath}
+	}
+	if c.channelBlockedFor(a.UID) {
+		return []string{chatConsolePath, chatCompletionsPath}
+	}
+	return []string{chatCompletionsPath, chatConsolePath}
 }
 
 // gzipBodyThreshold chat 请求体超过这个大小才压缩（issue #297）。
