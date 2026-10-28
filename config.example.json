@@ -4,6 +4,17 @@
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "dns_servers": [],
+  "identity": {
+    "enabled": false,
+    "target": "WorkBuddy",
+    "replacements": {
+      "Claude Code": "WorkBuddy",
+      "Claude": "WorkBuddy",
+      "DeepSeek Harness": "WorkBuddy",
+      "Codex": "WorkBuddy",
+      "ZCode": "WorkBuddy"
+    }
+  },
   "cooldown": {
     "soft_rate": "600s",
     "soft_rate_max": "2h"
@@ -108,6 +119,7 @@
     "file_mode": ""
   },
   "upstream": {
+    "request_profile": "legacy",
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,

@@ -42,6 +42,15 @@ type APIKeyEntry struct {
 	Profiles []string `json:"profiles"`
 }
 
+// IdentityConfig 出站身份替换（反 11-128）：只作用于 system/assistant 的标准
+// text block，绝不改 user 正文、tool 参数/结果、reasoning、图片与代码块。
+// 默认关闭；Target 为空回落 WorkBuddy，Replacements 为 nil 时填默认映射。
+type IdentityConfig struct {
+	Enabled      bool              `json:"enabled"`
+	Target       string            `json:"target"`
+	Replacements map[string]string `json:"replacements"`
+}
+
 // Config 顶层配置。
 type Config struct {
 	Listen    string `json:"listen"`     // ":7863"
@@ -70,6 +79,9 @@ type Config struct {
 	// 当前 key」的别名表。一旦写进去，密钥在入口就被 nginx 改写成主密钥，分组身份当场
 	// 丢失，表现为"分组密钥能拿到全部账号"——隔离静默失效，且从网关日志上完全看不出来。
 	APIKeys []APIKeyEntry `json:"api_keys"`
+
+	// Identity 出站身份替换配置（默认关闭，行为与迁移前逐字一致）。
+	Identity IdentityConfig `json:"identity"`
 
 	Server struct {
 		// ReadTimeout 入站请求读取（含 body 上传）总时长上限（issue #100，吸收自 panel）。
@@ -292,6 +304,9 @@ type Config struct {
 		// CapabilityGuard 能力预检开关。默认 false：不向上游预检模型能力，
 		// 请求原样转发（与迁移前逐字一致）。开启后由后续 todo 的预检实现消费。
 		CapabilityGuard bool `json:"capability_guard"`
+		// RequestProfile 出站请求兼容 profile：legacy（默认，逐字透传）/ official
+		// （桌面头 + gzip + body 默认值，仅 CN 站生效）。热更只影响后续请求。
+		RequestProfile string `json:"request_profile"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -427,6 +442,22 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 }
 
+// DefaultIdentity 返回 identity 段的默认值：默认关闭，目标 WorkBuddy，
+// 常见客户端身份词全部替换为 WorkBuddy。每次调用返回独立 map，避免共享可变状态。
+func DefaultIdentity() IdentityConfig {
+	return IdentityConfig{
+		Enabled: false,
+		Target:  "WorkBuddy",
+		Replacements: map[string]string{
+			"Claude Code":      "WorkBuddy",
+			"Claude":           "WorkBuddy",
+			"DeepSeek Harness": "WorkBuddy",
+			"Codex":            "WorkBuddy",
+			"ZCode":            "WorkBuddy",
+		},
+	}
+}
+
 // Default 默认配置。
 func Default() *Config {
 	c := &Config{
@@ -435,6 +466,9 @@ func Default() *Config {
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
 	}
+	// identity 默认关闭 + 目标 WorkBuddy；request_profile 默认 legacy（零回归）。
+	c.Identity = DefaultIdentity()
+	c.Upstream.RequestProfile = "legacy"
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	// 排程段默认值由 internal/config 集中维护（cmd/server 与 cmd/activity 共用，
@@ -1090,7 +1124,37 @@ func (c *Config) normalize() error {
 	if err := c.normalizeTools(); err != nil {
 		return err
 	}
+	// identity / request_profile 归一与校验（热更字段）。
+	if err := c.normalizeIdentity(); err != nil {
+		return err
+	}
+
 	return c.normalizePrompt()
+}
+
+// normalizeIdentity 归一并校验 identity 段与 upstream.request_profile。
+//
+// 默认值语义：Target 为空回落 WorkBuddy；Replacements 为 nil 时填默认映射
+// （显式空 map 保留 = 关闭全部替换）；RequestProfile 空回落 legacy，其余只接受
+// legacy / official，非法值 fail-fast（静默回落会让运维以为 official 已生效）。
+func (c *Config) normalizeIdentity() error {
+	if target := strings.TrimSpace(c.Identity.Target); target == "" {
+		c.Identity.Target = "WorkBuddy"
+	} else {
+		c.Identity.Target = target
+	}
+	if c.Identity.Replacements == nil {
+		c.Identity.Replacements = DefaultIdentity().Replacements
+	}
+	switch p := strings.ToLower(strings.TrimSpace(c.Upstream.RequestProfile)); p {
+	case "":
+		c.Upstream.RequestProfile = "legacy"
+	case "legacy", "official":
+		c.Upstream.RequestProfile = p
+	default:
+		return fmt.Errorf("upstream.request_profile: %q 不是合法值（legacy / official）", c.Upstream.RequestProfile)
+	}
+	return nil
 }
 
 // normalizeTools 归一并校验图片/能力门禁与工具端点段，以及 auth.file_mode。

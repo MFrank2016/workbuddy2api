@@ -31,6 +31,12 @@ type Snapshot struct {
 	// HiddenModels 精确隐藏的模型 id（已归一化为 "cn:x"/"global:x"）；nil = 不隐藏。
 	HiddenModels map[string]struct{}
 
+	// —— 反 11-128 出站兼容（Task 1）：随面板保存热生效，在途请求不受影响。 ——
+	RequestProfile       string            // upstream.request_profile；legacy（默认）/ official
+	IdentityEnabled      bool              // identity.enabled；false = 不替换
+	IdentityTarget       string            // identity.target；空由配置层回落 WorkBuddy
+	IdentityReplacements map[string]string // identity.replacements；nil = 不替换
+
 	// auth.file_mode **不在此处**：它是 restart-only（改值需重启进程），
 	// 放进快照会让面板保存当场改变新建 auth 文件的权限，与承诺相反。
 	// 它的接线在 cmd/server 启动期的 applyAuthFileMode。

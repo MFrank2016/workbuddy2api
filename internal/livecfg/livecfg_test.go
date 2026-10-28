@@ -51,3 +51,24 @@ func TestNormalizeHiddenModels(t *testing.T) {
 		}
 	}
 }
+
+// TestLiveSnapshotIdentityAndProfileFields 锁定 Task 1 新增的快照字段可经
+// Store/Load 原样读出（映射由 cmd/server.liveSnapshot 负责）。
+func TestLiveSnapshotIdentityAndProfileFields(t *testing.T) {
+	s := Snapshot{
+		RequestProfile:       "official",
+		IdentityEnabled:      true,
+		IdentityTarget:       "WorkBuddy",
+		IdentityReplacements: map[string]string{"Claude": "WorkBuddy"},
+	}
+	got := New(s).Load()
+	if got.RequestProfile != "official" {
+		t.Errorf("RequestProfile=%q, want official", got.RequestProfile)
+	}
+	if !got.IdentityEnabled || got.IdentityTarget != "WorkBuddy" {
+		t.Errorf("identity fields lost: %+v", got)
+	}
+	if got.IdentityReplacements["Claude"] != "WorkBuddy" {
+		t.Errorf("IdentityReplacements=%v", got.IdentityReplacements)
+	}
+}

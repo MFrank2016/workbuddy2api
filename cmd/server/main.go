@@ -713,6 +713,10 @@ func liveSnapshot(c *Config) livecfg.Snapshot {
 		SearchEnabled:        c.Search.Enabled,
 		MCPEnabled:           c.MCP.Enabled,
 		HiddenModels:         livecfg.NormalizeHiddenModels(c.Models.Hidden),
+		RequestProfile:       c.Upstream.RequestProfile,
+		IdentityEnabled:      c.Identity.Enabled,
+		IdentityTarget:       c.Identity.Target,
+		IdentityReplacements: c.Identity.Replacements,
 	}
 }
 

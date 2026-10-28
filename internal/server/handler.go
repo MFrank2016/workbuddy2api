@@ -108,6 +108,9 @@ type Config struct {
 	CapabilityGuard bool   // upstream.capability_guard
 	SearchEnabled   bool   // search.enabled
 	MCPEnabled      bool   // mcp.enabled
+	// RequestProfile 出站请求兼容 profile（upstream.request_profile）：legacy / official。
+	// 经 livecfg 热生效；Live 为 nil 时由 loadLive 回落本字段。
+	RequestProfile string
 
 	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
 	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
@@ -405,6 +408,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		CapabilityGuard: h.cfg.CapabilityGuard,
 		SearchEnabled:   h.cfg.SearchEnabled,
 		MCPEnabled:      h.cfg.MCPEnabled,
+		RequestProfile:  h.cfg.RequestProfile,
 		HiddenModels:    livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
 	}
 }
