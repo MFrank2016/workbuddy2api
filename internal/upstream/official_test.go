@@ -173,6 +173,31 @@ func TestOfficialHeadersOtherPathNoop(t *testing.T) {
 	}
 }
 
+func TestOfficialHeadersIntlProfileNoop(t *testing.T) {
+	c := &Client{ProfilesEnabled: true, ProfilesDetectOnly: false, GlobalEnabled: true}
+	a := &auth.Auth{AccessToken: "at", UID: "u1", Domain: "copilot.tencent.com", Profile: "intl-cli"}
+	req := httptest.NewRequest(http.MethodPost, "https://copilot.tencent.com/v2/chat/completions", nil)
+	req.Header.Set("User-Agent", "legacy-ua")
+
+	c.applyOfficialHeaders(req, a)
+
+	if got := req.Header.Get("User-Agent"); got != "legacy-ua" {
+		t.Errorf("intl profile on CN host must stay legacy, UA=%q", got)
+	}
+}
+
+func TestOfficialHeadersPathPrefixStillApplies(t *testing.T) {
+	c := &Client{}
+	a := &auth.Auth{AccessToken: "at", UID: "u1", Domain: "copilot.tencent.com"}
+	req := httptest.NewRequest(http.MethodPost, "https://copilot.tencent.com/prefix/v2/chat/completions", nil)
+
+	c.applyOfficialHeaders(req, a)
+
+	if got := req.Header.Get("X-Product"); got != "SaaS" {
+		t.Errorf("prefixed chat path should still get official headers, X-Product=%q", got)
+	}
+}
+
 func TestOfficialGzipBytesRoundTrip(t *testing.T) {
 	in := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}`)
 	out, err := gzipBytes(in)

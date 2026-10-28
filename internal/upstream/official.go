@@ -106,10 +106,10 @@ var officialHeaders = [][2]string{
 // applyOfficialHeaders 在 CN 站 POST /v2/chat/completions 上应用 official 头组。
 // 非 CN 或非该路径直接 no-op（INTL 保持 legacy）。
 func (c *Client) applyOfficialHeaders(req *http.Request, a *auth.Auth) {
-	if req == nil || a == nil || a.Realm() != "cn" {
+	if req == nil || a == nil || a.Realm() != "cn" || c.intlEndpoint(a) {
 		return
 	}
-	if req.Method != http.MethodPost || req.URL == nil || req.URL.Path != officialChatPath {
+	if req.Method != http.MethodPost || req.URL == nil || !strings.HasSuffix(req.URL.Path, officialChatPath) {
 		return
 	}
 	for _, name := range legacyOfficialHeaders {
