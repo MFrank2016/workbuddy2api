@@ -278,6 +278,8 @@ func main() {
 	// 用量归属头（X-Product/X-IDE-*）+ 客户端 IP 透传开关（见 ChatHeaders / handler）。
 	up.ClientName = cfg.Upstream.ClientName
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	// 大请求体 gzip（issue #297）：>64KB 才压，短请求零开销。
+	up.GzipBody = cfg.Upstream.GzipBody
 	// global realm 双域路由（config global 段）：base 空回落内置默认 https://www.workbuddy.ai；
 	// GlobalEnabled 与 auth 包开关一致（双保险第二道闸在 upstream.globalOn）。
 	up.ChatBaseGlobal = cfg.Global.ChatBase
@@ -683,7 +685,7 @@ func balanceIntervalFor(c *Config) time.Duration {
 var restartRequiredPaths = []string{
 	"listen", "auth_dir", "state_file", "server.read_timeout", "server.max_body_mb",
 	"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
-	"upstream.user_agent",
+	"upstream.user_agent", "upstream.gzip_body",
 	"upstash", "session_sticky.ttl", "session_sticky.gc_interval",
 	"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
 	"panel.password_hash", "panel.session_hours",

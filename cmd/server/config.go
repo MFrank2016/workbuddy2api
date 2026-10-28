@@ -259,6 +259,9 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP（X-Forwarded-For/X-Real-IP 首段）给上游。
 		// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）；true 才透传。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// GzipBody chat 请求体超过阈值时用 gzip 压缩后再发上游（issue #297）。
+		// 缺省 false（保守：短请求零开销，排障时也不会多一层编码）；true 才压缩。
+		GzipBody bool `json:"gzip_body"`
 		// CABundle 额外根证书 PEM 文件路径（企业代理/Clash TLS 解密场景）：在系统
 		// 根证书之外追加，不关闭证书校验。空 = 不加载。
 		CABundle string `json:"ca_bundle"`
@@ -612,6 +615,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.PassthroughIP = b
+		}
+	}
+	if v := os.Getenv("WB2A_GZIP_BODY"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.GzipBody = b
 		}
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
