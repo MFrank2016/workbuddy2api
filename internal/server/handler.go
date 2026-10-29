@@ -1154,7 +1154,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.Disable(uid, "12153 session dead")
 		if h.cfg.DeleteOnAuthFailure {
 			if a := h.cfg.Pool.AuthByUID(uid); a != nil {
-				if keep, note := h.cfg.Upstream.CredentialStillUsable(context.Background(), a); !keep {
+				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+				keep, note := h.cfg.Upstream.CredentialStillUsable(ctx, a)
+				cancel()
+				if !keep {
 					if a.FilePath != "" {
 						_ = os.Remove(a.FilePath)
 					}
