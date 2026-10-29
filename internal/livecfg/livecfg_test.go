@@ -1,6 +1,9 @@
 package livecfg
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestNormalizeHiddenModels 归一化语义：
 //   - nil/空/全空白 → nil（不隐藏）
@@ -70,5 +73,18 @@ func TestLiveSnapshotIdentityAndProfileFields(t *testing.T) {
 	}
 	if got.IdentityReplacements["Claude"] != "WorkBuddy" {
 		t.Errorf("IdentityReplacements=%v", got.IdentityReplacements)
+	}
+}
+
+// TestLiveSnapshotStreamResilienceRoundTrip 锁定 Task 6 新增的两个流式韧性
+// 字段能经 Store/Load 原样读出（映射由 cmd/server.liveSnapshot 负责）。
+func TestLiveSnapshotStreamResilienceRoundTrip(t *testing.T) {
+	s := Snapshot{StreamKeepalive: 7 * time.Second, FirstByteRetry: false}
+	got := New(s).Load()
+	if got.StreamKeepalive != 7*time.Second {
+		t.Errorf("StreamKeepalive=%v want 7s", got.StreamKeepalive)
+	}
+	if got.FirstByteRetry {
+		t.Errorf("FirstByteRetry=%v want false", got.FirstByteRetry)
 	}
 }

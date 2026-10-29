@@ -37,6 +37,10 @@ type Snapshot struct {
 	IdentityTarget       string            // identity.target；空由配置层回落 WorkBuddy
 	IdentityReplacements map[string]string // identity.replacements；nil = 不替换
 
+	// —— 流式韧性（Task 6）：随面板保存热生效，在途请求读各自快照。 ——
+	StreamKeepalive time.Duration // 首字节前 SSE 注释心跳周期；0 = 关闭
+	FirstByteRetry  bool          // 首字节前传输层失败时同账号重开一次
+
 	// auth.file_mode **不在此处**：它是 restart-only（改值需重启进程），
 	// 放进快照会让面板保存当场改变新建 auth 文件的权限，与承诺相反。
 	// 它的接线在 cmd/server 启动期的 applyAuthFileMode。

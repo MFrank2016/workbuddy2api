@@ -70,6 +70,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 | `server.read_timeout` | `"300s"` | 入站请求读取上限（issue #100）；`"0"` = 不限制 |
 | `server.max_body_mb` | `16` | 单请求体上限（MB）；`0` = 不限制，超限 413 |
 | `upstream.model_aliases` | `{}` | 模型重定向（后缀 `*` 通配）：如把桌面端后台任务模型改写到免费模型；空 = 不启用 |
+| `upstream.stream_keepalive_seconds` | `15` | 首字节前 SSE 注释心跳周期（秒）；`0` = 关闭 |
+| `upstream.first_byte_retry` | `true` | 首字节前传输层失败时同账号重开一次；`false` = 关闭 |
 | `panel.password_hash` / `panel.session_hours` | `""` / `24` | 面板独立密码（PBKDF2 摘要，`wb2api -hash-password '<pw>'` 生成）；空 = 仅 API Key |
 | `upstream.ca_bundle` / `upstream.cn_chat_base` | `""` / `""` | 额外根证书 PEM（TLS 解密代理）/ 国内上游地址覆盖（如 `https://www.workbuddy.cn`） |
 | `api_keys[].models` / `api_keys[].realm` | 空 | 密钥级模型白名单（`*` 通配）与域绑定；不匹配本地 400 |
@@ -104,6 +106,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 - **当日积分预算闸**（`budget.daily_credit_limit`，缺省 `0` = 不限）— 给「跑飞的客户端 / 忘了关的脚本」装一道钱闸：当日累计扣费达到上限后，网关直接拒掉后续对话请求（`429` + `daily_budget_exceeded`，错误文案带上已用与上限），把积分损失截断在阈值附近。计数按 **CST 自然日**重置（与上游增长体系同口径），进程内不落盘、重启清零。只统计上游 `usage` 给出 `credit` 的请求（缺观测不计入，与成本账本同一纪律），所以当日用量是一个**下界**、真实日耗只会更多——阈值宜按保守值设；也可以先留 `0` 当观察模式跑几天，看 `/status` 里 `daily_budget.used` 的真实日耗再定值。闸在**读请求体之前**判定（被拒的请求不会被白读进内存），且**不改变选号**——它只决定「这一枪开不开」，不做「换便宜号」的降级。实时台账（当日已用 / 上限 / 当日被拒次数 / 归属日）在 `/status` 的 `daily_budget`
 - **账号临时停用 / 恢复** — 运维可把某个号临时摘出选号池、观察后再放回，不必删凭证（issue #138/#118）。语义是「对话流量摘除」而非「账号冻结」：停用期间签到、token 保活、排程任务照常执行，账号仍在池里、状态照常透出。与系统自动禁用是**两个独立状态位**（`manual_disabled` / `disabled`），各自清除、都清空才回到选号池——避免运维意图被签到解冻等自动复活路径意外解除；停用状态随池状态落盘，重启保留。入口：`/admin/accounts/{uid}/{disable,enable,revive}` 端点 + `cmd/acct` CLI（默认关闭，`admin.enabled` 显式开启）
 - **上游同号瞬时重试**（`upstream.retry_*`，缺省关闭）— 开启后聊天 SSE 对**仅 5xx 与传输层失败**按 `retry_attempts`（默认 1，钳 [1,5]）次同账号重试，指数退避（基数 `retry_backoff` 默认 0.5s，封顶 8s + ±25% 抖动）。429/402/401/403 等**永不重试**——配额重试只会更快被限、凭据问题重试不会变得有权限。默认关闭（重试放大上游压力）；重试耗尽后回到既有换号轮转
+- **流式首字节心跳与重放**（`upstream.stream_keepalive_seconds` / `upstream.first_byte_retry`，缺省 `15` / `true`）— 上游首字节前的静默期最容易撞边缘节点 RST/EOF：网关按周期发送 SSE 注释心跳（`0` = 关闭），并仅在**客户端尚未收到任何有效内容 + 传输层瞬时错误**时同账号重开一次（客户端已收到内容或主动取消后绝不重放，最多一次）。两项都随面板保存热生效；同时关闭时 SSE 字节与旧行为一致。
 - **账号级流量整形**（`pool.weight_default` / `pool.max_concurrency_default` / `pool.min_interval_default`，全部缺省 0 = 不限）— 每个账号可在 auth 文件写 `weight`（选号权重乘子，显式 `0` = 只读备用不参与轮转，缺省回落池级默认 1.0）、`max_concurrency`（单号并发上限，优先于 `max_in_flight` 分档）、`min_interval`（两次请求最小间隔秒）。三者都在选号时软生效：全被限住时回落 LRU 兜底，不报「暂无可用账号」
 - **全池并发闸**（`pool.max_total_concurrency`，缺省 0 = 不限）— 单号并发上限治不了「每号都没超、整体太猛」：20 号 × 3 并发 = 60 同时在途。顶满时本次选号回 503，请求排队而非失败
 - **状态持久化** — 池状态（积分 / 冷却 / 熔断 / 计数）本地原子落盘 `state.json`，可选镜像至 Upstash Redis，重启后择优恢复

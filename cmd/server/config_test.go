@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefault(t *testing.T) {
@@ -906,5 +907,88 @@ func TestLiveSnapshotIdentityAndProfile(t *testing.T) {
 	}
 	if got := s.IdentityReplacements["Claude"]; got != "Target" {
 		t.Errorf("replacements not mapped: %+v", s.IdentityReplacements)
+	}
+}
+
+func TestConfigStreamKeepaliveDefaults(t *testing.T) {
+	c := Default()
+	if c.Upstream.StreamKeepaliveSeconds != 15 {
+		t.Fatalf("stream_keepalive_seconds=%d want 15", c.Upstream.StreamKeepaliveSeconds)
+	}
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Upstream.StreamKeepaliveSeconds != 15 {
+		t.Fatalf("normalize changed keepalive to %d", c.Upstream.StreamKeepaliveSeconds)
+	}
+}
+
+func TestConfigStreamKeepaliveZeroDisables(t *testing.T) {
+	c := Default()
+	c.Upstream.StreamKeepaliveSeconds = 0
+	if err := c.normalize(); err != nil {
+		t.Fatalf("0 must be a valid disable value: %v", err)
+	}
+	if c.Upstream.StreamKeepaliveSeconds != 0 {
+		t.Fatalf("0 was rewritten to %d", c.Upstream.StreamKeepaliveSeconds)
+	}
+}
+
+func TestConfigStreamKeepaliveNegativeRejected(t *testing.T) {
+	c := Default()
+	c.Upstream.StreamKeepaliveSeconds = -1
+	if err := c.normalize(); err == nil {
+		t.Fatal("want error for negative stream_keepalive_seconds")
+	}
+}
+
+func TestConfigFirstByteRetryNilDefaultsTrue(t *testing.T) {
+	c := Default()
+	c.Upstream.FirstByteRetry = nil
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if !c.firstByteRetryEnabled() {
+		t.Fatal("nil first_byte_retry must default to true")
+	}
+	if c.Upstream.FirstByteRetry == nil || !*c.Upstream.FirstByteRetry {
+		t.Fatalf("nil not materialized to true: %v", c.Upstream.FirstByteRetry)
+	}
+}
+
+func TestConfigFirstByteRetryExplicitFalse(t *testing.T) {
+	c := Default()
+	c.Upstream.FirstByteRetry = boolPtr(false)
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.firstByteRetryEnabled() {
+		t.Fatal("explicit false must disable first-byte retry")
+	}
+}
+
+func TestConfigStreamResilienceParsedFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"upstream":{"stream_keepalive_seconds":0,"first_byte_retry":false}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.StreamKeepaliveSeconds != 0 || c.firstByteRetryEnabled() {
+		t.Fatalf("explicit disable not parsed: keepalive=%d retry=%v", c.Upstream.StreamKeepaliveSeconds, c.firstByteRetryEnabled())
+	}
+}
+
+func TestLiveSnapshotStreamResilience(t *testing.T) {
+	c := Default()
+	c.Upstream.StreamKeepaliveSeconds = 7
+	c.Upstream.FirstByteRetry = boolPtr(false)
+	s := liveSnapshot(c)
+	if s.StreamKeepalive != 7*time.Second {
+		t.Errorf("StreamKeepalive=%v want 7s", s.StreamKeepalive)
+	}
+	if s.FirstByteRetry {
+		t.Errorf("FirstByteRetry=%v want false", s.FirstByteRetry)
 	}
 }

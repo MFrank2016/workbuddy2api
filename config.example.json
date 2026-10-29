@@ -136,6 +136,8 @@
     "retry_enabled": false,
     "retry_attempts": 1,
     "retry_backoff": 0.5,
+    "stream_keepalive_seconds": 15,
+    "first_byte_retry": true,
     "max_images": 0,
     "image_policy": "passthrough",
     "capability_guard": false

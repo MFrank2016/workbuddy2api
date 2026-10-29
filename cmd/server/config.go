@@ -307,6 +307,12 @@ type Config struct {
 		// RequestProfile 出站请求兼容 profile：legacy（默认，逐字透传）/ official
 		// （桌面头 + gzip + body 默认值，仅 CN 站生效）。热更只影响后续请求。
 		RequestProfile string `json:"request_profile"`
+		// StreamKeepaliveSeconds 首字节前 SSE 注释心跳周期（秒）。默认 15；0 关闭；
+		// 负数在 normalize 报错（无合理语义，且不能静默当成关闭）。
+		StreamKeepaliveSeconds int `json:"stream_keepalive_seconds"`
+		// FirstByteRetry 首字节前传输层失败时同账号重开一次。nil（未配置）= 默认
+		// 开启；显式 false 关闭。用指针是为了区分「没写」与「写了 false」。
+		FirstByteRetry *bool `json:"first_byte_retry"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -534,6 +540,10 @@ func Default() *Config {
 	c.Upstream.RetryEnabled = false
 	c.Upstream.RetryAttempts = 1
 	c.Upstream.RetryBackoff = 0.5
+	// 流式韧性默认：首字节前 15s 注释心跳 + 首字节失败重放一次（零回归由
+	// 关闭两项实现：stream_keepalive_seconds=0 / first_byte_retry=false）。
+	c.Upstream.StreamKeepaliveSeconds = 15
+	c.Upstream.FirstByteRetry = boolPtr(true)
 	// 账号级流量整形默认 = 无此功能（weight=1.0 等价纯三因子；限额 0 = 不限）。
 	c.Pool.WeightDefault = 1.0
 	c.Pool.MaxConcurrencyDefault = 0
@@ -570,6 +580,14 @@ func Default() *Config {
 	// auth.file_mode 默认空 = 保持现状 0600（不设进程级覆盖）。
 	c.Auth.FileMode = ""
 	return c
+}
+
+// boolPtr 返回 v 的指针（配置里可区分「未配置」与「显式 false」）。
+func boolPtr(v bool) *bool { return &v }
+
+// firstByteRetryEnabled 返回 first_byte_retry 的生效值：nil = 未配置 → true。
+func (c *Config) firstByteRetryEnabled() bool {
+	return c.Upstream.FirstByteRetry == nil || *c.Upstream.FirstByteRetry
 }
 
 // Load 从文件读，再用 WB2A_* env 覆盖。
@@ -1040,6 +1058,14 @@ func (c *Config) normalize() error {
 		if c.Upstream.RetryBackoff > 8 {
 			c.Upstream.RetryBackoff = 8
 		}
+	}
+	// 流式韧性归一：心跳周期 0 = 关闭（合法），负数无合理语义 → 启动期报错；
+	// first_byte_retry 未配置（nil）默认开启，显式 false 才关闭。
+	if c.Upstream.StreamKeepaliveSeconds < 0 {
+		return fmt.Errorf("upstream.stream_keepalive_seconds: 不得为负数（0 = 关闭心跳）")
+	}
+	if c.Upstream.FirstByteRetry == nil {
+		c.Upstream.FirstByteRetry = boolPtr(true)
 	}
 	// 账号级流量整形钳制：weight 钳 (0,1000]、限额钳 [0,256]/[0,3600]/[0,512]。
 	if c.Pool.WeightDefault < 0 {

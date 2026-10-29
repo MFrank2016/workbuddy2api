@@ -16,7 +16,8 @@ func (h *Handler) streamChatResponse(w http.ResponseWriter, r *http.Request, pre
 	st := ex.Stat
 	acct := ex.Account
 	rc := io.ReadCloser(ex.RC)
-	if ex.Reopen != nil {
+	live := h.loadLive()
+	if ex.Reopen != nil && live.FirstByteRetry {
 		rc = upstream.NewReplayStream(r.Context(), rc, ex.Reopen)
 	}
 	realm := ex.Realm
@@ -48,7 +49,7 @@ func (h *Handler) streamChatResponse(w http.ResponseWriter, r *http.Request, pre
 	sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 		return h.hintContext(realm, bareModel, prep.ReqHasImage)
 	}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }),
-		upstream.WithMarkupRepair(repair), upstream.WithHeartbeat(15*time.Second))
+		upstream.WithMarkupRepair(repair), upstream.WithHeartbeat(live.StreamKeepalive))
 	switch {
 	case upstream.IsEmptyStreamError(sErr):
 		// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]

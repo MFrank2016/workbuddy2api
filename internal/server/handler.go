@@ -111,6 +111,14 @@ type Config struct {
 	// RequestProfile 出站请求兼容 profile（upstream.request_profile）：legacy / official。
 	// 经 livecfg 热生效；Live 为 nil 时由 loadLive 回落本字段。
 	RequestProfile string
+	// StreamKeepalive 首字节前 SSE 注释心跳周期（upstream.stream_keepalive_seconds）。
+	// 经 livecfg 热生效；Live 快照里的 0 = 关闭。Live 为 nil 时零值按默认
+	// 15s 处理（NewHandler fallback），裸用路径要关闭请注入 Live。
+	StreamKeepalive time.Duration
+	// FirstByteRetry 首字节前传输层失败时同账号重开一次（upstream.first_byte_retry）。
+	// 经 livecfg 热生效；Live 快照里的 false = 关闭。Live 为 nil 时零值按默认
+	// true 处理（NewHandler fallback），裸用路径要关闭请注入 Live。
+	FirstByteRetry bool
 
 	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
 	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
@@ -283,6 +291,15 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "passthrough" // 缺省 passthrough：透传客户端原始 system
 	}
+	// Live 未接线时（测试 / 裸用）零值视为「未配置」，回落与 config 默认一致：
+	// 15s 心跳 + 开启重放。显式关闭只通过 Live 快照表达（生产路径始终注入 Live，
+	// stream_keepalive_seconds=0 / first_byte_retry=false）。
+	if cfg.Live == nil {
+		if cfg.StreamKeepalive == 0 {
+			cfg.StreamKeepalive = 15 * time.Second
+		}
+		cfg.FirstByteRetry = true
+	}
 	h := &Handler{
 		cfg:           cfg,
 		mux:           http.NewServeMux(),
@@ -409,6 +426,8 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		SearchEnabled:   h.cfg.SearchEnabled,
 		MCPEnabled:      h.cfg.MCPEnabled,
 		RequestProfile:  h.cfg.RequestProfile,
+		StreamKeepalive: h.cfg.StreamKeepalive,
+		FirstByteRetry:  h.cfg.FirstByteRetry,
 		HiddenModels:    livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
 	}
 }
