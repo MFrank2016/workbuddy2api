@@ -814,6 +814,24 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 				st.status = http.StatusServiceUnavailable
 				return nil, false
 			}
+			// 11133「Invalid request parameters」：上游对**请求本身**的拒绝（如 Kimi 系
+			// 模型要求工具 schema 里 enum 必须带 type，缺了整单 400）。同一 body 换任何
+			// 账号都会得到同一个 400 —— 轮转只会把无效请求放大 MaxRotate 倍，而
+			// ErrClient 默认策略里的 NoteFailures 还会把健康账号的连败计数喂高、临时
+			// 踢出池（现场实测：一次连续探测把 healthy 从 19 打到 7）。
+			// 因此这里 fail-fast：400 + 上游原文，不轮转、不罚号（本分支不进
+			// applyErrorPolicy，ErrClient 的 NoteFailures 不会执行）。
+			if kind == upstream.ErrClient && strings.Contains(string(respBody), "11133") {
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "request parameters were rejected by the model provider"
+				}
+				h.writeChatError(prep.OnError, http.StatusBadRequest, "invalid_request", msg,
+					h.hintOf(kind, string(respBody), realm, bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return nil, false
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
