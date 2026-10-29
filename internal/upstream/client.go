@@ -1389,6 +1389,9 @@ func (c *Client) refreshTokenOnce(a *auth.Auth) error {
 		// 后写覆盖先写二者等价可用；提前返回避免无意义覆盖与 ExpiresAt 抖动）。
 		return nil
 	}
+	if verr := validateRefreshedToken(a, tok.AccessToken); verr != nil {
+		return fmt.Errorf("refresh_failed: credential identity mismatch: %w", verr)
+	}
 	a.AccessToken = tok.AccessToken
 	if tok.RefreshToken != "" {
 		a.RefreshToken = tok.RefreshToken
