@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -496,6 +498,7 @@ type StreamOption func(*streamOptions)
 type streamOptions struct {
 	onErrorFrame func(payload string)
 	markup       *MarkupRepair
+	heartbeat    time.Duration
 }
 
 // WithMarkupRepair 注册「模型原生工具调用标记」修复器（见 dsml.go）。
@@ -517,6 +520,12 @@ func WithErrorFrameObserver(fn func(payload string)) StreamOption {
 	return func(o *streamOptions) { o.onErrorFrame = fn }
 }
 
+// WithHeartbeat 在首个有效 data 帧写出之前按 interval 周期发送 SSE 注释心跳
+// （": keep-alive\n\n"）。首字节后自动停止；interval <= 0 表示关闭（零回归）。
+func WithHeartbeat(interval time.Duration) StreamOption {
+	return func(o *streamOptions) { o.heartbeat = interval }
+}
+
 // StreamHint 同 Stream，但上游 error 帧透出前把 hintFn(payload) 的返回值写入
 // error.gateway_hint。hintFn 为 nil 或返回空串 → 原样透传（零改写）。
 // 空流兜底 error 帧（"empty upstream stream"）不带 hint（网关本地故障形态
@@ -535,6 +544,59 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	h.Set("Connection", "keep-alive")
 	h.Set("X-Accel-Buffering", "no")
 	fl, _ := w.(http.Flusher)
+
+	// 心跳/数据写入串行化：心跳 goroutine 与主读取循环共用同一把锁，避免 SSE 帧
+	// 交错。firstData 一旦置位（已写出任一有效 data 帧）心跳即停——首字节后不再
+	// 发注释，保证与关闭心跳时的字节完全一致。
+	var writeMu sync.Mutex
+	var firstData atomic.Bool
+	writeLocked := func(fn func() error) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return fn()
+	}
+	stopHeartbeat := func() {}
+	if o.heartbeat > 0 {
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		var once sync.Once
+		go func() {
+			defer close(done)
+			t := time.NewTicker(o.heartbeat)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					shouldStop := false
+					werr := writeLocked(func() error {
+						if firstData.Load() {
+							shouldStop = true
+							return nil
+						}
+						if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
+							return err
+						}
+						if fl != nil {
+							fl.Flush()
+						}
+						return nil
+					})
+					if werr != nil || shouldStop {
+						return
+					}
+				}
+			}
+		}()
+		stopHeartbeat = func() {
+			once.Do(func() {
+				close(stop)
+				<-done
+			})
+		}
+		defer stopHeartbeat()
+	}
 
 	// toolCallSeen 跨帧记录 delta.tool_calls 里已发过首片的 index，
 	// 供逐 chunk 透传时收敛 name 为「每 index 一次」（对齐 OpenAI 官方流）。
@@ -557,13 +619,16 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 
 	// writeSSE 原样写出一帧并 flush。
 	writeSSE := func(payload string) error {
-		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
-			return werr
-		}
-		if fl != nil {
-			fl.Flush()
-		}
-		return nil
+		return writeLocked(func() error {
+			if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
+				return werr
+			}
+			firstData.Store(true)
+			if fl != nil {
+				fl.Flush()
+			}
+			return nil
+		})
 	}
 
 	// writeRaw 原样写出一帧（绕过 normalizeFrame）。上游 error 帧（error-passthrough）
@@ -754,11 +819,16 @@ readLoop:
 			}
 		case trimmed != "":
 			// 注释/其他行：原样透传
-			if _, werr := io.WriteString(w, line); werr != nil {
+			if werr := writeLocked(func() error {
+				if _, err := io.WriteString(w, line); err != nil {
+					return err
+				}
+				if fl != nil {
+					fl.Flush()
+				}
+				return nil
+			}); werr != nil {
 				return werr
-			}
-			if fl != nil {
-				fl.Flush()
 			}
 		}
 		// 空行（帧分隔）吞掉：本函数自产 "\n\n"
@@ -795,6 +865,9 @@ readLoop:
 			sawFinish = true
 		}
 	}
+	// 流结束/首字节后心跳必须停：在收尾 error / [DONE] 之前显式停掉并等待
+	// goroutine 退出，避免收尾帧与心跳交错。
+	stopHeartbeat()
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
 	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。
 	// 网关本地空流兜底帧走 hintFn=nil 的直写路径：该形态未覆盖（不编造 hint），
@@ -818,11 +891,16 @@ readLoop:
 		_ = writeRaw(`{"error":{"message":"upstream stream ended before completion","type":"upstream_error","code":"upstream_truncated"}}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
-	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-		return err
-	}
-	if fl != nil {
-		fl.Flush()
+	if werr := writeLocked(func() error {
+		if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+			return err
+		}
+		if fl != nil {
+			fl.Flush()
+		}
+		return nil
+	}); werr != nil {
+		return werr
 	}
 	if validFrames == 0 {
 		return errEmptyStream
