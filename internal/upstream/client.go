@@ -2080,7 +2080,11 @@ type userResourceResp struct {
 		Data struct {
 			TotalDosage int64 `json:"TotalDosage"`
 			Accounts    []struct {
-				PackageName string `json:"PackageName"`
+				PackageName             string `json:"PackageName"`
+				SubscriptionPackageCode string `json:"SubscriptionPackageCode"`
+				Status                  int    `json:"Status"`
+				StartTime               string `json:"StartTime"`
+				EndTime                 string `json:"EndTime"`
 				// 到期候选字段（分桶取所有可解析值中最早者，见 earliestPackageEnd）。
 				// CycleEndTime 周期边界（墙钟字符串）；DeductionEndTime 可抵扣窗口结束
 				// （epoch 毫秒，实测 CN/global 两域均下发，是体验版真失效时刻）；
