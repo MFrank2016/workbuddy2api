@@ -470,6 +470,10 @@ func DefaultIdentity() IdentityConfig {
 			"DeepSeek Harness": "WorkBuddy",
 			"Codex":            "WorkBuddy",
 			"ZCode":            "WorkBuddy",
+			// 渠道兼容短语（上游 v1.14.40/41）：DSH system 中这两句会触发国内站
+			// 400/11-128；等义改写后同一报文可通过。只在 identity.enabled 时生效。
+			"workspace root":     "workspace base",
+			"are paths the user": "are paths that the user",
 		},
 	}
 }
@@ -1184,8 +1188,16 @@ func (c *Config) normalizeIdentity() error {
 	} else {
 		c.Identity.Target = target
 	}
+	defaults := DefaultIdentity().Replacements
 	if c.Identity.Replacements == nil {
-		c.Identity.Replacements = DefaultIdentity().Replacements
+		c.Identity.Replacements = defaults
+	} else {
+		// 用户自定义 map 逐项补齐缺失默认值；已有键保留用户值，绝不覆盖。
+		for k, v := range defaults {
+			if _, ok := c.Identity.Replacements[k]; !ok {
+				c.Identity.Replacements[k] = v
+			}
+		}
 	}
 	switch p := strings.ToLower(strings.TrimSpace(c.Upstream.RequestProfile)); p {
 	case "":
