@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-# 可选：Go 模块代理。官方 proxy.golang.org 在中国大陆不可达（go mod download
-# 会卡死）；国内机器构建时传 --build-arg GOPROXY=https://goproxy.cn,direct。
-# 留空 = 官方默认，行为与上游原版一致。
-ARG GOPROXY=""
-RUN test -z "${GOPROXY}" || go env -w GOPROXY="${GOPROXY}"
+# Go 模块代理。官方 proxy.golang.org 在中国大陆不可达（go mod download 会卡死），
+# 默认改走 goproxy.cn（公共 CDN，海外同样可达，回源走 direct）。换代理时用构建参数覆盖：
+#   docker compose build --build-arg GOPROXY=https://proxy.golang.org,direct
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
 COPY go.mod ./
 RUN go mod download
 COPY . .
@@ -18,8 +18,12 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/serve
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/activity_bin ./cmd/activity
 
 FROM alpine:3.20
+# Alpine 官方 CDN 在国内经常超时（面板重建上游会卡到 900s）。构建参数可覆盖：
+#   docker compose build --build-arg APK_MIRROR=dl-cdn.alpinelinux.org
+ARG APK_MIRROR=mirrors.aliyun.com
 # python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本体。
-RUN apk add --no-cache wget ca-certificates tzdata python3 bash \
+RUN if [ -n "$APK_MIRROR" ]; then sed -i "s#dl-cdn.alpinelinux.org#$APK_MIRROR#g" /etc/apk/repositories; fi \
+ && apk add --no-cache wget ca-certificates tzdata python3 bash \
  && adduser -D -u 10001 app \
  && mkdir -p /app/auths /app/data \
  && chown -R app:app /app

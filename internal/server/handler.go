@@ -1179,6 +1179,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 				}
 			}
 		}
+	case upstream.ErrAuthRejected:
+		// 纯 401（无 12153、无业务信封）：凭证被上游拒绝，但单次可能是网关抖动
+		// 或 token 轮换竞态 —— 不直接 Disable（chat 路径误判一次就是永久杀号），
+		// 改走连续计数，达到 sessionDeadThreshold 才禁用。计数器与 12153 共用：
+		// 同一账号先后撞到两种形态，本来就说明凭证不会自己好转。
+		h.cfg.Pool.NoteAuthFailure(uid, "401 auth rejected")
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。

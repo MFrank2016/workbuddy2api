@@ -885,7 +885,7 @@ readLoop:
 	// 空流（validFrames == 0）走上方的 errEmptyStream 分支，不重复判定。
 	truncated := validFrames > 0 && !sawDone && !sawFinish && !sawErrorFrame
 	if validFrames == 0 {
-		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+		_ = writeRaw(`{"error":{"message":"upstream stream ended before completion (empty upstream stream)","type":"upstream_error","code":"upstream_parse"}}`)
 	} else if truncated {
 		// 本地判定帧：不是上游错误，不编造 hint。
 		_ = writeRaw(`{"error":{"message":"upstream stream ended before completion","type":"upstream_error","code":"upstream_truncated"}}`)

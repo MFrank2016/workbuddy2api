@@ -253,3 +253,27 @@ func TestStatusDisabledReasonClearedByRevive(t *testing.T) {
 		t.Errorf("revive 后 reason=%q want 空", st.Reason)
 	}
 }
+
+// TestNoteAuthFailureSharesSessionDeadCounter 纯 401（ErrAuthRejected）与 12153
+// 共用同一套连续计数：前 N-1 次不禁用，第 N 次按调用方 reason 禁用。
+func TestNoteAuthFailureSharesSessionDeadCounter(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	if p.NoteAuthFailure("u1", "401 auth rejected") {
+		t.Fatal("第 1 次纯 401 不应禁用")
+	}
+	// 混合形态（先 12153 再纯 401）也共用计数：凭证不会自己好转。
+	if p.NoteSessionDead("u1") {
+		t.Fatal("第 2 次（12153）不应禁用")
+	}
+	if !p.NoteAuthFailure("u1", "401 auth rejected") {
+		t.Fatal("第 3 次纯 401 应禁用")
+	}
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("no status")
+	}
+	if !st.Disabled || st.Reason != "401 auth rejected" {
+		t.Fatalf("disabled=%v reason=%q want 401 auth rejected", st.Disabled, st.Reason)
+	}
+}

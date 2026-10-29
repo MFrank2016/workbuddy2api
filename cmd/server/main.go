@@ -223,6 +223,10 @@ func main() {
 			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏，
 			// 见 wiring.go）；裸名走 cn（现状零回归）。
 			AvailableForModel: realmAwareAvailableForModel(p),
+			// 首绑按三因子权重分配（issue #265）：粘性命中即定，若首绑仍按哈希取模，
+			// 「快过期积分优先消耗」这条池权重在默认配置下就永远轮不到——带会话标识的
+			// 请求首轮绑定后滚动续期，压根走不到 Pool.pick。
+			PickForModel: realmAwareWeightedPick(p),
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()
@@ -276,6 +280,8 @@ func main() {
 	// 用量归属头（X-Product/X-IDE-*）+ 客户端 IP 透传开关（见 ChatHeaders / handler）。
 	up.ClientName = cfg.Upstream.ClientName
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	// 大请求体 gzip（issue #297）：>64KB 才压，短请求零开销。
+	up.GzipBody = cfg.Upstream.GzipBody
 	// global realm 双域路由（config global 段）：base 空回落内置默认 https://www.workbuddy.ai；
 	// GlobalEnabled 与 auth 包开关一致（双保险第二道闸在 upstream.globalOn）。
 	up.ChatBaseGlobal = cfg.Global.ChatBase
@@ -691,7 +697,7 @@ func balanceIntervalFor(c *Config) time.Duration {
 var restartRequiredPaths = []string{
 	"listen", "auth_dir", "state_file", "server.read_timeout", "server.max_body_mb",
 	"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
-	"upstream.user_agent",
+	"upstream.user_agent", "upstream.gzip_body",
 	"upstash", "session_sticky.ttl", "session_sticky.gc_interval",
 	"logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
 	"panel.password_hash", "panel.session_hours",
