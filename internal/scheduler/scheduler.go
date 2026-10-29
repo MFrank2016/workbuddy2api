@@ -1105,19 +1105,14 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		if a == nil {
 			continue
 		}
-		remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
+		remain, total, expiring, earliestAt, earliestRemaining, info, err := s.cfg.Upstream.UserResourceDetailedWithExpiryAndPlan(a, expiringSoon)
 		if err != nil {
 			log.Printf("balance-refresh %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			continue
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
-		if info, ierr := s.cfg.Upstream.IdentifyPlan(a); ierr == nil {
-			s.cfg.Pool.SetPlan(st.UID, pool.Plan{Label: info.Label, Stale: info.Stale, CheckedAt: info.CheckedAt})
-		} else {
-			s.cfg.Pool.SetPlan(st.UID, pool.Plan{Label: "待确认", Stale: true, CheckedAt: time.Now()})
-			log.Printf("plan-refresh %s: %v", logfmt.Label(st.UID, st.Nickname), ierr)
-		}
+		s.cfg.Pool.SetPlan(st.UID, pool.Plan{Label: info.Label, Stale: info.Stale, CheckedAt: info.CheckedAt})
 	}
 }
 

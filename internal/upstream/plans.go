@@ -32,22 +32,7 @@ func (c *Client) IdentifyPlan(a *auth.Auth) (PlanInfo, error) {
 	if err != nil {
 		return PlanInfo{Label: "待确认", Stale: true, CheckedAt: now}, err
 	}
-	best := PlanInfo{Label: "待确认", CheckedAt: now, Source: "package_name"}
-	for _, p := range resp.Response.Data.Accounts {
-		if !planActive(p.Status, p.StartTime, p.EndTime, now) {
-			continue
-		}
-		label, paid, trial := planLabel(a.Realm(), p.PackageName, p.SubscriptionPackageCode)
-		if label == "" {
-			continue
-		}
-		best = PlanInfo{
-			Label: label, Paid: paid, Trial: trial, CheckedAt: now,
-			Source: planSource(p.SubscriptionPackageCode),
-		}
-		break
-	}
-	return best, nil
+	return planFromResp(a, resp), nil
 }
 
 func planSource(code string) string {
@@ -115,4 +100,76 @@ func planLabel(realm, name, code string) (label string, paid, trial bool) {
 		return "免费", false, false
 	}
 	return "", false, false
+}
+
+// UserResourceDetailedWithExpiryAndPlan 一次 billing 查询同时返回余额/到期桶与套餐识别，
+// 供调度器余额刷新复用，避免同一账号每轮打两次 get-user-resource。
+func (c *Client) UserResourceDetailedWithExpiryAndPlan(a *auth.Auth, soon time.Duration) (
+	remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, plan PlanInfo, err error,
+) {
+	now := time.Now()
+	if a.IsEnterprise() {
+		remain, total, expiring, earliestAt, earliestRemaining, err = c.enterpriseResource(a, soon)
+		c.notifyCredits(a, remain, err)
+		plan = PlanInfo{Label: "企业版", Enterprise: true, CheckedAt: now, Source: "enterprise"}
+		return
+	}
+	resp, err := c.getUserResourceBody(a)
+	if err != nil {
+		plan = PlanInfo{Label: "待确认", Stale: true, CheckedAt: now}
+		return
+	}
+	for _, p := range resp.Response.Data.Accounts {
+		r, _, size := packageRemainUsed(respAccount{
+			CapacityRemain:      p.CapacityRemain,
+			CapacityUsed:        p.CapacityUsed,
+			CapacitySize:        p.CapacitySize,
+			CycleCapacityRemain: p.CycleCapacityRemain,
+			CycleCapacityUsed:   p.CycleCapacityUsed,
+			CycleCapacitySize:   p.CycleCapacitySize,
+		})
+		if r < 0 {
+			r = 0
+		}
+		if size < r {
+			size = r
+		}
+		remain += r
+		total += size
+		if r <= 0 {
+			continue
+		}
+		end, ok := parsePackageEndTime(p.CycleEndTime)
+		if !ok || !end.After(now) {
+			continue
+		}
+		if earliestAt.IsZero() || end.Before(earliestAt) {
+			earliestAt = end
+			earliestRemaining = r
+		} else if end.Equal(earliestAt) {
+			earliestRemaining += r
+		}
+		if soon > 0 && !end.After(now.Add(soon)) {
+			expiring += r
+		}
+	}
+	c.notifyCredits(a, remain, nil)
+	plan = planFromResp(a, resp)
+	return
+}
+
+func planFromResp(a *auth.Auth, resp *userResourceResp) PlanInfo {
+	now := time.Now()
+	best := PlanInfo{Label: "待确认", CheckedAt: now, Source: "package_name"}
+	for _, p := range resp.Response.Data.Accounts {
+		if !planActive(p.Status, p.StartTime, p.EndTime, now) {
+			continue
+		}
+		label, paid, trial := planLabel(a.Realm(), p.PackageName, p.SubscriptionPackageCode)
+		if label == "" {
+			continue
+		}
+		return PlanInfo{Label: label, Paid: paid, Trial: trial, CheckedAt: now, Source: planSource(p.SubscriptionPackageCode)}
+	}
+	return best
 }
