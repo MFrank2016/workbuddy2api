@@ -43,6 +43,8 @@ type ChatExecution struct {
 	ChatMeta       upstream.ChatMeta
 	Stat           *chatStat
 	AttemptStarted time.Time
+	// Reopen 在流式首字节前遇到瞬时传输错误时重开一次上游流。
+	Reopen func(context.Context) (io.ReadCloser, error)
 }
 
 // chatPeek 是请求体里与选号/协议分流相关的少量字段。
@@ -831,10 +833,29 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		// 由调用方在流尾分类处置。这里只把上游流/聚合体交出去。
 		if prep.Stream {
 			keepLease = true
+			// 首字节重放：捕获最终 body / acct / clientIP / chatMeta（不能复用
+			// prep.Body——prompt/model 重写后它可能已过期）。
+			reopen := func(rctx context.Context) (io.ReadCloser, error) {
+				rc2, status2, respBody2, err2 := h.cfg.Upstream.ChatStreamContext(rctx, acct, body, clientIP, chatMeta)
+				if err2 != nil {
+					if rc2 != nil {
+						_ = rc2.Close()
+					}
+					return nil, err2
+				}
+				if status2 >= 400 {
+					if rc2 != nil {
+						_ = rc2.Close()
+					}
+					return nil, fmt.Errorf("upstream status %d: %s", status2, respBody2)
+				}
+				return rc2, nil
+			}
 			return &ChatExecution{
 				RC: rc, Account: acct, Release: releaseHeld, Status: http.StatusOK,
 				BareModel: bareModel, Realm: realm, ModelRate: modelRate,
 				ChatMeta: prep.ChatMeta, Stat: st, AttemptStarted: attemptStarted,
+				Reopen: reopen,
 			}, true
 		}
 		raw, aerr := upstream.Aggregate(rc)
