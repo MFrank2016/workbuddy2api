@@ -1216,6 +1216,7 @@ function openAdd() {
   switchAddTab('login');
   $('addPick').hidden = false;
   $('addLoad').hidden = true; $('addReady').hidden = true;
+  $('addQr').hidden = true; $('addQr').removeAttribute('src');
   $('addDone').hidden = true; $('addErr').hidden = true;
   $('importDone').hidden = true; $('importErr').hidden = true;
   $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
@@ -1234,9 +1235,11 @@ function startAddLogin() {
   const realm = (document.querySelector('input[name="addRealm"]:checked') || {}).value || 'cn';
   $('btnStartLogin').disabled = true;
   $('addLoad').hidden = false; $('addErr').hidden = true;
+  $('addQr').hidden = true; $('addQr').removeAttribute('src');
   api('login/start', { method: 'POST', body: JSON.stringify({ realm }) }).then(r => {
     loginState = r.state;
     $('addUrl').textContent = r.url;
+    if (r.qr_png) { $('addQr').src = r.qr_png; $('addQr').hidden = false; }
     $('addPick').hidden = true; // 选域锁定（会话已按该域发起）
     $('addLoad').hidden = true; $('addReady').hidden = false;
     $('btnStartLogin').hidden = true;
@@ -1268,7 +1271,7 @@ async function pollLogin() {
     $('addErr').textContent = e.message + '（关闭后重新添加）';
   }
 }
-function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); }
+function closeAdd() { stopPoll(); loginState = null; $('addQr').hidden = true; $('addQr').removeAttribute('src'); $('addVeil').classList.remove('on'); }
 $('btnCloseAdd').onclick = closeAdd;
 $('btnStartLogin').onclick = startAddLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
