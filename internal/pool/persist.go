@@ -190,6 +190,9 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			lastCheckinDay:           s.LastCheckinDay,
 			tokenUsage:               s.TokenUsage,
 			paused:                   s.Paused,
+			planLabel:                s.PlanLabel,
+			planStale:                s.PlanStale,
+			planCheckedAt:            s.PlanCheckedAt,
 		}
 		// 恢复熔断器：breakerUntil 在未来才恢复（惰性过滤过期/零值，与落盘同口径）。
 		// retryCount 仅在 breakerUntil 未过期时恢复——已过期则归零（不保留无用退避指数）。
@@ -444,6 +447,9 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			LastCheckinDay:           e.lastCheckinDay,
 			TokenUsage:               e.tokenUsage,
 			Paused:                   e.paused,
+			PlanLabel:                e.planLabel,
+			PlanStale:                e.planStale,
+			PlanCheckedAt:            e.planCheckedAt,
 			ModelCooldowns:           mcs,
 			ModelCosts:               mcosts,
 		}

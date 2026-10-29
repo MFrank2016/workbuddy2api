@@ -1112,6 +1112,12 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
+		if info, ierr := s.cfg.Upstream.IdentifyPlan(a); ierr == nil {
+			s.cfg.Pool.SetPlan(st.UID, pool.Plan{Label: info.Label, Stale: info.Stale, CheckedAt: info.CheckedAt})
+		} else {
+			s.cfg.Pool.SetPlan(st.UID, pool.Plan{Label: "待确认", Stale: true, CheckedAt: time.Now()})
+			log.Printf("plan-refresh %s: %v", logfmt.Label(st.UID, st.Nickname), ierr)
+		}
 	}
 }
 
