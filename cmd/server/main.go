@@ -555,6 +555,7 @@ func main() {
 			FullRequests: cfg.Debug.FullRequests,
 			Dir:          cfg.Debug.Dir,
 		},
+		DeleteOnAuthFailure: cfg.Auth.DeleteOnAuthFailure,
 		// 流式韧性静态值：仅供 Live 为 nil 的裸用路径回落（生产始终走 Live 快照，
 		// 显式关闭由快照里的 0 / false 表达）。
 		StreamKeepalive: time.Duration(cfg.Upstream.StreamKeepaliveSeconds) * time.Second,

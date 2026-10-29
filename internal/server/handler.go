@@ -121,6 +121,8 @@ type Config struct {
 	FirstByteRetry bool
 	// Debug 完整请求诊断（可选；nil = 关闭）。
 	Debug *DebugCapture
+	// DeleteOnAuthFailure 授权失效时删除凭据文件（默认 false = 只禁用保留）。
+	DeleteOnAuthFailure bool
 
 	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
 	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
@@ -1150,6 +1152,19 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
 		h.cfg.Pool.Disable(uid, "12153 session dead")
+		if h.cfg.DeleteOnAuthFailure {
+			if a := h.cfg.Pool.AuthByUID(uid); a != nil {
+				if keep, note := h.cfg.Upstream.CredentialStillUsable(context.Background(), a); !keep {
+					if a.FilePath != "" {
+						_ = os.Remove(a.FilePath)
+					}
+					h.cfg.Pool.Remove(uid)
+					log.Printf("[Auth] 账号 %s 确认不可用，已删除凭据（%s）", uid, note)
+				} else {
+					log.Printf("[Auth] 账号 %s 删除前校验保留凭据：%s", uid, note)
+				}
+			}
+		}
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。

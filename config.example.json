@@ -121,7 +121,8 @@
     "detect_only": true
   },
   "auth": {
-    "file_mode": ""
+    "file_mode": "",
+    "delete_on_auth_failure": false
   },
   "upstream": {
     "request_profile": "legacy",

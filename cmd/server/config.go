@@ -240,6 +240,9 @@ type Config struct {
 	// 面板保存只落盘，改值需重启进程才生效（见 applyAuthFileMode）。
 	Auth struct {
 		FileMode string `json:"file_mode"` // ""（=0600）/ "0600" / "0640" / "0644"
+		// DeleteOnAuthFailure 授权失效时是否删除凭据文件（默认 false = 只禁用保留）。
+		// 开启后删除前仍会做只读可用性探测，不确定则保留。
+		DeleteOnAuthFailure bool `json:"delete_on_auth_failure"`
 	} `json:"auth"`
 
 	Upstream struct {
