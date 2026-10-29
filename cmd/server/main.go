@@ -236,6 +236,8 @@ func main() {
 	}
 
 	up := upstream.New()
+	// 出站身份替换（反 11-128）：默认关闭，关闭时逐字透传（零回归）。
+	up.SetIdentity(identityOptionsFrom(cfg.Identity))
 	// 额外根证书（upstream.ca_bundle，企业代理/Clash TLS 解密）：启动期加载，失败即退出。
 	if p := strings.TrimSpace(cfg.Upstream.CABundle); p != "" {
 		if err := up.SetCABundle(p); err != nil {
@@ -548,6 +550,16 @@ func main() {
 		CapabilityGuard: cfg.Upstream.CapabilityGuard,
 		SearchEnabled:   cfg.Search.Enabled,
 		MCPEnabled:      cfg.MCP.Enabled,
+		Debug: &server.DebugCapture{
+			Enabled:      cfg.Debug.Enabled,
+			FullRequests: cfg.Debug.FullRequests,
+			Dir:          cfg.Debug.Dir,
+		},
+		DeleteOnAuthFailure: cfg.Auth.DeleteOnAuthFailure,
+		// 流式韧性静态值：仅供 Live 为 nil 的裸用路径回落（生产始终走 Live 快照，
+		// 显式关闭由快照里的 0 / false 表达）。
+		StreamKeepalive: time.Duration(cfg.Upstream.StreamKeepaliveSeconds) * time.Second,
+		FirstByteRetry:  cfg.firstByteRetryEnabled(),
 		// 运维管理端点开关（config admin.enabled，默认 false）。
 		AdminEnabled: cfg.Admin.Enabled,
 		// Prometheus 指标端点开关（config metrics.enabled，默认 false）。
@@ -713,6 +725,22 @@ func liveSnapshot(c *Config) livecfg.Snapshot {
 		SearchEnabled:        c.Search.Enabled,
 		MCPEnabled:           c.MCP.Enabled,
 		HiddenModels:         livecfg.NormalizeHiddenModels(c.Models.Hidden),
+		RequestProfile:       c.Upstream.RequestProfile,
+		IdentityEnabled:      c.Identity.Enabled,
+		IdentityTarget:       c.Identity.Target,
+		IdentityReplacements: c.Identity.Replacements,
+		StreamKeepalive:      time.Duration(c.Upstream.StreamKeepaliveSeconds) * time.Second,
+		FirstByteRetry:       c.firstByteRetryEnabled(),
+	}
+}
+
+// identityOptionsFrom 把 config 的 identity 段映射成 upstream 出站身份替换快照。
+// 启动与热更新共用，避免两处映射漂移。
+func identityOptionsFrom(c IdentityConfig) upstream.IdentityOptions {
+	return upstream.IdentityOptions{
+		Enabled:      c.Enabled,
+		Target:       c.Target,
+		Replacements: c.Replacements,
 	}
 }
 
@@ -826,6 +854,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// auth.file_mode 不在其中：它 restart-only，改值只落盘，重启才生效。
 	live.Store(liveSnapshot(newCfg))
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	up.SetIdentity(identityOptionsFrom(newCfg.Identity))
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)

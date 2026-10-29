@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/qr"
 )
 
 const (
@@ -151,7 +152,8 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	p.logins[st.State] = loginSession{created: time.Now(), realm: realm}
 	p.loginMu.Unlock()
 	log.Printf("panel: 发起 OAuth 添加账号 realm=%s（state=%s...）", realm, st.State[:min(8, len(st.State))])
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": realm})
+	qrPNG, _ := qr.QRDataURI(st.AuthURL, 240)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": realm, "qr_png": qrPNG})
 }
 
 // loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。

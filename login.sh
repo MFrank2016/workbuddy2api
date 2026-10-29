@@ -77,6 +77,9 @@ elif command -v xsel &>/dev/null; then
     echo -n "$AUTH_URL" | xsel --clipboard 2>/dev/null && echo "(已复制到剪贴板)"
 fi
 
+# 终端扫码：渲染同一 authUrl 的二维码（扫码后仍走原 poll；URL 已在上方打印可复制）。
+"$LOGIN_BIN" qr "$AUTH_URL"
+
 echo ""
 read -rp "完成登录后按 y 继续: " ans
 if [[ "$ans" != "y" && "$ans" != "Y" ]]; then

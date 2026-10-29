@@ -211,10 +211,11 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 // 复用同值；TraceID 透传入站值（空 = 回落 conversationRequestID）。
 // messageID（消息级，每条独立）由 ChatHeaders 内部生成，无需外部可见。
 type ChatMeta struct {
-	ConversationID        string // X-Conversation-ID：body 提取的入站值，非空时优先（透传客户端原值）
-	ConversationHeaderID  string // X-Conversation-ID 出站兜底：客户端没给 conversationId 时由 handler 合成（上游渠道校验要求该头恒在）；仅进出站头，不进 prompt_cache_key 会话段
-	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
-	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	ConversationID        string         // X-Conversation-ID：body 提取的入站值，非空时优先（透传客户端原值）
+	ConversationHeaderID  string         // X-Conversation-ID 出站兜底：客户端没给 conversationId 时由 handler 合成（上游渠道校验要求该头恒在）；仅进出站头，不进 prompt_cache_key 会话段
+	ConversationRequestID string         // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
+	TraceID               string         // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	RequestProfile        RequestProfile // 出站请求兼容 profile：空/legacy = 逐字透传，official = 官方桌面端形状
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。

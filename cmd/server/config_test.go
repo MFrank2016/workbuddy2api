@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefault(t *testing.T) {
@@ -831,5 +832,163 @@ func TestAlertingMinConsecutiveFails(t *testing.T) {
 	c.Alerting.MinConsecutiveFails = -1
 	if err := c.normalize(); err == nil {
 		t.Fatal("want error for negative min_consecutive_fails")
+	}
+}
+
+func TestConfigIdentityDefaults(t *testing.T) {
+	c := Default()
+	if c.Identity.Enabled {
+		t.Fatal("identity must default off")
+	}
+	if c.Identity.Target != "WorkBuddy" {
+		t.Fatalf("target=%q", c.Identity.Target)
+	}
+	if c.Upstream.RequestProfile != "legacy" {
+		t.Fatalf("profile=%q", c.Upstream.RequestProfile)
+	}
+	for _, k := range []string{"Claude Code", "Claude", "DeepSeek Harness", "Codex", "ZCode"} {
+		if got := c.Identity.Replacements[k]; got != "WorkBuddy" {
+			t.Errorf("default replacement %q=%q, want WorkBuddy", k, got)
+		}
+	}
+}
+
+func TestConfigIdentityNormalizeDefaults(t *testing.T) {
+	c := Default()
+	c.Identity.Target = "  "
+	c.Identity.Replacements = nil
+	c.Upstream.RequestProfile = ""
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Identity.Target != "WorkBuddy" {
+		t.Fatalf("target=%q, want WorkBuddy", c.Identity.Target)
+	}
+	if got := c.Identity.Replacements["Codex"]; got != "WorkBuddy" {
+		t.Fatalf("nil replacements not filled: %v", c.Identity.Replacements)
+	}
+	if c.Upstream.RequestProfile != "legacy" {
+		t.Fatalf("profile=%q, want legacy", c.Upstream.RequestProfile)
+	}
+}
+
+func TestConfigOfficialProfileValidation(t *testing.T) {
+	c := Default()
+	c.Upstream.RequestProfile = "bogus"
+	if err := c.normalize(); err == nil {
+		t.Fatal("bogus profile must be rejected")
+	}
+}
+
+func TestConfigOfficialProfileAccepted(t *testing.T) {
+	c := Default()
+	c.Upstream.RequestProfile = "official"
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Upstream.RequestProfile != "official" {
+		t.Fatalf("profile=%q, want official", c.Upstream.RequestProfile)
+	}
+}
+
+func TestLiveSnapshotIdentityAndProfile(t *testing.T) {
+	c := Default()
+	c.Identity.Enabled = true
+	c.Identity.Target = "Target"
+	c.Identity.Replacements = map[string]string{"Claude": "Target"}
+	c.Upstream.RequestProfile = "official"
+
+	s := liveSnapshot(c)
+	if s.RequestProfile != "official" {
+		t.Errorf("request profile not mapped: %+v", s)
+	}
+	if !s.IdentityEnabled || s.IdentityTarget != "Target" {
+		t.Errorf("identity fields not mapped: %+v", s)
+	}
+	if got := s.IdentityReplacements["Claude"]; got != "Target" {
+		t.Errorf("replacements not mapped: %+v", s.IdentityReplacements)
+	}
+}
+
+func TestConfigStreamKeepaliveDefaults(t *testing.T) {
+	c := Default()
+	if c.Upstream.StreamKeepaliveSeconds != 15 {
+		t.Fatalf("stream_keepalive_seconds=%d want 15", c.Upstream.StreamKeepaliveSeconds)
+	}
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Upstream.StreamKeepaliveSeconds != 15 {
+		t.Fatalf("normalize changed keepalive to %d", c.Upstream.StreamKeepaliveSeconds)
+	}
+}
+
+func TestConfigStreamKeepaliveZeroDisables(t *testing.T) {
+	c := Default()
+	c.Upstream.StreamKeepaliveSeconds = 0
+	if err := c.normalize(); err != nil {
+		t.Fatalf("0 must be a valid disable value: %v", err)
+	}
+	if c.Upstream.StreamKeepaliveSeconds != 0 {
+		t.Fatalf("0 was rewritten to %d", c.Upstream.StreamKeepaliveSeconds)
+	}
+}
+
+func TestConfigStreamKeepaliveNegativeRejected(t *testing.T) {
+	c := Default()
+	c.Upstream.StreamKeepaliveSeconds = -1
+	if err := c.normalize(); err == nil {
+		t.Fatal("want error for negative stream_keepalive_seconds")
+	}
+}
+
+func TestConfigFirstByteRetryNilDefaultsTrue(t *testing.T) {
+	c := Default()
+	c.Upstream.FirstByteRetry = nil
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if !c.firstByteRetryEnabled() {
+		t.Fatal("nil first_byte_retry must default to true")
+	}
+	if c.Upstream.FirstByteRetry == nil || !*c.Upstream.FirstByteRetry {
+		t.Fatalf("nil not materialized to true: %v", c.Upstream.FirstByteRetry)
+	}
+}
+
+func TestConfigFirstByteRetryExplicitFalse(t *testing.T) {
+	c := Default()
+	c.Upstream.FirstByteRetry = boolPtr(false)
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.firstByteRetryEnabled() {
+		t.Fatal("explicit false must disable first-byte retry")
+	}
+}
+
+func TestConfigStreamResilienceParsedFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"upstream":{"stream_keepalive_seconds":0,"first_byte_retry":false}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.StreamKeepaliveSeconds != 0 || c.firstByteRetryEnabled() {
+		t.Fatalf("explicit disable not parsed: keepalive=%d retry=%v", c.Upstream.StreamKeepaliveSeconds, c.firstByteRetryEnabled())
+	}
+}
+
+func TestLiveSnapshotStreamResilience(t *testing.T) {
+	c := Default()
+	c.Upstream.StreamKeepaliveSeconds = 7
+	c.Upstream.FirstByteRetry = boolPtr(false)
+	s := liveSnapshot(c)
+	if s.StreamKeepalive != 7*time.Second {
+		t.Errorf("StreamKeepalive=%v want 7s", s.StreamKeepalive)
+	}
+	if s.FirstByteRetry {
+		t.Errorf("FirstByteRetry=%v want false", s.FirstByteRetry)
 	}
 }

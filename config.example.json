@@ -4,6 +4,22 @@
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "dns_servers": [],
+  "identity": {
+    "enabled": false,
+    "target": "WorkBuddy",
+    "replacements": {
+      "Claude Code": "WorkBuddy",
+      "Claude": "WorkBuddy",
+      "DeepSeek Harness": "WorkBuddy",
+      "Codex": "WorkBuddy",
+      "ZCode": "WorkBuddy"
+    }
+  },
+  "debug": {
+    "enabled": false,
+    "full_requests": false,
+    "dir": "./data"
+  },
   "cooldown": {
     "soft_rate": "600s",
     "soft_rate_max": "2h"
@@ -105,9 +121,11 @@
     "detect_only": true
   },
   "auth": {
-    "file_mode": ""
+    "file_mode": "",
+    "delete_on_auth_failure": false
   },
   "upstream": {
+    "request_profile": "legacy",
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
@@ -124,6 +142,8 @@
     "retry_enabled": false,
     "retry_attempts": 1,
     "retry_backoff": 0.5,
+    "stream_keepalive_seconds": 15,
+    "first_byte_retry": true,
     "max_images": 0,
     "image_policy": "passthrough",
     "capability_guard": false

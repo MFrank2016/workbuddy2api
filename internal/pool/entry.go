@@ -96,6 +96,9 @@ type Status struct {
 	// DisabledModels 账号级禁用模型（auth 文件 disabled_models；选号跳过）。
 	DisabledModels []string `json:"disabled_models,omitempty"`
 	// Enterprise 企业版账号（auth.EnterpriseID 非空，计算值不落盘）。
+	PlanLabel     string    `json:"plan_label,omitempty"`
+	PlanStale     bool      `json:"plan_stale,omitempty"`
+	PlanCheckedAt time.Time `json:"plan_checked_at,omitempty"`
 	Enterprise bool `json:"enterprise,omitempty"`
 	// ManualDisabled 运维手动停用（issue #138/#118）——与 disabled **并列独立**，
 	// 叠加态分别透出不合并（面板据此区分「系统判定坏了」与「我主动摘的」，
@@ -236,6 +239,9 @@ type entry struct {
 	// 余额刷新四类保号任务。与 disabled / manualDisabled 相互独立；持久化
 	// （stateAccount.Paused），重启保留。
 	paused   bool
+	planLabel     string
+	planStale     bool
+	planCheckedAt time.Time
 	lastUsed time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
@@ -506,6 +512,9 @@ type stateAccount struct {
 	CreditsTotal             int64     `json:"credits_total,omitempty"`
 	Paused                   bool      `json:"paused,omitempty"`
 	LastCheckinDay           string    `json:"last_checkin_day,omitempty"`
+	PlanLabel     string    `json:"plan_label,omitempty"`
+	PlanStale     bool      `json:"plan_stale,omitempty"`
+	PlanCheckedAt time.Time `json:"plan_checked_at,omitempty"`
 	CreditsEarliestExpiry    time.Time `json:"credits_earliest_expiry,omitempty"`
 	CreditsEarliestRemaining int64     `json:"credits_earliest_remaining,omitempty"`
 	Disabled                 bool      `json:"disabled"`

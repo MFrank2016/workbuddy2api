@@ -31,6 +31,7 @@ import (
 	"time"
 
 	auth2 "workbuddy2api/internal/auth"
+	"workbuddy2api/internal/qr"
 )
 
 // 上游常量：CN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
@@ -306,13 +307,23 @@ func buildLoginOutput(tok struct {
 	}
 }
 
+// printLoginQR 向 w 打印扫码提示、授权 URL 与终端二维码（扫码后仍走原 poll 流程）。
+// 终端不支持 UTF-8 半块字符时二维码可能不可扫，URL 始终保留可复制。
+func printLoginQR(w io.Writer, authURL string) {
+	fmt.Fprintln(w, "请使用 微信 / 企业微信 扫描二维码，或在浏览器打开：")
+	fmt.Fprintln(w, authURL)
+	if qrText, err := qr.RenderTerminalQR(authURL); err == nil {
+		fmt.Fprintln(w, qrText)
+	}
+}
+
 func main() {
 	realm, rest, err := parseRealmArgs(os.Args[1:])
 	if err != nil {
-		fatal("%v (usage: login [--realm=cn|global] <url|poll|realm>)", err)
+		fatal("%v (usage: login [--realm=cn|global] <url|poll|realm|qr>)", err)
 	}
 	if len(rest) < 1 {
-		fatal("usage: login [--realm=cn|global] <url|poll>")
+		fatal("usage: login [--realm=cn|global] <url|poll|realm|qr>")
 	}
 	// 每个流程独立 cookie jar（多账号登录互不串会话）
 	jar, _ := cookiejar.New(nil)
@@ -327,6 +338,13 @@ func main() {
 	case "poll":
 		runPoll(base, origin, realm, stateFile, client, os.Stdout)
 
+	case "qr":
+		// 终端扫码：login.sh 在捕获并打印 url 的 AUTH_URL 后调用；stdout 专用于二维码。
+		if len(rest) < 2 || strings.TrimSpace(rest[1]) == "" {
+			fatal("usage: login qr <authURL>")
+		}
+		printLoginQR(os.Stdout, rest[1])
+
 	case "realm":
 		// 交互式选域（login.sh 无 --realm 传参且 stdin 为 tty 时调用）。
 		// 提示打到 stderr，stdout 只输出归一化 realm，供 $( ) 捕获。
@@ -334,6 +352,6 @@ func main() {
 		fmt.Println(realm)
 
 	default:
-		fatal("unknown subcommand %q (want url|poll|realm)", rest[0])
+		fatal("unknown subcommand %q (want url|poll|realm|qr)", rest[0])
 	}
 }
