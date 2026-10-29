@@ -15,6 +15,11 @@
       "ZCode": "WorkBuddy"
     }
   },
+  "debug": {
+    "enabled": false,
+    "full_requests": false,
+    "dir": "./data"
+  },
   "cooldown": {
     "soft_rate": "600s",
     "soft_rate_max": "2h"

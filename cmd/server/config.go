@@ -57,6 +57,13 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权；主密钥，不限分组
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+	// Debug 完整请求诊断（默认关闭）。FullRequests 开启时记录入站/出站完整 JSON，
+	// 写入 Dir/debug-YYYY-MM-DD.jsonl（已脱敏）。
+	Debug struct {
+		Enabled      bool   `json:"enabled"`
+		FullRequests bool   `json:"full_requests"`
+		Dir          string `json:"dir"`
+	} `json:"debug"`
 	// DNSServers 出站解析用的 DNS 服务器（空 = 系统解析器）；也可用 WB2A_DNS 覆盖。
 	// Android/magisk 模块里没有 /etc/resolv.conf，必须显式指定，否则解析全落本机 :53。
 	DNSServers []string `json:"dns_servers,omitempty"`
@@ -544,6 +551,8 @@ func Default() *Config {
 	// 关闭两项实现：stream_keepalive_seconds=0 / first_byte_retry=false）。
 	c.Upstream.StreamKeepaliveSeconds = 15
 	c.Upstream.FirstByteRetry = boolPtr(true)
+	// 完整请求诊断默认关闭；目录缺省 ./data。
+	c.Debug.Dir = "./data"
 	// 账号级流量整形默认 = 无此功能（weight=1.0 等价纯三因子；限额 0 = 不限）。
 	c.Pool.WeightDefault = 1.0
 	c.Pool.MaxConcurrencyDefault = 0
@@ -858,6 +867,9 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	if strings.TrimSpace(c.Debug.Dir) == "" {
+		c.Debug.Dir = "./data"
+	}
 	if c.Pool.Strategy, err = c.Pool.Strategy.Normalize(); err != nil {
 		return fmt.Errorf("pool.strategy: %w", err)
 	}

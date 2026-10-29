@@ -528,6 +528,13 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 	//       一次即共享。
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
 	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body), RequestProfile: prep.RequestProfile}
+	if h.cfg.Debug != nil && h.cfg.Debug.Enabled {
+		payload := map[string]any{"protocol": prep.Protocol, "model": bareModel, "realm": realm}
+		if h.cfg.Debug.FullRequests {
+			payload["body"] = json.RawMessage(body)
+		}
+		h.cfg.Debug.Capture("full_request_upstream", payload)
+	}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {

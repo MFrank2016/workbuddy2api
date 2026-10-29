@@ -83,6 +83,9 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, err := h.readBody(w, r)
+	if err == nil {
+		h.captureInbound(r, raw)
+	}
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
@@ -190,6 +193,9 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) anthropicCountTokens(w http.ResponseWriter, r *http.Request) {
 	raw, err := h.readBody(w, r)
+	if err == nil {
+		h.captureInbound(r, raw)
+	}
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {

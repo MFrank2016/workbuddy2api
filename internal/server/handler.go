@@ -119,6 +119,8 @@ type Config struct {
 	// 经 livecfg 热生效；Live 快照里的 false = 关闭。Live 为 nil 时零值按默认
 	// true 处理（NewHandler fallback），裸用路径要关闭请注入 Live。
 	FirstByteRetry bool
+	// Debug 完整请求诊断（可选；nil = 关闭）。
+	Debug *DebugCapture
 
 	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
 	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
@@ -961,6 +963,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// MaxBytesReader——ReadTimeout 只防慢速，防不了大体积；并发大 body 会直接打爆
 	// 内存。超限 413 payload_too_large，不进入选号/轮转、零上游请求。
 	body, err := h.readBody(w, r)
+	if err == nil {
+		h.captureInbound(r, body)
+	}
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
