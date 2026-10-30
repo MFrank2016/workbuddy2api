@@ -992,3 +992,66 @@ func TestLiveSnapshotStreamResilience(t *testing.T) {
 		t.Errorf("FirstByteRetry=%v want false", s.FirstByteRetry)
 	}
 }
+
+func TestConfigIdentityDefaultsIncludeChannelCompat(t *testing.T) {
+	c := Default()
+	want := map[string]string{
+		"workspace root":     "workspace base",
+		"are paths the user": "are paths that the user",
+	}
+	for k, v := range want {
+		if got := c.Identity.Replacements[k]; got != v {
+			t.Fatalf("replacement %q=%q want %q", k, got, v)
+		}
+	}
+}
+
+func TestConfigIdentityMergesUserReplacements(t *testing.T) {
+	c := Default()
+	c.Identity.Replacements = map[string]string{"Claude Code": "MyBot", "custom": "X"}
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Identity.Replacements["Claude Code"] != "MyBot" {
+		t.Fatal("user value overwritten")
+	}
+	if c.Identity.Replacements["workspace root"] != "workspace base" {
+		t.Fatal("missing default not merged")
+	}
+	if c.Identity.Replacements["custom"] != "X" {
+		t.Fatal("custom key lost")
+	}
+}
+
+func TestConfigIdentityDisabledStaysDisabled(t *testing.T) {
+	c := Default()
+	c.Identity.Enabled = false
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Identity.Enabled {
+		t.Fatal("enabled:false must be preserved")
+	}
+}
+
+func TestConfigPoolAcquirePolicy(t *testing.T) {
+	c := Default()
+	if c.Pool.AcquireTimeout != "30s" || c.Pool.MaxQueueDepth != 64 {
+		t.Fatalf("defaults: timeout=%q queue=%d", c.Pool.AcquireTimeout, c.Pool.MaxQueueDepth)
+	}
+	c.Pool.AcquireTimeout = "0"
+	c.Pool.MaxQueueDepth = 5000
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.AcquireTimeoutDur != 0 {
+		t.Fatalf("timeout dur=%v want 0", c.AcquireTimeoutDur)
+	}
+	if c.Pool.MaxQueueDepth != 4096 {
+		t.Fatalf("queue=%d want clamp 4096", c.Pool.MaxQueueDepth)
+	}
+	c.Pool.AcquireTimeout = "not-a-duration"
+	if err := c.normalize(); err == nil {
+		t.Fatal("invalid duration must be rejected")
+	}
+}

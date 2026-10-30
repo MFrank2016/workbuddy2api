@@ -184,6 +184,8 @@
     "max_concurrency_default": 0,
     "min_interval_default": 0,
     "max_total_concurrency": 0,
+    "acquire_timeout": "30s",
+    "max_queue_depth": 64,
     "cross_domain_fallback": false,
     "strategy": {
       "domestic": "weighted_random",

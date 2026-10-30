@@ -405,6 +405,10 @@ type Config struct {
 		// 顶满时本次选号返回 nil → handler 回 503（比 mirror 的忙等让渡更稳，
 		// 不进热路径忙等）。钳 [0,512]。
 		MaxTotalConcurrency int `json:"max_total_concurrency"`
+		// AcquireTimeout 满额时等待在途名额的最长时间；"0" = 不等待（旧行为，直接 503）。
+		AcquireTimeout string `json:"acquire_timeout"`
+		// MaxQueueDepth 等待队列上限；0 = 不限（不推荐）。
+		MaxQueueDepth int `json:"max_queue_depth"`
 		// CreditFloor 积分保底：账号余额低于该值时，对实测收费模型不再参与选号
 		// （防止收费请求把余额打穿、连免费模型都冷却到次日签到）。0 = 关闭（默认）。
 		CreditFloor int64 `json:"credit_floor"`
@@ -459,6 +463,8 @@ type Config struct {
 	CreditExhaustedDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// AcquireTimeoutDur 解析后的满额等待上限；0 = 不等待。
+	AcquireTimeoutDur time.Duration `json:"-"`
 }
 
 // DefaultIdentity 返回 identity 段的默认值：默认关闭，目标 WorkBuddy，
@@ -473,6 +479,10 @@ func DefaultIdentity() IdentityConfig {
 			"DeepSeek Harness": "WorkBuddy",
 			"Codex":            "WorkBuddy",
 			"ZCode":            "WorkBuddy",
+			// 渠道兼容短语（上游 v1.14.40/41）：DSH system 中这两句会触发国内站
+			// 400/11-128；等义改写后同一报文可通过。只在 identity.enabled 时生效。
+			"workspace root":     "workspace base",
+			"are paths the user": "are paths that the user",
 		},
 	}
 }
@@ -564,6 +574,8 @@ func Default() *Config {
 	c.Pool.MaxConcurrencyDefault = 0
 	c.Pool.MinIntervalDefault = 0
 	c.Pool.MaxTotalConcurrency = 0
+	c.Pool.AcquireTimeout = "30s"
+	c.Pool.MaxQueueDepth = 64
 	c.Pool.CreditFloor = 0
 	// 连续失败预警默认开启（阈值 3，镜像 mirror 的 account_fail_threshold=3）；
 	// 0 显式关闭。
@@ -1054,6 +1066,21 @@ func (c *Config) normalize() error {
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
 	}
+	if c.Pool.AcquireTimeout == "" {
+		c.Pool.AcquireTimeout = "30s"
+	}
+	if c.AcquireTimeoutDur, err = time.ParseDuration(c.Pool.AcquireTimeout); err != nil {
+		return fmt.Errorf("pool.acquire_timeout: %w", err)
+	}
+	if c.AcquireTimeoutDur < 0 {
+		c.AcquireTimeoutDur = 0
+	}
+	if c.Pool.MaxQueueDepth < 0 {
+		c.Pool.MaxQueueDepth = 0
+	}
+	if c.Pool.MaxQueueDepth > 4096 {
+		c.Pool.MaxQueueDepth = 4096
+	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
 	}
@@ -1192,8 +1219,16 @@ func (c *Config) normalizeIdentity() error {
 	} else {
 		c.Identity.Target = target
 	}
+	defaults := DefaultIdentity().Replacements
 	if c.Identity.Replacements == nil {
-		c.Identity.Replacements = DefaultIdentity().Replacements
+		c.Identity.Replacements = defaults
+	} else {
+		// 用户自定义 map 逐项补齐缺失默认值；已有键保留用户值，绝不覆盖。
+		for k, v := range defaults {
+			if _, ok := c.Identity.Replacements[k]; !ok {
+				c.Identity.Replacements[k] = v
+			}
+		}
 	}
 	switch p := strings.ToLower(strings.TrimSpace(c.Upstream.RequestProfile)); p {
 	case "":

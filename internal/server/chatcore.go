@@ -622,17 +622,25 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
-		if !h.cfg.Pool.Acquire(acct.UID) {
+		// acquire_timeout > 0 时满额会等待 Release 唤醒；超时/取消则终止轮转，
+		// 避免对每个候选账号都等满一轮。
+		acqCtx := ctx
+		var acqCancel context.CancelFunc
+		if d := h.cfg.Pool.AcquireTimeout(); d > 0 {
+			acqCtx, acqCancel = context.WithTimeout(ctx, d)
+		}
+		okAcquire := h.cfg.Pool.AcquireWait(acqCtx, acct.UID)
+		if acqCancel != nil {
+			acqCancel()
+		}
+		if !okAcquire {
 			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
 			// 满载粘性号再浪费一次粘性命中往返（语义与 fail()/粘性命中-nil 的解绑一致）。
 			if stickyUID != "" && acct.UID == stickyUID {
 				unbindSticky()
 			}
-			if !rotateBackoff(i, ctx) {
-				// 客户端已断连：换号重试无意义，终止轮转走末端错误透传。
-				break
-			}
-			continue // 最后一个名额被并发抢走 → 换号
+			lastErr = fmt.Errorf("account %s concurrency saturated", acct.UID)
+			break
 		}
 		heldUID = acct.UID
 

@@ -138,8 +138,9 @@ type MetricsSnapshot struct {
 	Enabled   bool               `json:"enabled"`
 	Message   string             `json:"message,omitempty"`
 	Since     time.Time          `json:"since"`
-	Now       time.Time          `json:"now"`
-	UptimeSec int64              `json:"uptime_sec"`
+	Now        time.Time `json:"now"`
+	ServerTime int64     `json:"server_time"` // Unix ms；供管理端图表截断未来时间桶
+	UptimeSec  int64     `json:"uptime_sec"`
 	Total     ModelStatPayload   `json:"total"`
 	Models    []ModelStatPayload `json:"models"`
 }
@@ -189,9 +190,10 @@ func MetricsSnapshotOf() MetricsSnapshot {
 
 	out := MetricsSnapshot{
 		Enabled:   true,
-		Since:     m.since,
-		Now:       now,
-		UptimeSec: int64(now.Sub(m.since).Seconds()),
+		Since:      m.since,
+		Now:        now,
+		ServerTime: now.UnixMilli(),
+		UptimeSec:  int64(now.Sub(m.since).Seconds()),
 		Models:    make([]ModelStatPayload, 0, len(m.byModel)),
 	}
 

@@ -179,3 +179,13 @@ func TestGenSamplesAggregation(t *testing.T) {
 		t.Errorf("TokensPerSec = %v, want > 0", st.TokensPerSec)
 	}
 }
+
+func TestMetricsSnapshotServerTime(t *testing.T) {
+	snap := MetricsSnapshotOf()
+	if snap.ServerTime <= 0 {
+		t.Fatalf("server_time=%d want Unix ms", snap.ServerTime)
+	}
+	if snap.ServerTime < snap.Now.Add(-time.Minute).UnixMilli() {
+		t.Fatalf("server_time too old: %d", snap.ServerTime)
+	}
+}

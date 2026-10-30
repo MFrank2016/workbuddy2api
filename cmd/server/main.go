@@ -201,6 +201,7 @@ func main() {
 	// 账号级流量整形 + 全池并发闸（config pool.weight_default 等，默认无此功能）。
 	// 必须与既有 entry 重算生效值（SetThrottleDefaults 内部遍历 byUID 重算）。
 	p.SetThrottleDefaults(cfg.Pool.WeightDefault, cfg.Pool.MaxConcurrencyDefault, cfg.Pool.MinIntervalDefault, cfg.Pool.MaxTotalConcurrency)
+	p.SetAcquirePolicy(cfg.AcquireTimeoutDur, cfg.Pool.MaxQueueDepth)
 	// 11140 账号级风控处置（pool.account_fault_hold / disable_after；默认 24h / 3 次）。
 	p.SetAccountFaultPolicy(cfg.AccountFaultHoldDur, cfg.Pool.AccountFaultDisableAfter)
 	p.SetCrossDomainFallback(cfg.Pool.CrossDomainFallback) // 裸名跨域回退（issue #135，默认关闭）
@@ -870,6 +871,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetCreditFloor(newCfg.Pool.CreditFloor)
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetThrottleDefaults(newCfg.Pool.WeightDefault, newCfg.Pool.MaxConcurrencyDefault, newCfg.Pool.MinIntervalDefault, newCfg.Pool.MaxTotalConcurrency)
+	p.SetAcquirePolicy(newCfg.AcquireTimeoutDur, newCfg.Pool.MaxQueueDepth)
 	p.SetAccountFaultPolicy(newCfg.AccountFaultHoldDur, newCfg.Pool.AccountFaultDisableAfter)
 	p.SetCrossDomainFallback(newCfg.Pool.CrossDomainFallback) // 裸名跨域回退热生效（issue #135）
 	_ = p.SetScheduling(newCfg.Pool.Strategy, newCfg.Pool.AccountOrder)

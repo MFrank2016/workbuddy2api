@@ -162,3 +162,18 @@ func TestClientIdentitySnapshot(t *testing.T) {
 		t.Fatal("IdentitySnapshot must return a copy of replacements")
 	}
 }
+
+func TestIdentityChannelCompatPhrases(t *testing.T) {
+	opt := IdentityOptions{
+		Enabled: true, Target: "WorkBuddy",
+		Replacements: map[string]string{
+			"workspace root":     "workspace base",
+			"are paths the user": "are paths that the user",
+		},
+	}
+	in := "The workspace root is here. Files are paths the user can edit."
+	out := ReplaceIdentityText(in, opt)
+	if !strings.Contains(out, "workspace base") || !strings.Contains(out, "are paths that the user") {
+		t.Fatalf("channel compat replacements missing: %q", out)
+	}
+}
