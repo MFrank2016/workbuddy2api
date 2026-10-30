@@ -614,6 +614,12 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		"pool": map[string]any{
+			"waiting":             h.cfg.Pool.QueueDepth(),
+			"queue_depth":         h.cfg.Pool.QueueDepth(),
+			"acquire_timeout_sec": int(h.cfg.Pool.AcquireTimeout().Seconds()),
+			"max_queue_depth":     h.cfg.Pool.MaxQueueDepth(),
+		},
 		// 账号日限额（pool.account_daily_credit_limit，0 = 关闭）：面板/运维可见。
 		"account_daily_credit_limit": h.cfg.AccountDailyCreditLimit,
 		// credit_floor 积分保底（panel）：账号触底后不接实测收费模型；0 = 关闭。显式写出。

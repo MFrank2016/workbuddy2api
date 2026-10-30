@@ -1033,3 +1033,25 @@ func TestConfigIdentityDisabledStaysDisabled(t *testing.T) {
 		t.Fatal("enabled:false must be preserved")
 	}
 }
+
+func TestConfigPoolAcquirePolicy(t *testing.T) {
+	c := Default()
+	if c.Pool.AcquireTimeout != "30s" || c.Pool.MaxQueueDepth != 64 {
+		t.Fatalf("defaults: timeout=%q queue=%d", c.Pool.AcquireTimeout, c.Pool.MaxQueueDepth)
+	}
+	c.Pool.AcquireTimeout = "0"
+	c.Pool.MaxQueueDepth = 5000
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.AcquireTimeoutDur != 0 {
+		t.Fatalf("timeout dur=%v want 0", c.AcquireTimeoutDur)
+	}
+	if c.Pool.MaxQueueDepth != 4096 {
+		t.Fatalf("queue=%d want clamp 4096", c.Pool.MaxQueueDepth)
+	}
+	c.Pool.AcquireTimeout = "not-a-duration"
+	if err := c.normalize(); err == nil {
+		t.Fatal("invalid duration must be rejected")
+	}
+}

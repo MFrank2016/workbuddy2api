@@ -402,6 +402,10 @@ type Config struct {
 		// 顶满时本次选号返回 nil → handler 回 503（比 mirror 的忙等让渡更稳，
 		// 不进热路径忙等）。钳 [0,512]。
 		MaxTotalConcurrency int `json:"max_total_concurrency"`
+		// AcquireTimeout 满额时等待在途名额的最长时间；"0" = 不等待（旧行为，直接 503）。
+		AcquireTimeout string `json:"acquire_timeout"`
+		// MaxQueueDepth 等待队列上限；0 = 不限（不推荐）。
+		MaxQueueDepth int `json:"max_queue_depth"`
 		// CreditFloor 积分保底：账号余额低于该值时，对实测收费模型不再参与选号
 		// （防止收费请求把余额打穿、连免费模型都冷却到次日签到）。0 = 关闭（默认）。
 		CreditFloor int64 `json:"credit_floor"`
@@ -456,6 +460,8 @@ type Config struct {
 	CreditExhaustedDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// AcquireTimeoutDur 解析后的满额等待上限；0 = 不等待。
+	AcquireTimeoutDur time.Duration `json:"-"`
 }
 
 // DefaultIdentity 返回 identity 段的默认值：默认关闭，目标 WorkBuddy，
@@ -565,6 +571,8 @@ func Default() *Config {
 	c.Pool.MaxConcurrencyDefault = 0
 	c.Pool.MinIntervalDefault = 0
 	c.Pool.MaxTotalConcurrency = 0
+	c.Pool.AcquireTimeout = "30s"
+	c.Pool.MaxQueueDepth = 64
 	c.Pool.CreditFloor = 0
 	// 连续失败预警默认开启（阈值 3，镜像 mirror 的 account_fail_threshold=3）；
 	// 0 显式关闭。
@@ -1049,6 +1057,21 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
+	}
+	if c.Pool.AcquireTimeout == "" {
+		c.Pool.AcquireTimeout = "30s"
+	}
+	if c.AcquireTimeoutDur, err = time.ParseDuration(c.Pool.AcquireTimeout); err != nil {
+		return fmt.Errorf("pool.acquire_timeout: %w", err)
+	}
+	if c.AcquireTimeoutDur < 0 {
+		c.AcquireTimeoutDur = 0
+	}
+	if c.Pool.MaxQueueDepth < 0 {
+		c.Pool.MaxQueueDepth = 0
+	}
+	if c.Pool.MaxQueueDepth > 4096 {
+		c.Pool.MaxQueueDepth = 4096
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120

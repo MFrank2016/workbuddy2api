@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,6 +85,14 @@ type Pool struct {
 	maxTotalConcurrency int
 	// totalInFlight 全池在途计数（Acquire/Release 权威增减，原子）。
 	totalInFlight atomic.Int64
+	// acquireTimeout 满额时 AcquireWait 的最长等待；0 = 不等待（旧行为）。
+	acquireTimeout time.Duration
+	// maxQueueDepth AcquireWait 的等待者上限；0 = 不限。
+	maxQueueDepth int
+	// waitCh Release/SetAcquirePolicy 时 close 并重建，用于唤醒等待者。
+	waitCh chan struct{}
+	// waiting 当前等待者数量（AcquireWait 进出维护，原子）。
+	waiting atomic.Int64
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -115,6 +124,7 @@ func New(stateFp string) *Pool {
 	p := &Pool{
 		byUID:                    map[string]*entry{},
 		scheduling:               map[string]scheduleCursor{},
+		waitCh:                   make(chan struct{}),
 		stateFp:                  stateFp,
 		breakerThreshold:         defaultBreakerThreshold,
 		breakerCooldown:          defaultBreakerCooldown,
@@ -335,6 +345,87 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 	p.store = s
 }
 
+// SetAcquirePolicy 注入满额等待策略。timeout <= 0 关闭等待（AcquireWait 等价 Acquire）。
+func (p *Pool) SetAcquirePolicy(timeout time.Duration, maxQueue int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if timeout < 0 {
+		timeout = 0
+	}
+	if maxQueue < 0 {
+		maxQueue = 0
+	}
+	p.acquireTimeout = timeout
+	p.maxQueueDepth = maxQueue
+	close(p.waitCh)
+	p.waitCh = make(chan struct{})
+}
+
+// AcquireTimeout 返回当前满额等待上限。
+func (p *Pool) AcquireTimeout() time.Duration {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.acquireTimeout
+}
+
+// QueueDepth 返回当前等待者数量。
+func (p *Pool) QueueDepth() int { return int(p.waiting.Load()) }
+
+// MaxQueueDepth 返回等待队列上限；0 = 不限。
+func (p *Pool) MaxQueueDepth() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.maxQueueDepth
+}
+
+// AcquireWait 先尝试 Acquire；满额时在 ctx/acquireTimeout 内等待 Release 唤醒。
+// 等待队列达到 maxQueueDepth 或超时/取消返回 false（调用方回 503）。
+func (p *Pool) AcquireWait(ctx context.Context, uid string) bool {
+	if p.Acquire(uid) {
+		return true
+	}
+	p.mu.RLock()
+	timeout := p.acquireTimeout
+	ch := p.waitCh
+	p.mu.RUnlock()
+	if timeout <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		p.mu.RLock()
+		maxQ := p.maxQueueDepth
+		p.mu.RUnlock()
+		if maxQ > 0 && p.waiting.Load() >= int64(maxQ) {
+			return false
+		}
+		p.waiting.Add(1)
+		timer := time.NewTimer(time.Until(deadline))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			p.waiting.Add(-1)
+			return false
+		case <-timer.C:
+			p.waiting.Add(-1)
+			return false
+		case <-ch:
+			timer.Stop()
+			p.waiting.Add(-1)
+			if p.Acquire(uid) {
+				return true
+			}
+		}
+		p.mu.RLock()
+		ch = p.waitCh
+		timeout = p.acquireTimeout
+		p.mu.RUnlock()
+		if time.Now().After(deadline) || timeout <= 0 {
+			return false
+		}
+	}
+}
+
 // Acquire 为 uid 占一个在途名额（会话粘性命中后调用）；池上限内返回 true。
 // 名额用 entry.inFlight 原子自增，满额返回 false。上限按账号 realm 分档
 // （global 档 maxInFlightGlobal，P1-1；未设置回落 maxInFlight）。
@@ -438,6 +529,10 @@ func (p *Pool) Release(uid string) {
 					}
 				}
 			}
+			p.mu.Lock()
+			close(p.waitCh)
+			p.waitCh = make(chan struct{})
+			p.mu.Unlock()
 			return
 		}
 	}
