@@ -6,7 +6,11 @@
 // 两个命令共用同一份定义，消除漂移源头。
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // Schedule 排程配置段（对应 config.json 的 "schedule" 对象）。
 //
@@ -30,13 +34,21 @@ type Schedule struct {
 	//     则对老配置零影响，向后完全兼容。
 	//   - 开关与取值解耦：禁用时仍保留用户显式配的小时，重新启用无需补配。
 	//   - 无需猜测哨兵（[-1] 之类），非法小时一律报错并提示改用本开关。
-	CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到
-	TravelEnabled    bool `json:"travel_enabled"`    // 缺省 true；false = 完全停猫猫旅行
-	ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
-	KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
-	SchoolEnabled    bool `json:"school_enabled"`    // 缺省 true；false = 停开学季任务
-	CatEnabled       bool `json:"cat_enabled"`       // 缺省 true；false = 停夜猫子任务
-	GrowthEnabled    bool `json:"growth_enabled"`    // 缺省 true；false = 停成长任务自动排程
+	CheckinEnabled bool `json:"checkin_enabled"` // 缺省 true；false = 关签到
+	// CheckinMode 签到模式：legacy（默认，沿用 checkin_hours 固定时点）/
+	// random（每账号 08:00–09:30 随机，09:30–10:00 一次重试，状态落盘）。
+	CheckinMode        string `json:"checkin_mode"`
+	CheckinWindowStart string `json:"checkin_window_start"` // "08:00"
+	CheckinWindowEnd   string `json:"checkin_window_end"`   // "09:30"
+	CheckinRetryStart  string `json:"checkin_retry_start"`  // "09:30"
+	CheckinRetryEnd    string `json:"checkin_retry_end"`    // "10:00"
+	CheckinStateFile   string `json:"checkin_state_file"`   // 空 = data/checkin-plan.json
+	TravelEnabled      bool   `json:"travel_enabled"`       // 缺省 true；false = 完全停猫猫旅行
+	ActivityEnabled    bool   `json:"activity_enabled"`     // 缺省 true；false = 停活跃上报
+	KeepaliveEnabled   bool   `json:"keepalive_enabled"`    // 缺省 true；false = 关 token 保活
+	SchoolEnabled      bool   `json:"school_enabled"`       // 缺省 true；false = 停开学季任务
+	CatEnabled         bool   `json:"cat_enabled"`          // 缺省 true；false = 停夜猫子任务
+	GrowthEnabled      bool   `json:"growth_enabled"`       // 缺省 true；false = 停成长任务自动排程
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
@@ -121,6 +133,11 @@ func DefaultSchedule() Schedule {
 		CatHours:              []int{1},
 		GrowthHours:           []int{1},
 		CheckinEnabled:        true,
+		CheckinMode:           "legacy",
+		CheckinWindowStart:    "08:00",
+		CheckinWindowEnd:      "09:30",
+		CheckinRetryStart:     "09:30",
+		CheckinRetryEnd:       "10:00",
 		TravelEnabled:         true,
 		ActivityEnabled:       true,
 		KeepaliveEnabled:      true,
@@ -151,6 +168,47 @@ func DefaultSchedule() Schedule {
 // RetryMaxPerDay：0 = 不允许重试（合法哨兵，不回落）；负值报错；缺省 1 由
 // DefaultSchedule 前置入。LedgerFile 不校验——台账落盘失败只记日志，不做 fail-fast。
 func (s *Schedule) Normalize() error {
+	if s.CheckinMode == "" {
+		s.CheckinMode = "legacy"
+	}
+	s.CheckinMode = strings.ToLower(strings.TrimSpace(s.CheckinMode))
+	if s.CheckinMode != "legacy" && s.CheckinMode != "random" {
+		return fmt.Errorf("schedule.checkin_mode: %q 不是合法值（legacy / random）", s.CheckinMode)
+	}
+	if s.CheckinWindowStart == "" {
+		s.CheckinWindowStart = "08:00"
+	}
+	if s.CheckinWindowEnd == "" {
+		s.CheckinWindowEnd = "09:30"
+	}
+	if s.CheckinRetryStart == "" {
+		s.CheckinRetryStart = "09:30"
+	}
+	if s.CheckinRetryEnd == "" {
+		s.CheckinRetryEnd = "10:00"
+	}
+	ws, _, err := parseClockMinutes(s.CheckinWindowStart)
+	if err != nil {
+		return fmt.Errorf("schedule.checkin_window_start: %w", err)
+	}
+	we, _, err := parseClockMinutes(s.CheckinWindowEnd)
+	if err != nil {
+		return fmt.Errorf("schedule.checkin_window_end: %w", err)
+	}
+	rs, _, err := parseClockMinutes(s.CheckinRetryStart)
+	if err != nil {
+		return fmt.Errorf("schedule.checkin_retry_start: %w", err)
+	}
+	re, _, err := parseClockMinutes(s.CheckinRetryEnd)
+	if err != nil {
+		return fmt.Errorf("schedule.checkin_retry_end: %w", err)
+	}
+	if ws >= we {
+		return fmt.Errorf("schedule.checkin_window_start 必须早于 checkin_window_end")
+	}
+	if rs >= re {
+		return fmt.Errorf("schedule.checkin_retry_start 必须早于 checkin_retry_end")
+	}
 	if len(s.CheckinHours) == 0 {
 		s.CheckinHours = []int{9, 21}
 	}
@@ -252,4 +310,18 @@ func checkHourRange(field, switchKey string, hours []int) error {
 		}
 	}
 	return nil
+}
+
+// parseClockMinutes 解析 HH:MM 为当日分钟数。
+func parseClockMinutes(v string) (int, int, error) {
+	parts := strings.Split(strings.TrimSpace(v), ":")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("时间格式应为 HH:MM")
+	}
+	h, err1 := strconv.Atoi(parts[0])
+	m, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, fmt.Errorf("时间格式应为 HH:MM（00:00–23:59）")
+	}
+	return h*60 + m, 0, nil
 }

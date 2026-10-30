@@ -66,6 +66,11 @@ func (s *Scheduler) recordRun(kind taskKind, trigger string, started time.Time, 
 	}
 	s.ledger.Record(r)
 
+	// random 模式的重试由 checkin_plan 的 retry 窗口负责；台账再排一次全量重试
+	// 会绕过计划、重复打上游，故这里直接返回。
+	if kind == taskCheckin && s.checkinMode == "random" {
+		return r
+	}
 	if trigger == triggerManual || !r.AllFailed {
 		return r
 	}

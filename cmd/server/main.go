@@ -344,6 +344,12 @@ func main() {
 		Pool:                p,
 		Upstream:            up,
 		CheckinHours:        cfg.Schedule.CheckinHours,
+		CheckinMode:         cfg.Schedule.CheckinMode,
+		CheckinWindowStart:  cfg.Schedule.CheckinWindowStart,
+		CheckinWindowEnd:    cfg.Schedule.CheckinWindowEnd,
+		CheckinRetryStart:   cfg.Schedule.CheckinRetryStart,
+		CheckinRetryEnd:     cfg.Schedule.CheckinRetryEnd,
+		CheckinStateFile:    checkinPlanPath(cfg),
 		TravelHours:         cfg.Schedule.TravelHours,
 		ActivityHours:       cfg.Schedule.ActivityHours,
 		KeepaliveHours:      cfg.Schedule.KeepaliveHours,
@@ -593,7 +599,8 @@ func main() {
 		// 任务执行台账只读视图（/status 的 task_ledger 段 + /metrics 的任务指标）。
 		// 与 Tasks 同款：*taskledger.Store 结构上即满足 server 侧的窄接口，
 		// server 包不必反向 import scheduler。
-		TaskLedger: sch.Ledger(),
+		TaskLedger:  sch.Ledger(),
+		CheckinPlan: sch.CheckinPlanStatus,
 		// 手动签到入口（POST /v1/checkin）。★ 走进程内 CheckinAll ★ 外部 CLI
 		// 签到不会更新网关内存额度（见 internal/server/checkin.go 顶部注释）。
 		CheckinFn: checkinReportFn(sch, p, cfg),
@@ -685,6 +692,14 @@ func main() {
 }
 
 // stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径回落当前目录）。
+// checkinPlanPath random 签到计划文件：显式配置优先，否则与 state 同目录。
+func checkinPlanPath(c *Config) string {
+	if p := strings.TrimSpace(c.Schedule.CheckinStateFile); p != "" {
+		return p
+	}
+	return stateSibling(c.StateFile, "checkin-plan.json")
+}
+
 func stateSibling(stateFile, name string) string {
 	dir := filepath.Dir(stateFile)
 	if dir == "" || dir == "." {

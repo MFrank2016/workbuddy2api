@@ -99,7 +99,7 @@ type Status struct {
 	PlanLabel     string    `json:"plan_label,omitempty"`
 	PlanStale     bool      `json:"plan_stale,omitempty"`
 	PlanCheckedAt time.Time `json:"plan_checked_at,omitempty"`
-	Enterprise bool `json:"enterprise,omitempty"`
+	Enterprise    bool      `json:"enterprise,omitempty"`
 	// ManualDisabled 运维手动停用（issue #138/#118）——与 disabled **并列独立**，
 	// 叠加态分别透出不合并（面板据此区分「系统判定坏了」与「我主动摘的」，
 	// 两种可用操作不同：前者可 revive，后者该 enable）。
@@ -110,6 +110,10 @@ type Status struct {
 	Paused bool `json:"paused,omitempty"`
 	// CheckinDone 本地今日已签到（签到成功或上游幂等拒绝均算；跨零点自然过期）。
 	CheckinDone bool `json:"checkin_done,omitempty"`
+	// random 签到计划（仅 checkin_mode=random 时由 server 注入；legacy 不写）。
+	CheckinPlanAt   time.Time `json:"checkin_plan_at,omitempty"`
+	CheckinAttempts int       `json:"checkin_attempts,omitempty"`
+	CheckinState    string    `json:"checkin_state,omitempty"`
 	// TokenUsage 聊天 token 用量摘要（面板账号表「最近一次用量」列）。
 	TokenUsage      TokenUsage `json:"token_usage,omitempty"`
 	SuccessCount    int64      `json:"success_count,omitempty"`
@@ -238,11 +242,11 @@ type entry struct {
 	// paused 暂停选号（panel 语义）：退出选号候选，但照常参与签到/活跃/保活/
 	// 余额刷新四类保号任务。与 disabled / manualDisabled 相互独立；持久化
 	// （stateAccount.Paused），重启保留。
-	paused   bool
+	paused        bool
 	planLabel     string
 	planStale     bool
 	planCheckedAt time.Time
-	lastUsed time.Time // 最近被选中时刻（防并发撞号）
+	lastUsed      time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效（高并发/低精度时钟下：
@@ -512,9 +516,9 @@ type stateAccount struct {
 	CreditsTotal             int64     `json:"credits_total,omitempty"`
 	Paused                   bool      `json:"paused,omitempty"`
 	LastCheckinDay           string    `json:"last_checkin_day,omitempty"`
-	PlanLabel     string    `json:"plan_label,omitempty"`
-	PlanStale     bool      `json:"plan_stale,omitempty"`
-	PlanCheckedAt time.Time `json:"plan_checked_at,omitempty"`
+	PlanLabel                string    `json:"plan_label,omitempty"`
+	PlanStale                bool      `json:"plan_stale,omitempty"`
+	PlanCheckedAt            time.Time `json:"plan_checked_at,omitempty"`
 	CreditsEarliestExpiry    time.Time `json:"credits_earliest_expiry,omitempty"`
 	CreditsEarliestRemaining int64     `json:"credits_earliest_remaining,omitempty"`
 	Disabled                 bool      `json:"disabled"`

@@ -67,6 +67,13 @@ type Config struct {
 	// <=0 时禁用分桶（全部归长期，行为与引入前一致）。默认建议 7*24h。
 	ExpiringSoonWindow time.Duration
 
+	// CheckinMode 签到模式：legacy（默认）/ random。
+	CheckinMode        string
+	CheckinWindowStart string
+	CheckinWindowEnd   string
+	CheckinRetryStart  string
+	CheckinRetryEnd    string
+	CheckinStateFile   string
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
 	// 禁用后不再有任何签到时点。旅行不再搭签到便车（已剥离为独立排程）。
 	CheckinDisabled bool
@@ -149,6 +156,13 @@ type Scheduler struct {
 	rearmSweep chan struct{}
 	// sweepInterval 任务补领清扫间隔（纳秒；0 = 暂停）。
 	sweepInterval atomic.Int64
+	// random 签到计划：checkinPlans 恒非 nil（New 构造），仅 random 模式读写。
+	checkinPlans       *PlanStore
+	checkinMode        string
+	checkinWindowStart string
+	checkinWindowEnd   string
+	checkinRetryStart  string
+	checkinRetryEnd    string
 }
 
 // Ledger 返回任务执行台账（只读视图），供 server 的 /status 与 /metrics 渲染。
@@ -183,14 +197,35 @@ func New(cfg Config) *Scheduler {
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
 	}
+	if cfg.CheckinMode == "" {
+		cfg.CheckinMode = "legacy"
+	}
+	if cfg.CheckinWindowStart == "" {
+		cfg.CheckinWindowStart = "08:00"
+	}
+	if cfg.CheckinWindowEnd == "" {
+		cfg.CheckinWindowEnd = "09:30"
+	}
+	if cfg.CheckinRetryStart == "" {
+		cfg.CheckinRetryStart = "09:30"
+	}
+	if cfg.CheckinRetryEnd == "" {
+		cfg.CheckinRetryEnd = "10:00"
+	}
 	return &Scheduler{
-		cfg:           cfg,
-		adoptTried:    make(map[string]string),
-		rearmSchedule: make(chan struct{}, 1),
-		rearmBalance:  make(chan struct{}, 1),
-		rewardClaimed: make(map[string]string),
-		ledger:        taskledger.New(cfg.LedgerFile),
-		rearmSweep:    make(chan struct{}, 1),
+		cfg:                cfg,
+		adoptTried:         make(map[string]string),
+		rearmSchedule:      make(chan struct{}, 1),
+		rearmBalance:       make(chan struct{}, 1),
+		rewardClaimed:      make(map[string]string),
+		ledger:             taskledger.New(cfg.LedgerFile),
+		rearmSweep:         make(chan struct{}, 1),
+		checkinPlans:       NewPlanStore(cfg.CheckinStateFile),
+		checkinMode:        cfg.CheckinMode,
+		checkinWindowStart: cfg.CheckinWindowStart,
+		checkinWindowEnd:   cfg.CheckinWindowEnd,
+		checkinRetryStart:  cfg.CheckinRetryStart,
+		checkinRetryEnd:    cfg.CheckinRetryEnd,
 	}
 }
 
@@ -358,6 +393,30 @@ func (s *Scheduler) fireAt(now time.Time, hours []int, kind taskKind) time.Time 
 	return nextFire(now, hours, kind, s.cfg.JitterMinutes, s.cfg.JitterSalt)
 }
 
+// nextRandomCheckin 返回 random 模式下一次检查计划的时刻。
+func (s *Scheduler) nextRandomCheckin(now time.Time) time.Time {
+	day := travelDay(now)
+	start, err := parseClock(day, s.checkinWindowStart)
+	if err != nil {
+		return now.Add(time.Hour)
+	}
+	end, err := parseClock(day, s.checkinRetryEnd)
+	if err != nil {
+		return now.Add(time.Hour)
+	}
+	if now.Before(start) {
+		return start
+	}
+	if !now.After(end) {
+		return now.Truncate(time.Minute).Add(time.Minute)
+	}
+	next, err := parseClock(travelDay(now.Add(24*time.Hour)), s.checkinWindowStart)
+	if err != nil {
+		return now.Add(24 * time.Hour)
+	}
+	return next
+}
+
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
 // 多类任务若配到同一小时（如签到与旅行都含 9），该时刻多类任务需一并执行。
 // 已显式禁用的任务不进候选（nextFire 对其零值返回零时间，nextWake 再跳过零时点）。
@@ -375,7 +434,11 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	s.schedMu.Unlock()
 	var slots []slot
 	if !checkinOff {
-		slots = append(slots, slot{s.fireAt(now, checkinHours, taskCheckin), taskCheckin})
+		if s.checkinMode == "random" {
+			slots = append(slots, slot{s.nextRandomCheckin(now), taskCheckin})
+		} else {
+			slots = append(slots, slot{s.fireAt(now, checkinHours, taskCheckin), taskCheckin})
+		}
 	}
 	if !travelOff {
 		slots = append(slots, slot{s.fireAt(now, travelHours, taskTravel), taskTravel})
@@ -558,6 +621,9 @@ func (s *Scheduler) RunCheckinNow() { s.runCheckin(triggerManual) }
 // out 为空 → total=0、fail=0 → 不判全灭、不排重试，这是对的——「与另一次签到
 // 撞车」不是失败。
 func (s *Scheduler) runCheckin(trigger string) ([]CheckinOutcome, error) {
+	if s.checkinMode == "random" {
+		return s.runRandomCheckin(trigger)
+	}
 	started := time.Now()
 	out, err := s.CheckinAll()
 	if err != nil {
@@ -581,6 +647,87 @@ func (s *Scheduler) runCheckin(trigger string) ([]CheckinOutcome, error) {
 	}
 	s.recordRun(taskCheckin, trigger, started, t)
 	return out, err
+}
+
+// runRandomCheckin 执行 random 模式下到点的账号；首次失败只安排一次重试。
+func (s *Scheduler) runRandomCheckin(trigger string) ([]CheckinOutcome, error) {
+	started := time.Now()
+	now := started
+	day := travelDay(now)
+	ws, err := parseClock(day, s.checkinWindowStart)
+	if err != nil {
+		return nil, err
+	}
+	we, err := parseClock(day, s.checkinWindowEnd)
+	if err != nil {
+		return nil, err
+	}
+	rs, err := parseClock(day, s.checkinRetryStart)
+	if err != nil {
+		return nil, err
+	}
+	re, err := parseClock(day, s.checkinRetryEnd)
+	if err != nil {
+		return nil, err
+	}
+	s.checkinPlans.Prune(day)
+	for _, st := range s.cfg.Pool.List() {
+		s.checkinPlans.Ensure(st.UID, day, now, ws, we, rs, re)
+	}
+	due := s.checkinPlans.Due(now, re)
+	if len(due) == 0 {
+		return nil, nil
+	}
+	if !s.checkinMu.TryLock() {
+		return nil, ErrBusy
+	}
+	defer s.checkinMu.Unlock()
+	dueSet := make(map[string]bool, len(due))
+	for _, p := range due {
+		dueSet[p.UID] = true
+		s.checkinPlans.MarkAttempt(p.UID, day, now)
+	}
+	out, runErr := s.checkinAllLocked(context.Background(), func(uid string) bool { return dueSet[uid] })
+	if runErr != nil {
+		log.Printf("random checkin skipped: %v", runErr)
+	}
+	seen := make(map[string]bool, len(out))
+	var t runTally
+	t.total = len(out)
+	for _, oc := range out {
+		seen[oc.UID] = true
+		switch oc.Status {
+		case CheckinOK:
+			t.ok++
+			s.checkinPlans.SetState(oc.UID, day, "done")
+		case CheckinAlready:
+			t.already++
+			s.checkinPlans.SetState(oc.UID, day, "done")
+		case CheckinSkipped, CheckinInactive:
+			t.skipped++
+			s.checkinPlans.SetState(oc.UID, day, "skipped")
+		case CheckinFail:
+			t.fail++
+			s.checkinPlans.SetState(oc.UID, day, "failed")
+		}
+	}
+	for _, p := range due {
+		if !seen[p.UID] {
+			t.fail++
+			s.checkinPlans.SetState(p.UID, day, "failed")
+		}
+	}
+	s.recordRun(taskCheckin, trigger, started, t)
+	return out, runErr
+}
+
+// CheckinPlanStatus 返回账号当日计划（供 /status 渲染）。
+func (s *Scheduler) CheckinPlanStatus(uid string) (time.Time, int, string, bool) {
+	p, ok := s.checkinPlans.Get(uid, travelDay(time.Now()))
+	if !ok {
+		return time.Time{}, 0, "", false
+	}
+	return p.PlanAt, p.Attempts, p.State, true
 }
 
 // checkinAccountDelay 相邻账号之间的最小间隔（issue #256）。
@@ -673,15 +820,21 @@ func (s *Scheduler) dailyCheckinWithRetry(ctx context.Context, a *auth.Auth, lab
 // session dead 走 Pool.NoteSessionDead 的**连续计数**语义（与 keepalive 一致）：
 // 一次刷新失败不再立即杀号，连续 sessionDeadThreshold 次才禁用，刷新成功清计数。
 func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
+	return s.checkinAll(context.Background(), nil)
+}
+
+// checkinAll 是全量签到的实现；filter 非 nil 时只处理命中的账号（random 模式）。
+func (s *Scheduler) checkinAll(ctx context.Context, filter func(string) bool) ([]CheckinOutcome, error) {
 	if !s.checkinMu.TryLock() {
 		return nil, ErrBusy
 	}
 	defer s.checkinMu.Unlock()
+	return s.checkinAllLocked(ctx, filter)
+}
 
+// checkinAllLocked 在已持有 checkinMu 的前提下执行签到遍历。
+func (s *Scheduler) checkinAllLocked(ctx context.Context, filter func(string) bool) ([]CheckinOutcome, error) {
 	started := time.Now()
-	// CheckinAll 无外部 ctx（手动/定时入口均同步跑完）：用背景 ctx 承载
-	// 账号间隔与退避重试的取消语义，保持与引入前一致的不可取消行为。
-	ctx := context.Background()
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
 	var okN, alreadyN, inactiveN, failCheckinN, failResourceN, skipN int
@@ -697,6 +850,9 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		return sleepCtx(ctx, s.accountGap(ctx, checkinAccountDelay))
 	}
 	for _, st := range statuses {
+		if filter != nil && !filter(st.UID) {
+			continue
+		}
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled && !includeDisabled {
 			oc.Status, oc.Detail = CheckinSkipped, "disabled"

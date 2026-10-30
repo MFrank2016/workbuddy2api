@@ -179,6 +179,8 @@ type Config struct {
 	// （理由见 admin_tasks.go 的 TaskRunner 注释）。台账的数据结构与存储放在
 	// internal/taskledger，两个包都只依赖它，不产生环。
 	TaskLedger TaskLedgerReader
+	// CheckinPlan random 签到计划查询（uid → 计划时刻/尝试次数/状态）。nil = 未接线。
+	CheckinPlan func(uid string) (time.Time, int, string, bool)
 
 	// CheckinFn 手动触发一次全量签到（POST /v1/checkin），返回报告。
 	//
@@ -605,8 +607,18 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	budgetUsed, budgetLimit, budgetRejected := h.budget.snapshot()
 	// realm_totals 按域分组的计数汇总（双 realm 并存时运维一眼看到各域可用性）：
 	// 只新增字段，既有 total/healthy/cooling/disabled/in_flight_full 汇总键不变（零回归）。
+	accounts := h.cfg.Pool.List()
+	if h.cfg.CheckinPlan != nil {
+		for i := range accounts {
+			if at, attempts, state, ok := h.cfg.CheckinPlan(accounts[i].UID); ok {
+				accounts[i].CheckinPlanAt = at
+				accounts[i].CheckinAttempts = attempts
+				accounts[i].CheckinState = state
+			}
+		}
+	}
 	body := map[string]any{
-		"accounts":       h.cfg.Pool.List(),
+		"accounts":       accounts,
 		"total":          total,
 		"healthy":        healthy,
 		"cooling":        cooling,
