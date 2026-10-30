@@ -121,6 +121,10 @@ type Config struct {
 	FirstByteRetry bool
 	// Debug 完整请求诊断（可选；nil = 关闭）。
 	Debug *DebugCapture
+	// Listen 配置监听地址（/status.listener.configured）。
+	Listen string
+	// ListenerAddr 返回当前实际监听地址（/status.listener.actual）；nil = 未知。
+	ListenerAddr func() string
 	// DeleteOnAuthFailure 授权失效时删除凭据文件（默认 false = 只禁用保留）。
 	DeleteOnAuthFailure bool
 
@@ -614,6 +618,19 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		"listener": func() map[string]any {
+			actual := h.cfg.Listen
+			if h.cfg.ListenerAddr != nil {
+				if a := h.cfg.ListenerAddr(); a != "" {
+					actual = a
+				}
+			}
+			return map[string]any{
+				"configured": h.cfg.Listen,
+				"actual":     actual,
+				"hot_switch": h.cfg.ListenerAddr != nil,
+			}
+		}(),
 		"pool": map[string]any{
 			"waiting":             h.cfg.Pool.QueueDepth(),
 			"queue_depth":         h.cfg.Pool.QueueDepth(),

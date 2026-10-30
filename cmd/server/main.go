@@ -124,6 +124,8 @@ func checkinJSONPath(stateFile string) string {
 	return filepath.Join(filepath.Dir(stateFile), "checkin.json")
 }
 
+var activeListener *ListenerManager
+
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json")
 	hashPwd := flag.String("hash-password", "", "print PBKDF2 hash for panel.password_hash and exit")
@@ -562,6 +564,13 @@ func main() {
 			FullRequests: cfg.Debug.FullRequests,
 			Dir:          cfg.Debug.Dir,
 		},
+		Listen: cfg.Listen,
+		ListenerAddr: func() string {
+			if activeListener != nil {
+				return activeListener.Addr()
+			}
+			return ""
+		},
 		DeleteOnAuthFailure: cfg.Auth.DeleteOnAuthFailure,
 		// 流式韧性静态值：仅供 Live 为 nil 的裸用路径回落（生产始终走 Live 快照，
 		// 显式关闭由快照里的 0 / false 表达）。
@@ -631,19 +640,26 @@ func main() {
 
 	warnInsecureListen(cfg.Listen, cfg.APIKey)
 
-	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           h,
-		ReadHeaderTimeout: 30 * time.Second,
-		// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。
-		// 吸收自 panel（issue #100）：server.read_timeout 配置化，默认 300s，
-		// "0" = 不限制。旧 max_body_mb 移除后请求体无上限，超大 body 成为唯一
-		// 的自然约束——超时会得到连接错误（read timeout）而非 413。
-		ReadTimeout: cfg.ServerReadTimeoutDur,
-		// IdleTimeout keep-alive 空闲连接回收：配合 ctx 传播（FIX-2）防连接泄漏堆积。
-		// 注意：SSE 流式响应期间连接非空闲，不受此项掐断；不设全局 WriteTimeout
-		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
-		IdleTimeout: 120 * time.Second,
+	newSrv := func(addr string) *http.Server {
+		return &http.Server{
+			Addr:              addr,
+			Handler:           h,
+			ReadHeaderTimeout: 30 * time.Second,
+			// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。
+			// 吸收自 panel（issue #100）：server.read_timeout 配置化，默认 300s，
+			// "0" = 不限制。旧 max_body_mb 移除后请求体无上限，超大 body 成为唯一
+			// 的自然约束——超时会得到连接错误（read timeout）而非 413。
+			ReadTimeout: cfg.ServerReadTimeoutDur,
+			// IdleTimeout keep-alive 空闲连接回收：配合 ctx 传播（FIX-2）防连接泄漏堆积。
+			// 注意：SSE 流式响应期间连接非空闲，不受此项掐断；不设全局 WriteTimeout
+			// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
+			IdleTimeout: 120 * time.Second,
+		}
+	}
+	listener := NewListenerManager(newSrv)
+	activeListener = listener
+	if err := listener.Start(cfg.Listen); err != nil {
+		log.Fatalf("http: %v", err)
 	}
 	go func() {
 		<-ctx.Done()
@@ -654,9 +670,7 @@ func main() {
 		if cErr := store.Close(); cErr != nil {
 			log.Printf("WARN: [server] redisstore close: %v", cErr)
 		}
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		_ = listener.Close()
 	}()
 
 	if cfg.Global.Enabled {
@@ -666,9 +680,7 @@ func main() {
 		log.Printf("global realm 已禁用（config global.enabled=false，纯 CN）")
 	}
 	log.Printf("workbuddy2api listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("http: %v", err)
-	}
+	<-ctx.Done()
 	log.Printf("bye")
 }
 
@@ -845,6 +857,18 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 			return nil, fmt.Errorf("replace config: %w", err)
 		}
 	}
+	// 监听地址热切换：新地址 bind 成功后才关旧 listener；失败恢复旧配置文件。
+	if activeListener != nil && !sameListen(activeListener.Addr(), newCfg.Listen) {
+		if lerr := activeListener.Apply(newCfg.Listen); lerr != nil {
+			if write {
+				if rerr := os.WriteFile(path, oldRaw, 0o600); rerr != nil {
+					log.Printf("WARN: [server] restore config after listen failure: %v", rerr)
+				}
+			}
+			return nil, fmt.Errorf("listen: %w", lerr)
+		}
+		restartFields = removeString(restartFields, "listen")
+	}
 	// 出口线路表：`proxies` 段改了要重新注入，否则内存里的路由表还是旧的 ——
 	// 面板那边会显示「已热生效」，而新增/改名的线路实际查不到。
 	// ConfigureProxies 同时会清空按线路缓存的 transport，地址变更也能立即生效。
@@ -889,6 +913,16 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.SetBalanceInterval(balanceIntervalFor(newCfg))
 	return restartFields, nil
+}
+
+func removeString(list []string, target string) []string {
+	out := list[:0]
+	for _, s := range list {
+		if s != target {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // mergeConfigMaps 把 incoming 深合并进 cur（只覆盖提交的键，保留手写未知键）。
