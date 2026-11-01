@@ -1070,6 +1070,32 @@ func TestRefreshTokenExpiresInWithinCapApplied(t *testing.T) {
 	}
 }
 
+// TestRefreshTokenJWTValidationNoDeadlock 回归：refresh 写回段（持 a.mu）内的身份校验
+// 不得回调任何加锁访问器（sync.Mutex 不可重入）。事故路径：validateRefreshedToken
+// 收 *auth.Auth 后调 Realm() → 二次加锁自锁；keepalive 22 点触发后全池冻结
+// （/healthz 与全部选号路径卡死）。现在校验只吃 uid/realm 快照值。
+// 响应 accessToken 是合法 JWT（iss 与账号 realm 同域）时必须成功写回。
+func TestRefreshTokenJWTValidationNoDeadlock(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		resp := `{"code":0,"data":{"accessToken":"` + makeTestJWT("u1", "https://copilot.tencent.com") + `","refreshToken":"newrt","expiresIn":3600}}`
+		return jsonResp(200, resp), nil
+	})
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1, UID: "u1", Domain: "copilot.tencent.com"}
+	done := make(chan error, 1)
+	go func() { done <- c.RefreshToken(a) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		if a.AccessTokenValue() == "at" {
+			t.Fatal("accessToken 未写回（校验分支未走通）")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh 超时——锁内校验回调加锁访问器导致自锁（回归）")
+	}
+}
+
 // TestClassifyChannelVerificationNotAccountFault 锁定根因修复（实测 8 个 global 号
 // 被误禁）：上游「渠道校验失败」与「账号封禁」的 msg 同为 "request illegal"，但前者
 // 的 displayTips 含稳定 ASCII 标记 "failed channel verification"——它是请求侧问题
