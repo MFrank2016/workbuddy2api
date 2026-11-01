@@ -962,6 +962,18 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
 
         <div class="box">
+          <header><h3>模型</h3></header>
+          <div class="pad">
+            <label class="fld"><span class="lb">模型白名单（逗号分隔，留空 = 全部放行）</span>
+              <input name="models_allowed" placeholder="deepseek-v4.1-flash, global:glm-5.3">
+              <span class="hint">只放行列表内模型；支持 cn:/global: 前缀；保存后立即生效</span></label>
+            <label class="fld"><span class="lb">模型黑名单（逗号分隔，留空 = 不隐藏）</span>
+              <input name="models_hidden" placeholder="glm-5.2, global:secret-model">
+              <span class="hint">隐藏列表内模型；支持 cn:/global: 前缀；保存后立即生效</span></label>
+          </div>
+        </div>
+
+        <div class="box">
           <header><h3>定时任务</h3></header>
           <div class="pad">
             <div class="grid2">

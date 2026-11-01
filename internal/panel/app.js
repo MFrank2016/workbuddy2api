@@ -1094,6 +1094,7 @@ const CFG_MAP = {
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  models_allowed: ['models', 'allowed'], models_hidden: ['models', 'hidden'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -1143,9 +1144,13 @@ function collectConfig() {
     else if (el.type === 'number') { v = el.value.trim() === '' ? undefined : Number(el.value); }
     else {
       const raw = el.value.trim();
+      // 模型白/黑名单是 []string：留空必须下发空数组（清空白名单 = 关闭过滤），
+      // 不能走「空 = 不下发」，否则面板显示已清空而配置里仍是旧列表。
+      const isModelList = name === 'models_allowed' || name === 'models_hidden';
       // 覆盖型字段空串照发（见 CLEARABLE_CFG）；其余空 = 不下发。
-      if (raw === '') v = CLEARABLE_CFG.has(name) ? '' : undefined;
+      if (raw === '') v = isModelList ? [] : (CLEARABLE_CFG.has(name) ? '' : undefined);
       else if (name.endsWith('_hours')) v = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
+      else if (isModelList) v = raw.split(/[,，\s]+/).filter(Boolean);
       else v = raw;
     }
     if (v !== undefined) put(out, path, v);
