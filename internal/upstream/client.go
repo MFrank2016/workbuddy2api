@@ -1248,6 +1248,8 @@ func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error
 	if cerr != nil {
 		return nil, cerr
 	}
+	// 显式声明官方四段编码（对齐真机）；配套解压在下面 decodeResponseBody。
+	req.Header.Set("Accept-Encoding", officialAcceptEncoding)
 	resp, err := doRequest(client, req)
 	if err != nil {
 		return nil, err
@@ -1256,6 +1258,11 @@ func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
+	}
+	// 显式 Accept-Encoding 关闭了 net/http 透明解压，这里补回来；失败按解析错误
+	// 返回（不参与 Classify/罚号）。
+	if raw, err = decodeResponseBody(resp, raw); err != nil {
+		return nil, fmt.Errorf("decode body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
