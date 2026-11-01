@@ -255,8 +255,8 @@ func TestChatSoftRateHint(t *testing.T) {
 	if e.Error.Message != raw {
 		t.Errorf("message must be verbatim: %q", e.Error.Message)
 	}
-	if e.Error.GatewayHint == nil || *e.Error.GatewayHint != "rate limited by upstream; retry after reset" {
-		t.Errorf("gateway_hint=%v", e.Error.GatewayHint)
+	if e.Error.GatewayHint == nil || !strings.Contains(*e.Error.GatewayHint, "model_rate_limit") {
+		t.Errorf("gateway_hint=%v want model_rate_limit attribution", e.Error.GatewayHint)
 	}
 }
 

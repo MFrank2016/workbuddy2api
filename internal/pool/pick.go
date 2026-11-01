@@ -345,6 +345,9 @@ func (p *Pool) pickEarliestExpiryLockedScopedProfile(tried map[string]bool, now 
 		if e.disabled || e.manualDisabled || e.paused {
 			continue // 禁用/手动停用/暂停的账号永不参与兜底
 		}
+		if e.modelCooled(now, model) {
+			continue // 兜底也不能绕过模型冷却（普通 429 与 6004 都按模型停车）
+		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
 		}

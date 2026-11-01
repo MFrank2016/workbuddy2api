@@ -1201,19 +1201,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 不需要异步核查（冗余）。立即换号。
 		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
 	case upstream.ErrSoftRate:
-		// 统一对齐上游重置时间（重构核心）：只要 body 带「将在 … 重置」，无论业务
-		// code 是 6004 还是 11140 rate-limiting 等形态，都精确冷却到该墙钟、绝不
-		// softStreak 指数堆加。
-		//   - 模型级（6004）→ CooldownSoftForModel：写 modelCooldowns[model]，切模型
-		//     豁免（既有 issue #31 语义）。
-		//   - 账号级（非 6004）→ CooldownSoftRate：写账号级 until，不产生模型豁免
-		//     （普通账号级限流不该因切模型绕过）。
+		// 聊天限流按**账号 + 模型**隔离：6004 与普通 429 都只停当前模型，同号换
+		// 模型立即可用；无模型上下文时由池退回账号级冷却（CooldownSoftForModel 内
+		// 部处理）。时长优先级：上游重置墙钟 → Retry-After 头 → 有界退避。
+		modelReason := "429 model rate limit"
+		if s := strings.TrimSpace(body); s != "" {
+			modelReason = "429 model rate limit: " + s
+		}
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
-			if upstream.IsModelRateLimit(body) {
-				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "6004 model rate limit")
-				return
-			}
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
+			h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, modelReason)
 			return
 		}
 		// P1-2：body 无重置文案但带 Retry-After 头 → 冷却到该时刻（不做指数堆加，
@@ -1221,12 +1217,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// （上方已 return）——文案是上游更权威的口径（WAF 403 报告 §2.1：intl CLI
 		// 同序，Retry-After 也只在无重置文案时兜底）。
 		if uerr != nil && uerr.RetryAfter > 0 {
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
+			h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), model, modelReason+" (retry-after)")
 			return
 		}
-		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶
-		// soft_rate_max）；已在冷却中的兜底探测不翻倍（见 CooldownSoftRate）。
-		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
+		// 无重置时间 → 模型级有界退避（soft_rate 基数起、按命中翻倍、封顶
+		// soft_rate_max）；并发失败不延长正在生效的模型冷却（见 CooldownSoftForModel）。
+		h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), time.Time{}, model, modelReason)
 	case upstream.ErrWafBlock:
 		// P0-1：WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族
 		// （不新建平行冷却系统）：基数 wafCooldownBase（60s，抖动后落 [45s,75s]）、

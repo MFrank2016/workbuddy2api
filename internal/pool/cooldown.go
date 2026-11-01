@@ -108,6 +108,11 @@ func (p *Pool) ClearExpiringSnapshots() {
 // 死逻辑，纯属库房麻痹）；无重置时间时，「冷却中兜底探测再 429」不再 softStreak++
 // 翻倍——这正是用户「全池被推到 2h 封顶」的元凶。
 func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string) {
+	if model == "" {
+		// 无模型上下文 → 退回账号级冷却（与旧语义一致）。
+		p.CooldownSoftRate(uid, base, resetAt, reason)
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
@@ -123,16 +128,23 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 				Reason:  reason,
 			}
 		} else {
-			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
-			// softRateMax）。注意：**在软冷却中**（until 未到期）时不推进/不延长。
-			if e.coolKind != CoolSoft || !now.Before(e.until) {
-				d := p.softDurationLocked(base, e.softStreak+1)
-				e.softStreak++
-				e.until = now.Add(d)
+			// 无解析时间：把 **(号, 模型)** 停车，而不是整号冷却。普通 429 与 6004
+			// 同口径：上游文案就是让客户端换模型，实测同号换模型立刻可用；按账号
+			// 冷却会把「一个模型抖动」放大成整池停摆（线上事故：几个并发请求几十秒
+			// 内冷掉十几个号 → 全站 503）。TTL 沿用 soft_rate 家族（base 起按命中
+			// 翻倍、封顶 soft_rate_max），与带重置时间分支共用 modelCooldowns。
+			if old, ok := e.modelCooldowns[model]; ok && !old.AuditOnly && old.Until.After(now) {
+				return // 并发失败不能延长正在生效的模型冷却。
 			}
-			e.coolKind = CoolSoft
-			e.reason = reason
-			e.modelCooldowns = nil
+			if e.modelCooldowns == nil {
+				e.modelCooldowns = map[string]modelCooldown{}
+			}
+			hits := e.modelCooldowns[model].Hits + 1
+			e.modelCooldowns[model] = modelCooldown{
+				Until:  now.Add(p.softDurationLocked(base, hits)),
+				Reason: reason,
+				Hits:   hits,
+			}
 		}
 		p.dirty.Store(true)
 	}

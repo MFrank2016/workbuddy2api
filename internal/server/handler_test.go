@@ -454,12 +454,16 @@ func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 		t.Errorf("calls=%v want bad/good 各 1 次", calls)
 	}
 	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad 应进入 soft_rate 冷却: %+v", st)
+	// 普通 429 与 6004 同口径：只停 (账号, 模型)，账号本身不进入账号级冷却。
+	if st.Cooling {
+		t.Fatalf("普通 429 不应把整号冷却: %+v", st)
+	}
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.2" {
+		t.Fatalf("bad 应写入 glm-5.2 模型级冷却台账: %+v", st)
 	}
 	// 冷却时长取自注入的 SoftCooldown，不依赖真实等待。
-	if max := int64(soft / time.Second); st.CoolRemaining <= 0 || st.CoolRemaining > max {
-		t.Errorf("cool_remaining_sec=%d want in (0,%d]", st.CoolRemaining, max)
+	if d := time.Until(st.RateLimitedModels[0].Until); d <= 0 || d > soft+2*time.Second {
+		t.Errorf("model cooldown remaining=%v want in (0,%v]", d, soft)
 	}
 
 	// 冷却生效：同一账号在冷却期内不得再被选中。
@@ -765,18 +769,18 @@ func TestApplyErrorPolicySoftRateResetTime11140(t *testing.T) {
 	if !ok {
 		t.Fatal("u1 missing")
 	}
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("应为账号级 soft_rate 冷却: %+v", st)
+	// 普通 429 也按模型隔离：账号不进入账号级冷却，只写模型级台账。
+	if st.Cooling {
+		t.Fatalf("普通 429 不应把整号冷却: %+v", st)
 	}
 	if st.SoftStreak != 0 {
 		t.Errorf("带重置时间的 429 绝不 softStreak 堆加，soft_streak=%d want 0", st.SoftStreak)
 	}
-	if d := st.Until.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("账号级 until=%v want ~reset=%v（精确对齐，无退避）", st.Until, reset)
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
+		t.Fatalf("应为 glm-5.3 模型级冷却: %+v", st.RateLimitedModels)
 	}
-	// 非 6004 走账号级，不写模型级台账（不存在切模型豁免）。
-	if len(st.RateLimitedModels) != 0 {
-		t.Errorf("11140 账号级限流不应产生模型级台账: %+v", st.RateLimitedModels)
+	if d := st.RateLimitedModels[0].Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("模型级 until=%v want ~reset=%v（精确对齐，无退避）", st.RateLimitedModels[0].Until, reset)
 	}
 }
 
@@ -827,7 +831,7 @@ func TestApplyErrorPolicyChannelRefusedDoesNotDisable(t *testing.T) {
 	}{
 		{"11128 channel refused", `{"code":"11-128","msg":"request illegal","displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client."}}`, upstream.ErrChannelRefused, false, false},
 		{"11140 account restricted", `{"code":11140,"msg":"request illegal"}`, upstream.ErrAccountFault, false, true}, // 本地 account_fault_hold：默认 24h 冷却后重试，不立即禁用
-		{"11140 rate-limiting variant", `{"code":11140,"msg":"The model provider is rate-limiting requests."}`, upstream.ErrSoftRate, false, true},
+		{"11140 rate-limiting variant", `{"code":11140,"msg":"The model provider is rate-limiting requests."}`, upstream.ErrSoftRate, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -844,6 +848,9 @@ func TestApplyErrorPolicyChannelRefusedDoesNotDisable(t *testing.T) {
 			}
 			if st.Cooling != tc.wantCooling {
 				t.Errorf("cooling=%v want %v (%+v)", st.Cooling, tc.wantCooling, st)
+			}
+			if tc.kind == upstream.ErrSoftRate && len(st.RateLimitedModels) == 0 {
+				t.Errorf("普通 429 应写模型级台账: %+v", st)
 			}
 			if !tc.wantDisabled && st.ErrTotal != 0 {
 				t.Errorf("不罚号路径不应累计错误计数: err_total=%d", st.ErrTotal)
@@ -874,11 +881,14 @@ func TestNewHandlerSoftCooldownDefault(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad 应进入 soft_rate 冷却: %+v", st)
+	if st.Cooling {
+		t.Fatalf("普通 429 不应把整号冷却: %+v", st)
 	}
-	if st.CoolRemaining <= 599 || st.CoolRemaining > 600 {
-		t.Errorf("default soft cooldown cool_remaining_sec=%d want 600", st.CoolRemaining)
+	if len(st.RateLimitedModels) != 1 {
+		t.Fatalf("bad 应写入模型级冷却台账: %+v", st)
+	}
+	if d := time.Until(st.RateLimitedModels[0].Until); d < 595*time.Second || d > 602*time.Second {
+		t.Errorf("default model cooldown remaining=%v want ~600s", d)
 	}
 }
 
@@ -1140,12 +1150,15 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad should be soft cooling: %+v", st)
+	if st.Cooling {
+		t.Fatalf("6004 无重置时间也应只停模型，不整号冷却: %+v", st)
+	}
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
+		t.Fatalf("bad 应写入 glm-5.3 模型级冷却: %+v", st)
 	}
 	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
-	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
-		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
+	if d := time.Until(st.RateLimitedModels[0].Until); d <= 0 || d > 62*time.Second {
+		t.Errorf("model cooldown remaining=%v want ~60s (soft base, not parsed)", d)
 	}
 }
 
@@ -1789,23 +1802,22 @@ func TestStatusRateLimitedModelsLedger(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	// 双号都被 6004 → 全部换完仍限流；且两个号都对该模型处于模型级冷却（选号
-	// 侧快照 modelBlock 归因成立）→ 末端按「模型不可用」映射 400 model_unavailable
-	// （吸收 panel 语义：模型级阻塞与账号级限流区分开——换号必然同样失败，
-	// 客户端应换模型而不是按可重试错误重试；最早解封时刻在 gateway_hint 里）。
-	// 换号过程已把 u1 冷却、写入模型级台账（本测试下半部分验证 /status）。
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body)
+	// 侧快照 modelBlock 归因成立）→ 末端按普通 429 映射 429 rate_limit_exceeded
+	// （可重试语义：等冷却或换模型；最早解封时刻在 gateway_hint 里）。
+	// 换号过程已把 u1 写入模型级台账（本测试下半部分验证 /status）。
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d want 429 body=%s", rec.Code, rec.Body)
 	}
 	var e map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
 		t.Fatalf("resp not json: %v body=%s", err, rec.Body)
 	}
 	errObj, _ := e["error"].(map[string]any)
-	if errObj == nil || errObj["code"] != "model_unavailable" {
-		t.Fatalf("want model_unavailable envelope: %s", rec.Body)
+	if errObj == nil || errObj["code"] != "rate_limit_exceeded" {
+		t.Fatalf("want rate_limit_exceeded envelope: %s", rec.Body)
 	}
-	if hint, _ := errObj["gateway_hint"].(string); !strings.Contains(hint, "model_blocked") {
-		t.Errorf("gateway_hint 应含 model_blocked 归因（模型级阻塞 vs 账号级限流区分）: %s", rec.Body)
+	if hint, _ := errObj["gateway_hint"].(string); !strings.Contains(hint, "model_rate_limit") {
+		t.Errorf("gateway_hint 应含 model_rate_limit 归因: %s", rec.Body)
 	}
 	// u1 被选中过（已冷却 + 有台账）。
 	st, ok := p.Status("u1")
@@ -1899,8 +1911,12 @@ func TestChatAllRateLimitedPassesThroughUpstream(t *testing.T) {
 	}
 	// 两个号都被限流冷却（换号过程完整跑完仍无健康号）。
 	for _, uid := range []string{"u1", "u2"} {
-		if st, _ := p.Status(uid); !st.Cooling || st.CoolKind != "soft_rate" {
-			t.Errorf("%s should be soft_rate cooling: %+v", uid, st)
+		st, _ := p.Status(uid)
+		if st.Cooling {
+			t.Errorf("%s 普通 429 不应整号冷却: %+v", uid, st)
+		}
+		if len(st.RateLimitedModels) == 0 {
+			t.Errorf("%s should have model-level cooldown: %+v", uid, st)
 		}
 	}
 }

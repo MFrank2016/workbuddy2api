@@ -373,6 +373,12 @@ func (h *Handler) recordChatAttempt(st *chatStat, keyName, bareModel, fallbackMo
 	}
 }
 
+// modelBlockAllSoftRate 报告「全池该模型被挡」是否是普通 429 限流：可重试
+// （429 + 等冷却或换模型），与 11102/11158 的不可重试 400 区分。
+func modelBlockAllSoftRate(blk pool.ModelBlockStatus) bool {
+	return blk.Blocked && strings.HasPrefix(blk.Reason, "429 model rate limit")
+}
+
 // executeChat 执行选号、刷新、轮转与错误处置。成功时返回上游流或聚合体，
 // 由调用方负责协议相关的响应写出；所有错误经 prep.OnError 输出。
 func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *preparedChat) (*ChatExecution, bool) {
@@ -1056,20 +1062,31 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 	// 用 400 而非 503：这是"你选的这个模型当前不可用"，不是"服务端暂时过载"。
 	// 换号重试必然同样失败，客户端不该按可重试错误处理。
 	if modelBlock.Blocked {
-		code = "model_unavailable"
-		// 有上游原文时保留它（含 requestId，用户要拿去向上游反馈），只把"有几个号
-		// 被挡、最早何时解封"这类本地调度信息放进 gateway_hint。
-		if !upstreamMsgPassed {
-			msg = "model is unavailable on every account (per-model cooldown), try another model"
+		if modelBlockAllSoftRate(modelBlock) {
+			// 普通 429 全池该模型限流：可重试（等冷却或换模型），429 与上游限流语义一致。
+			status = http.StatusTooManyRequests
+			code = "rate_limit_exceeded"
+			if !upstreamMsgPassed {
+				msg = "this model is rate limited on every account; wait for cooldown or choose another model"
+			}
+			hint = fmt.Sprintf("model_rate_limit: %d account(s) cooling down this model", modelBlock.Count)
+		} else {
+			// 11102/11158 等：不可重试，400 让客户端换模型。
+			code = "model_unavailable"
+			// 有上游原文时保留它（含 requestId，用户要拿去向上游反馈），只把"有几个号
+			// 被挡、最早何时解封"这类本地调度信息放进 gateway_hint。
+			if !upstreamMsgPassed {
+				msg = "model is unavailable on every account (per-model cooldown), try another model"
+			}
+			hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
+			status = http.StatusBadRequest
 		}
-		hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
 		if !modelBlock.Until.IsZero() {
 			hint += "; earliest unblock at " + modelBlock.Until.Format(time.RFC3339)
 		}
 		if s := strings.TrimSpace(modelBlock.Reason); s != "" {
 			hint += "; upstream: " + s
 		}
-		status = http.StatusBadRequest
 	}
 	h.writeChatError(prep.OnError, status, code, msg, hint)
 	st.status = status
