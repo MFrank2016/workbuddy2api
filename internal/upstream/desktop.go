@@ -469,7 +469,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	if cerr != nil {
 		return "", "", cerr
 	}
-	resp, err := chatClient.Do(req)
+	resp, err := doRequest(chatClient, req)
 	if err != nil {
 		return "", "", err
 	}

@@ -316,7 +316,7 @@ func (c *Client) globalModelsOnce(a *auth.Auth, path string) ([]string, []ModelI
 	if cerr != nil {
 		return nil, nil, nil, nil, cerr
 	}
-	resp, err := client.Do(req)
+	resp, err := doRequest(client, req)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

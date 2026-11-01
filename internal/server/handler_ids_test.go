@@ -19,7 +19,7 @@ func TestChatRotationReusesConversationRequestID(t *testing.T) {
 	var reqs []http.Header
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			reqs = append(reqs, r.Header.Clone())
+			reqs = append(reqs, canonicalHeaderCloneServer(r.Header))
 			// 全部 402 余额不足 → 每号冷却换号，轮转后 503。
 			return &http.Response{
 				StatusCode: 402,
@@ -28,7 +28,7 @@ func TestChatRotationReusesConversationRequestID(t *testing.T) {
 			}, nil
 		})},
 		ChatHTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			reqs = append(reqs, r.Header.Clone())
+			reqs = append(reqs, canonicalHeaderCloneServer(r.Header))
 			return &http.Response{
 				StatusCode: 402,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -109,7 +109,7 @@ func TestChatConversationIDPassthrough(t *testing.T) {
 	var captured http.Header
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			captured = r.Header.Clone()
+			captured = canonicalHeaderCloneServer(r.Header)
 			return &http.Response{
 				StatusCode: 200,
 				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
@@ -143,7 +143,7 @@ func TestChatConversationRequestIDInboundPassthrough(t *testing.T) {
 	var captured http.Header
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			captured = r.Header.Clone()
+			captured = canonicalHeaderCloneServer(r.Header)
 			return &http.Response{
 				StatusCode: 200,
 				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
@@ -182,7 +182,7 @@ func TestChatAGlobalPathReuseConvReqID(t *testing.T) {
 		GlobalEnabled: true,
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			paths = append(paths, r.URL.Path)
-			headers = append(headers, r.Header.Clone())
+			headers = append(headers, canonicalHeaderCloneServer(r.Header))
 			return &http.Response{
 				StatusCode: 200,
 				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
@@ -236,7 +236,7 @@ func turnRequestIDForBody(t *testing.T, body string) string {
 	var captured http.Header
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			captured = r.Header.Clone()
+			captured = canonicalHeaderCloneServer(r.Header)
 			return &http.Response{
 				StatusCode: 200,
 				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},

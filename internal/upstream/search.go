@@ -110,7 +110,7 @@ func (c *Client) Search(a *auth.Auth, query string, maxResults int) ([]SearchRes
 	if cerr != nil {
 		return nil, cerr
 	}
-	resp, err := client.Do(req)
+	resp, err := doRequest(client, req)
 	if err != nil {
 		return nil, err
 	}

@@ -233,7 +233,8 @@ func captureChatWith(t *testing.T, c *Client, a *auth.Auth) goldenChatTarget {
 	var got goldenChatTarget
 	c.HTTP.Transport = rtFunc(func(r *http.Request) (*http.Response, error) {
 		got.url = r.URL.String()
-		got.head = r.Header.Clone()
+		// 与 captureGoldenChat 同口径：golden 只证明协议形状，头名回 canonical。
+		got.head = canonicalHeaderClone(r.Header)
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatalf("read outbound body: %v", err)

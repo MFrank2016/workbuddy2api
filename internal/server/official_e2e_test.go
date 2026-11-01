@@ -29,7 +29,7 @@ func captureChatUpstream(t *testing.T, got *capturedChat) *upstream.Client {
 	t.Helper()
 	return &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			got.header = r.Header.Clone()
+			got.header = canonicalHeaderCloneServer(r.Header)
 			got.contentLength = r.ContentLength
 			raw, err := io.ReadAll(r.Body)
 			if err != nil {

@@ -1248,7 +1248,7 @@ func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error
 	if cerr != nil {
 		return nil, cerr
 	}
-	resp, err := client.Do(req)
+	resp, err := doRequest(client, req)
 	if err != nil {
 		return nil, err
 	}
@@ -1583,7 +1583,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			}
 			reqCtx, cancel := context.WithCancel(ctx)
 			req = req.WithContext(reqCtx)
-			resp, err := chatClient.Do(req)
+			resp, err := doRequest(chatClient, req)
 			if err != nil {
 				cancel()
 				// 传输层失败：重试开启且未耗尽 → 退避后原地重试（同一账号）。
@@ -2054,7 +2054,7 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	if cerr != nil {
 		return nil, cerr
 	}
-	resp, err := client.Do(req)
+	resp, err := doRequest(client, req)
 	if err != nil {
 		return nil, err
 	}
@@ -2139,7 +2139,7 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	if cerr != nil {
 		return nil, cerr
 	}
-	resp, err := client.Do(req)
+	resp, err := doRequest(client, req)
 	if err != nil {
 		return nil, err
 	}

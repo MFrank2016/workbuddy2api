@@ -2873,7 +2873,7 @@ func TestHandlerAppendTurnKeyStable(t *testing.T) {
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			raw, _ := io.ReadAll(r.Body)
 			bodies = append(bodies, raw)
-			reqIDs = append(reqIDs, r.Header.Get("X-Conversation-Request-ID"))
+			reqIDs = append(reqIDs, headerFoldServer(r.Header, "X-Conversation-Request-ID"))
 			return &http.Response{
 				StatusCode: 200,
 				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},

@@ -78,6 +78,15 @@ type goldenChatTarget struct {
 	head http.Header
 }
 
+// canonicalHeaderClone 把 header 键归一成 Go canonical 形式（golden 用）。
+func canonicalHeaderClone(h http.Header) http.Header {
+	out := make(http.Header, len(h))
+	for k, v := range h {
+		out[http.CanonicalHeaderKey(k)] = v
+	}
+	return out
+}
+
 // captureGoldenChat 走真实 ChatStream 捕获出站请求（body/url/headers）。
 func captureGoldenChat(t *testing.T) goldenChatTarget {
 	t.Helper()
@@ -85,7 +94,10 @@ func captureGoldenChat(t *testing.T) goldenChatTarget {
 	c := &Client{
 		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
 			got.url = r.URL.String()
-			got.head = r.Header.Clone()
+			// 头名已按官方拼写重排（headcase.go）：golden 只证明「协议形状」，
+			// 不证明 wire 拼写（那由 headcase_test.go 钉死）。这里统一回 canonical，
+			// 否则 Get/Set 取不到非 canonical key（X-Request-ID 等）。
+			got.head = canonicalHeaderClone(r.Header)
 			raw, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Fatalf("read outbound body: %v", err)
