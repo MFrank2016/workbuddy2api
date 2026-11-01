@@ -6,18 +6,35 @@
       "credits": "x0.05",
       "description": "[x0.05 credit] 通用对话模型",
       "id": "cn:glm-5.2",
+      "limit": {
+        "context": 1000000,
+        "output": 131072
+      },
       "max_output_tokens": 131072,
       "modalities": {
         "input": [
           "text",
           "image"
+        ],
+        "output": [
+          "text"
         ]
       },
       "name": "GLM-5.2",
       "object": "model",
       "owned_by": "workbuddy",
+      "reasoning": true,
       "reasoning_default_effort": "high",
       "reasoning_effort": "high",
+      "reasoning_options": [
+        {
+          "type": "effort",
+          "values": [
+            "low",
+            "high"
+          ]
+        }
+      ],
       "reasoning_summary": "auto",
       "reasoning_supported_efforts": [
         "low",
@@ -37,6 +54,7 @@
       "tags": [
         "craft"
       ],
+      "tool_call": true,
       "vendor": "z-ai"
     },
     {
@@ -44,12 +62,35 @@
       "created": 1753600000,
       "credits": "x0.02",
       "id": "cn:deepseek-v4.1-flash",
+      "limit": {
+        "context": 1000000,
+        "output": 384000
+      },
       "max_output_tokens": 384000,
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
       "name": "DeepSeek V4.1 Flash",
       "object": "model",
       "owned_by": "workbuddy",
+      "reasoning": true,
       "reasoning_default_effort": "high",
       "reasoning_effort": "high",
+      "reasoning_options": [
+        {
+          "type": "effort",
+          "values": [
+            "low",
+            "high",
+            "max"
+          ]
+        }
+      ],
       "reasoning_supported_efforts": [
         "low",
         "high",
@@ -67,7 +108,8 @@
         }
       ],
       "supports_reasoning": true,
-      "supports_tool_call": true
+      "supports_tool_call": true,
+      "tool_call": true
     }
   ],
   "object": "list"

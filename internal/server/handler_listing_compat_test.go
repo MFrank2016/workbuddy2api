@@ -8,6 +8,48 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
+// TestAddListingCompatModelsDevShape 纯追加的 models.dev 形状字段：
+// modalities / limit / tool_call / reasoning / reasoning_options，以及 magpie 的
+// supported_reasoning_levels（off 折成 none + toggle）。
+func TestAddListingCompatModelsDevShape(t *testing.T) {
+	entry := map[string]any{
+		"id":                          "cn:x",
+		"context_length":              200000,
+		"max_output_tokens":           32000,
+		"supports_tool_call":          true,
+		"supports_reasoning":          true,
+		"reasoning_supported_efforts": []string{"low", "off", "high"},
+	}
+	out := addListingCompat(entry)
+
+	wantMod := map[string]any{"input": []string{"text"}, "output": []string{"text"}}
+	if got := out["modalities"]; !reflect.DeepEqual(got, wantMod) {
+		t.Errorf("modalities=%v want %v", got, wantMod)
+	}
+	wantLimit := map[string]any{"context": 200000, "output": 32000}
+	if got := out["limit"]; !reflect.DeepEqual(got, wantLimit) {
+		t.Errorf("limit=%v want %v", got, wantLimit)
+	}
+	if out["tool_call"] != true || out["reasoning"] != true {
+		t.Errorf("tool_call=%v reasoning=%v want true/true", out["tool_call"], out["reasoning"])
+	}
+	wantOpts := []map[string]any{
+		{"type": "effort", "values": []string{"low", "high"}},
+		{"type": "toggle"},
+	}
+	if got := out["reasoning_options"]; !reflect.DeepEqual(got, wantOpts) {
+		t.Errorf("reasoning_options=%v want %v", got, wantOpts)
+	}
+	wantLevels := []map[string]string{{"effort": "none"}, {"effort": "low"}, {"effort": "high"}}
+	if got := out["supported_reasoning_levels"]; !reflect.DeepEqual(got, wantLevels) {
+		t.Errorf("supported_reasoning_levels=%v want %v", got, wantLevels)
+	}
+	// 既有字段不被覆盖。
+	if out["supports_reasoning"] != true || out["supports_tool_call"] != true {
+		t.Error("既有能力旗标被覆盖")
+	}
+}
+
 // TestModelListCarriesMagpieCompatFields /v1/models 要能同时喂第三方目录客户端
 // （issue #156：Magpie 只读 modalities.input 与 supported_reasoning_levels）。
 //
@@ -46,7 +88,20 @@ func TestModelListCarriesMagpieCompatFields(t *testing.T) {
 			}
 		}
 		if efforts, ok := obj["reasoning_supported_efforts"].([]any); ok && len(efforts) > 0 {
+			hasDisable := false
+			for _, e := range efforts {
+				if s, _ := e.(string); s == "off" || s == "none" || s == "disabled" {
+					hasDisable = true
+				}
+			}
 			levels, ok := obj["supported_reasoning_levels"].([]any)
+			if hasDisable {
+				// off 折成 none + toggle，档位数会变；只断言存在性。
+				if !ok || len(levels) == 0 {
+					t.Errorf("%v 有 off 档却缺 supported_reasoning_levels", obj["id"])
+				}
+				continue
+			}
 			if !ok || len(levels) != len(efforts) {
 				t.Errorf("%v supported_reasoning_levels=%v 与 efforts=%v 对不上", obj["id"], obj["supported_reasoning_levels"], efforts)
 				continue
@@ -65,8 +120,8 @@ func TestModelListCarriesMagpieCompatFields(t *testing.T) {
 	if hy3 == nil {
 		t.Fatalf("fixture 里的 cn:hy3 没出现在列表里 —— 用例前提不成立")
 	}
-	if got := hy3["modalities"]; !reflect.DeepEqual(got, map[string]any{"input": []any{"text", "image"}}) {
-		t.Errorf("cn:hy3 modalities=%v want {input:[text image]}", got)
+	if got := hy3["modalities"]; !reflect.DeepEqual(got, map[string]any{"input": []any{"text", "image"}, "output": []any{"text"}}) {
+		t.Errorf("cn:hy3 modalities=%v want {input:[text image] output:[text]}", got)
 	}
 	want := []any{map[string]any{"effort": "low"}, map[string]any{"effort": "high"}}
 	if got := hy3["supported_reasoning_levels"]; !reflect.DeepEqual(got, want) {

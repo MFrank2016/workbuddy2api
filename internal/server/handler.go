@@ -746,9 +746,32 @@ func fmtCreditsPrefix(raw string) string {
 // 两边同时输出，谁都能读。模型 ID 上的 cn:/global: 前缀保持不变 —— 它区分版本，
 // 不能为了目录兜底而抹掉。
 func addListingCompat(entry map[string]any) map[string]any {
+	// modalities：input 按图片能力给 text(+image)，output 对话模型恒 text。
+	// 纯追加：既有 supports_images / reasoning_supported_efforts 一个字节不动。
+	input := []string{"text"}
 	if entry["supports_images"] == true {
-		entry["modalities"] = map[string]any{"input": []string{"text", "image"}}
+		input = []string{"text", "image"}
 	}
+	entry["modalities"] = map[string]any{"input": input, "output": []string{"text"}}
+
+	// limit：直接搬运调用方已算好的 context_length / max_output_tokens，缺哪个省
+	// 哪个（不拿 1M/131072 兜底——客户端按字段在不在判能力，编造比缺失更糟）。
+	limit := map[string]any{}
+	if v, ok := entry["context_length"]; ok {
+		limit["context"] = v
+	}
+	if v, ok := entry["max_output_tokens"]; ok {
+		limit["output"] = v
+	}
+	if len(limit) > 0 {
+		entry["limit"] = limit
+	}
+
+	// tool_call：false 不写（缺省即不支持，与既有旗标同口径）。
+	if entry["supports_tool_call"] == true {
+		entry["tool_call"] = true
+	}
+
 	var efforts []string
 	switch raw := entry["reasoning_supported_efforts"].(type) {
 	case []string:
@@ -760,12 +783,42 @@ func addListingCompat(entry map[string]any) map[string]any {
 			}
 		}
 	}
-	if len(efforts) > 0 {
-		levels := make([]map[string]any, 0, len(efforts))
-		for _, e := range efforts {
-			levels = append(levels, map[string]any{"effort": e})
+	// "off"/"none"/"disabled" 是「关闭思考」而不是一个思考档：混进 effort 的
+	// values 会被客户端当成「有个叫 off 的档位」，统一折成独立 toggle。
+	levels := make([]string, 0, len(efforts))
+	disable := false
+	for _, e := range efforts {
+		switch strings.ToLower(e) {
+		case "off", "none", "disabled":
+			disable = true
+		default:
+			levels = append(levels, e)
 		}
-		entry["supported_reasoning_levels"] = levels
+	}
+	if entry["supports_reasoning"] == true || len(levels) > 0 {
+		entry["reasoning"] = true
+	}
+	opts := make([]map[string]any, 0, 2)
+	if len(levels) > 0 {
+		opts = append(opts, map[string]any{"type": "effort", "values": levels})
+	}
+	if disable {
+		opts = append(opts, map[string]any{"type": "toggle"})
+	}
+	if len(opts) > 0 {
+		entry["reasoning_options"] = opts
+	}
+	// supported_reasoning_levels 是 magpie 的私有方言（不属于 models.dev 词表）：
+	// 它只认这个键，「关闭思考」在那边叫 none。
+	if len(levels) > 0 || disable {
+		list := make([]map[string]string, 0, len(levels)+1)
+		if disable {
+			list = append(list, map[string]string{"effort": "none"})
+		}
+		for _, l := range levels {
+			list = append(list, map[string]string{"effort": l})
+		}
+		entry["supported_reasoning_levels"] = list
 	}
 	return entry
 }
