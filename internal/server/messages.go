@@ -123,10 +123,19 @@ func extractMessagesQuery(items []messagesTurnItem) string {
 
 // messagesSearchResultItem 响应里 `web_search_tool_result.content[]` 的单项。
 // 注意：Anthropic 原生不带 snippet，摘要走 text 块的 citations，故这里只有 url/title。
+//
+// encrypted_content / page_age 是客户端 schema 的必填/可空字段（官方 SDK 的
+// WebSearchResultBlock：encrypted_content: string，page_age: string | null）。
+// 缺 encrypted_content 会让整条 web_search_tool_result 块在客户端解析阶段被判非法
+// （AI SDK: expected string, received undefined），表现为「这次联网搜索直接失败」，
+// 而不是只少一条结果。网关的检索结果来自上游 agenttool 明文，没有可回传的密文，
+// 故给空串（协议上的合法值）；上游不提供更新时间，故 page_age 显式 null。
 type messagesSearchResultItem struct {
-	Type  string `json:"type"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
+	Type             string `json:"type"`
+	URL              string `json:"url"`
+	Title            string `json:"title,omitempty"`
+	EncryptedContent string `json:"encrypted_content"`
+	PageAge          any    `json:"page_age"`
 }
 
 // messagesToolResultBlock 搜索结果块。
@@ -185,9 +194,11 @@ func buildMessagesSearchResponse(query, model string, out *upstream.SearchOutcom
 			title = r.URL // 无标题时用 URL 兜底，客户端渲染 title ?? hostname 才不会空
 		}
 		items = append(items, messagesSearchResultItem{
-			Type:  "web_search_result",
-			URL:   r.URL,
-			Title: title,
+			Type:             "web_search_result",
+			URL:              r.URL,
+			Title:            title,
+			EncryptedContent: "",
+			PageAge:          nil,
 		})
 		if r.Snippet != "" {
 			citations = append(citations, messagesCitation{

@@ -345,3 +345,51 @@ func TestMessagesResponseIDsAreUnique(t *testing.T) {
 		t.Errorf("msg id=%q want msg_wb2api_ 前缀", a.ID)
 	}
 }
+
+// TestMessagesSearchResultCarriesAnthropicRequiredFields 回归：web_search_result
+// 必须带 encrypted_content（客户端 schema 必填 string）与 page_age（必填可空）。
+// 缺 encrypted_content 时 AI SDK 报 AI_TypeValidationError（expected string,
+// received undefined），整条 web_search_tool_result 块被判非法——检索本身成功，
+// 但整次联网搜索直接失败。网关结果来自上游明文，故 encrypted_content 为空串、
+// page_age 为 null。
+func TestMessagesSearchResultCarriesAnthropicRequiredFields(t *testing.T) {
+	resp := buildMessagesSearchResponse("q", "m", &upstream.SearchOutcome{
+		Results: []upstream.SearchResult{{Title: "t", URL: "https://a.com"}},
+	})
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Content []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type             string          `json:"type"`
+				EncryptedContent *string         `json:"encrypted_content"`
+				PageAge          json.RawMessage `json:"page_age"`
+			} `json:"content"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Type != "web_search_tool_result" {
+		t.Fatalf("missing web_search_tool_result: %s", raw)
+	}
+	found := false
+	for _, it := range doc.Content[0].Content {
+		if it.Type != "web_search_result" {
+			continue
+		}
+		found = true
+		if it.EncryptedContent == nil {
+			t.Fatalf("web_search_result 缺 encrypted_content（客户端 schema 必填）: %s", raw)
+		}
+		if string(it.PageAge) != "null" {
+			t.Fatalf("page_age=%s want null（上游不提供更新时间）: %s", it.PageAge, raw)
+		}
+	}
+	if !found {
+		t.Fatalf("no web_search_result item: %s", raw)
+	}
+}
