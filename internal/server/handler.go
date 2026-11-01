@@ -86,6 +86,9 @@ type Config struct {
 	// ModelsHidden 模型黑名单原始条目（config models.hidden；Live 为 nil 的
 	// 裸用/测试路径经 loadLive() 归一化后使用）。
 	ModelsHidden []string
+	// ModelsAllowed 模型白名单原始条目（config models.allowed，issue #68；
+	// Live 为 nil 的裸用/测试路径经 loadLive() 归一化后使用）。
+	ModelsAllowed []string
 
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
 	Usage *usage.Recorder
@@ -422,6 +425,8 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 	if h.cfg.Live != nil {
 		return h.cfg.Live.Load()
 	}
+	// 白名单静态回退（issue #68）：裸用/单测路径不依赖 Live，与 Hidden 对称。
+	allowedModels, allowlistEnabled := livecfg.NormalizeAllowedModels(h.cfg.ModelsAllowed)
 	return livecfg.Snapshot{
 		APIKey:               h.cfg.APIKey,
 		SoftCooldown:         h.cfg.SoftCooldown,
@@ -438,7 +443,9 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		RequestProfile:  h.cfg.RequestProfile,
 		StreamKeepalive: h.cfg.StreamKeepalive,
 		FirstByteRetry:  h.cfg.FirstByteRetry,
-		HiddenModels:    livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
+		HiddenModels:     livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
+		AllowedModels:    allowedModels,
+		AllowlistEnabled: allowlistEnabled,
 	}
 }
 
@@ -818,12 +825,41 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 // CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel 对称）。
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底；
 // global.enabled=false（显式逃生门）时只列 CN（global 名单不出现）。
+// hiddenModel 报告 (realm, 裸模型名) 是否被 config models.hidden 隐藏。
+//
+// 单点收敛：列表过滤与点名拒绝必须走同一判据——漏一处就等于黑名单可被绕过
+// （知道名字仍可硬调）。
+func (h *Handler) hiddenModel(realm, bare string) bool {
+	_, hide := h.loadLive().HiddenModels[realm+":"+bare]
+	return hide
+}
+
+// allowedModel 报告 (realm, 裸模型名) 是否被 config models.allowed 白名单放行
+// （issue #68）。
+//
+// 语义是「不在白名单 = 对本网关不存在」：未启用（空配置/全空条目）恒为 true
+// （默认放行全部，向后兼容）；启用时非白名单条目一律 false。与 hiddenModel
+// 同一单点收敛纪律：cn 列表 / global 列表 / chat 入口点名全部只经由本谓词。
+func (h *Handler) allowedModel(realm, bare string) bool {
+	snap := h.loadLive()
+	if !snap.AllowlistEnabled {
+		return true
+	}
+	if bare == "" {
+		return false
+	}
+	_, ok := snap.AllowedModels[realm+":"+bare]
+	return ok
+}
+
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
-	// models.hidden 黑名单：快照外提，避免逐条目重复 Load。
-	hidden := h.loadLive().HiddenModels
 	for _, mi := range h.fetchDynamicModels() {
-		if _, ok := hidden["cn:"+mi.ID]; ok {
+		// 白名单先于黑名单：Allowed 圈定「可能可见」集合，Hidden 再从中剔除。
+		if !h.allowedModel("cn", mi.ID) {
+			continue
+		}
+		if h.hiddenModel("cn", mi.ID) {
 			continue
 		}
 		entry := map[string]any{
@@ -871,7 +907,11 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
-			if _, ok := hidden["global:"+id]; ok {
+			// global 列表与 cn 同判据：白名单先于黑名单。
+			if !h.allowedModel("global", id) {
+				continue
+			}
+			if h.hiddenModel("global", id) {
 				continue
 			}
 			entry := map[string]any{

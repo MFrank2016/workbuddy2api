@@ -30,6 +30,12 @@ type Snapshot struct {
 
 	// HiddenModels 精确隐藏的模型 id（已归一化为 "cn:x"/"global:x"）；nil = 不隐藏。
 	HiddenModels map[string]struct{}
+	// AllowedModels 模型白名单（config models.allowed，issue #68）：已归一化为
+	// "cn:x"/"global:x" 全量形式的精确 id 集合；nil = 未启用（默认放行所有模型）。
+	// 与 HiddenModels 完全对称：Hidden 是「可见集合再剔除」，Allowed 是「可能可见」集合。
+	AllowedModels map[string]struct{}
+	// AllowlistEnabled 白名单是否启用（归一化结果非空即启用）；false = 全部放行。
+	AllowlistEnabled bool
 
 	// —— 反 11-128 出站兼容（Task 1）：随面板保存热生效，在途请求不受影响。 ——
 	RequestProfile       string            // upstream.request_profile；legacy（默认）/ official
@@ -72,6 +78,35 @@ func (h *Holder) Load() Snapshot {
 
 // Store 整体替换快照。
 func (h *Holder) Store(s Snapshot) { h.p.Store(&s) }
+
+// NormalizeAllowedModels 把用户配置的 allowed 条目归一化为精确 id 集合。
+//
+// 条目语法与 NormalizeHiddenModels 完全一致：带合法 "cn:"/"global:" 前缀 →
+// 只在该域允许；裸名 → 两域都允许。大小写敏感。返回 enabled 表示白名单是否
+// 启用：入参为空或全部为无效条目（Trim 后为空）→ false，调用方据此走
+// 「默认放行所有模型」的向后兼容路径。返回的 map 只读共享，调用方不得修改。
+func NormalizeAllowedModels(in []string) (map[string]struct{}, bool) {
+	if len(in) == 0 {
+		return nil, false
+	}
+	out := make(map[string]struct{}, len(in)*2)
+	for _, m := range in {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		if prefix, bare, ok := strings.Cut(m, ":"); ok && (prefix == "cn" || prefix == "global") {
+			out[prefix+":"+bare] = struct{}{}
+		} else {
+			out["cn:"+m] = struct{}{}
+			out["global:"+m] = struct{}{}
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
 
 // NormalizeHiddenModels 把用户配置的 hidden 条目归一化为精确 id 集合。
 //

@@ -246,9 +246,20 @@ func (h *Handler) prepareChatRequest(r *http.Request, opt ChatExecOptions) (*pre
 			}
 		}
 	}
+	// models.allowed 白名单（issue #68）：点名调用直接拒绝，不打上游、不占选号。
+	// 位置在别名映射之后、黑名单之前——别名解析出的真实目标同样受检，不能绕过
+	// 白名单（与 hidden 同一条不变量）。文案不区分「不存在」与「未在白名单」，
+	// 避免枚举探测。
+	if !h.allowedModel(realm, bareModel) {
+		return nil, &ChatExecError{
+			Status: http.StatusBadRequest,
+			Code:   "model_unavailable",
+			Msg:    "model is not in the gateway allowlist, try another model",
+		}
+	}
 	// models.hidden 黑名单：点名调用直接拒绝，不打上游、不占选号。
 	// 与 /v1/models 的列表过滤对称（只藏列表不够，知道名字仍可硬调）。
-	if _, hide := h.loadLive().HiddenModels[realm+":"+bareModel]; hide {
+	if h.hiddenModel(realm, bareModel) {
 		return nil, &ChatExecError{
 			Status: http.StatusBadRequest,
 			Code:   "model_unavailable",

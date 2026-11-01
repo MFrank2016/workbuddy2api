@@ -5,6 +5,54 @@ import (
 	"time"
 )
 
+// TestNormalizeAllowedModels 白名单归一化语义与 hidden 完全对称，额外返回
+// enabled：空配置/全空白 = 未启用（默认放行全部，向后兼容）。
+func TestNormalizeAllowedModels(t *testing.T) {
+	for _, in := range [][]string{nil, {}, {"  ", ""}} {
+		got, enabled := NormalizeAllowedModels(in)
+		if got != nil || enabled {
+			t.Errorf("%v → %v/%v, want nil/false", in, got, enabled)
+		}
+	}
+
+	got, enabled := NormalizeAllowedModels([]string{"deepseek-v3"})
+	if !enabled {
+		t.Fatal("bare name must enable allowlist")
+	}
+	for _, want := range []string{"cn:deepseek-v3", "global:deepseek-v3"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("bare name: missing %q in %v", want, got)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("bare name: got %d entries %v, want 2", len(got), got)
+	}
+
+	got, enabled = NormalizeAllowedModels([]string{"cn:pro-model"})
+	if !enabled {
+		t.Fatal("cn: prefix must enable allowlist")
+	}
+	if _, ok := got["cn:pro-model"]; !ok {
+		t.Errorf("cn: prefix: missing %q in %v", "cn:pro-model", got)
+	}
+	if _, ok := got["global:pro-model"]; ok {
+		t.Errorf("cn: prefix: %q must not allow global realm", "global:pro-model")
+	}
+
+	got, _ = NormalizeAllowedModels([]string{"  glm-5.2  "})
+	if _, ok := got["cn:glm-5.2"]; !ok {
+		t.Errorf("trimmed bare name: missing %q in %v", "cn:glm-5.2", got)
+	}
+
+	// 非法前缀视为裸名整体（与 hidden / resolveModel 对称）
+	got, _ = NormalizeAllowedModels([]string{"xx:yy"})
+	for _, want := range []string{"cn:xx:yy", "global:xx:yy"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("odd prefix: missing %q in %v", want, got)
+		}
+	}
+}
+
 // TestNormalizeHiddenModels 归一化语义：
 //   - nil/空/全空白 → nil（不隐藏）
 //   - 裸名 → 两域都藏（"cn:x" + "global:x"）

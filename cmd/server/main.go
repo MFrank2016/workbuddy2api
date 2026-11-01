@@ -748,6 +748,7 @@ var restartRequiredPaths = []string{
 // 不进快照的字段：auth.file_mode（restart-only，见 restartRequiredPaths）、
 // 以及一切只在启动期读取的部署路径类字段。
 func liveSnapshot(c *Config) livecfg.Snapshot {
+	allowedModels, allowlistEnabled := livecfg.NormalizeAllowedModels(c.Models.Allowed)
 	return livecfg.Snapshot{
 		APIKey:               c.APIKey,
 		SoftCooldown:         c.SoftRateDur,
@@ -759,6 +760,8 @@ func liveSnapshot(c *Config) livecfg.Snapshot {
 		SearchEnabled:        c.Search.Enabled,
 		MCPEnabled:           c.MCP.Enabled,
 		HiddenModels:         livecfg.NormalizeHiddenModels(c.Models.Hidden),
+		AllowedModels:        allowedModels,
+		AllowlistEnabled:     allowlistEnabled,
 		RequestProfile:       c.Upstream.RequestProfile,
 		IdentityEnabled:      c.Identity.Enabled,
 		IdentityTarget:       c.Identity.Target,
