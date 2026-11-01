@@ -3,9 +3,9 @@ accept: application/json, text/event-stream
 accept-language: zh-CN
 authorization: Bearer golden-access-token
 content-type: application/json
-origin: https://www.codebuddy.cn
-referer: https://www.codebuddy.cn/
-user-agent: WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1
+origin: https://www.workbuddy.cn
+referer: https://www.workbuddy.cn/
+user-agent: WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0
 x-agent-purpose: conversation
 x-b3-sampled: 1
 x-b3-spanid: <message-id>
@@ -18,7 +18,7 @@ x-domain: copilot.tencent.com
 x-enterprise-id: golden-enterprise
 x-ide-name: WorkBuddy
 x-ide-type: WorkBuddy
-x-ide-version: 5.5.4
+x-ide-version: 5.9.3
 x-machine-id: 769e68ef83636be2e5cb841e9253aa4ffeb2
 x-product: WorkBuddy
 x-request-id: <message-id>

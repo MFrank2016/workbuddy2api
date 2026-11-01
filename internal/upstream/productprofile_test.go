@@ -144,10 +144,10 @@ func TestProductProfileHostsWithoutOverrides(t *testing.T) {
 		authBase string
 		ua       string
 	}{
-		{"cn-cli", "copilot.tencent.com", "www.codebuddy.cn", "www.workbuddy.cn", "copilot.tencent.com", "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"},
-		{"cn-work", "www.workbuddy.cn", "www.codebuddy.cn", "www.workbuddy.cn", "www.codebuddy.cn", "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"},
-		{"intl-cli", "www.codebuddy.ai", "www.codebuddy.ai", "www.codebuddy.ai", "www.codebuddy.ai", "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1"},
-		{"intl-work", "www.workbuddy.ai", "www.workbuddy.ai", "www.workbuddy.ai", "www.workbuddy.ai", "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1"},
+		{"cn-cli", "copilot.tencent.com", "www.codebuddy.cn", "www.workbuddy.cn", "copilot.tencent.com", "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"},
+		{"cn-work", "www.workbuddy.cn", "www.codebuddy.cn", "www.workbuddy.cn", "www.codebuddy.cn", "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"},
+		{"intl-cli", "www.codebuddy.ai", "www.codebuddy.ai", "www.codebuddy.ai", "www.codebuddy.ai", "WorkBuddy/5.9.3 WorkBuddy AI/5.9.3 CLI/2.165.0"},
+		{"intl-work", "www.workbuddy.ai", "www.workbuddy.ai", "www.workbuddy.ai", "www.workbuddy.ai", "WorkBuddy/5.9.4 WorkBuddy AI/5.9.4 CLI/2.165.0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.profile, func(t *testing.T) {
@@ -676,7 +676,7 @@ func TestProductProfileGlobalDisabledForcesCN(t *testing.T) {
 			if got := c.profileAuthBase(a); got != tc.auth {
 				t.Errorf("auth=%q want %q", got, tc.auth)
 			}
-			if got := c.userAgent(a); !strings.Contains(got, "WorkBuddy/5.5.4 WorkBuddy/5.5.4") {
+			if got := c.userAgent(a); !strings.Contains(got, "WorkBuddy/5.9.3 WorkBuddy/5.9.3") {
 				t.Errorf("UA=%q want CN platform after escape hatch", got)
 			}
 		})
@@ -803,7 +803,7 @@ func TestProductProfileSelectionChain(t *testing.T) {
 // TestProductProfileOriginSplit web/task 用 profile Origin；refresh/billing 保持 realm 判据
 // （不因 profile 翻转）。billing 请求历史上不设 Origin，故只要求「未被翻转」。
 func TestProductProfileOriginSplit(t *testing.T) {
-	const realmOriginCN = "https://www.codebuddy.cn"
+	const realmOriginCN = "https://www.workbuddy.cn"
 
 	t.Run("cn_work_web_profile_origin_refresh_realm_origin", func(t *testing.T) {
 		a := mustProfileAuth(t, profileAuthJSON("cn-work"))
