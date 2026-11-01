@@ -503,6 +503,11 @@ type requestTrace struct {
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
+	// outcome/statusOverride 供「无法写响应」的路径覆盖归档口径（客户端中断 =
+	// 499 + interrupted）：连接已关时 responseObserver 捕获不到状态，不覆盖的话
+	// 归档会把这类请求记成 200。
+	outcome        string
+	statusOverride int
 }
 
 // captureClientInfo 采集调用来源（客户端 IP + 截断后的 UA）。开关关闭时保持空串：
@@ -542,6 +547,9 @@ func requestTraceFrom(r *http.Request) *requestTrace {
 
 // event 把 trace + 最终状态码组装为 reqlog 事件（不含提示词/凭证）。
 func (t *requestTrace) event(status int) reqlog.Event {
+	if t.statusOverride != 0 {
+		status = t.statusOverride
+	}
 	e := reqlog.Event{
 		Time:      t.start,
 		RequestID: t.id,
@@ -577,6 +585,10 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.OK = true
 	} else {
 		e.Outcome = reqlog.OutcomeHTTPError
+	}
+	if t.outcome != "" {
+		e.Outcome = t.outcome
+		e.OK = false
 	}
 	return e
 }

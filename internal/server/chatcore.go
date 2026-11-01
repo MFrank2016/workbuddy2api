@@ -15,6 +15,7 @@ import (
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
+	"workbuddy2api/internal/reqlog"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 	"workbuddy2api/internal/usage"
@@ -895,6 +896,21 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		_ = rc.Close()
 		if aerr != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			// 调用方先走了（前置 CDN 回源超时、客户端 timeout、用户点停止）：上游当时
+			// 还在正常输出，网关没出错。此前一律记 502 upstream_parse，把别人掐断报成
+			// 上游故障。499 = nginx 的 client closed request，与真 5xx 一眼可分；
+			// 连接已关，不写响应体，归档用 statusOverride/outcome 覆盖（否则 observer
+			// 捕获不到状态会把这类请求记成 200）。
+			if cerr := r.Context().Err(); cerr != nil {
+				log.Printf("WARN: [server] sync acct=%s model=%s: 调用方断开（%v），上游输出已丢弃",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, cerr)
+				st.status = 499
+				if tr := requestTraceFrom(r); tr != nil {
+					tr.outcome = reqlog.OutcomeInterrupted
+					tr.statusOverride = 499
+				}
+				return nil, false
+			}
 			h.writeChatError(prep.OnError, http.StatusBadGateway, "upstream_parse", aerr.Error(), "")
 			st.status = http.StatusBadGateway
 			return nil, false
