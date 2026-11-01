@@ -266,6 +266,11 @@ func main() {
 	upstream.ConfigureProxies(cfg.Proxies)
 	// 出站头顺序对齐（conn 层重排；默认关闭，见 config upstream.head_order）。
 	upstream.SetHeadOrder(cfg.Upstream.HeadOrder)
+	// 出站 TLS 指纹（默认 go = 原生；node = 复刻官方 Node/OpenSSL）。
+	if err := upstream.SetTLSFingerprint(cfg.Upstream.TLSFingerprint); err != nil {
+		log.Printf("WARN: [upstream] tls_fingerprint: %v（回退 go）", err)
+		_ = upstream.SetTLSFingerprint("go")
+	}
 	if names := upstream.RouteNames(); len(names) > 0 {
 		log.Printf("出口线路已加载：%d 条（%s）—— 账号绑定的线路名按它解析",
 			len(names), strings.Join(names, ", "))
@@ -906,6 +911,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// auth.file_mode 不在其中：它 restart-only，改值只落盘，重启才生效。
 	live.Store(liveSnapshot(newCfg))
 	upstream.SetHeadOrder(newCfg.Upstream.HeadOrder)
+	if err := upstream.SetTLSFingerprint(newCfg.Upstream.TLSFingerprint); err != nil {
+		return nil, err
+	}
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	up.SetIdentity(identityOptionsFrom(newCfg.Identity))
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)

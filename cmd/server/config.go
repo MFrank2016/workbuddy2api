@@ -330,6 +330,10 @@ type Config struct {
 		// 顺序对齐属于指纹级变更，先灰度验证再开。开启后新连接生效；已池化连接
 		// 保持原状（重启或连接自然回收后全部生效）。
 		HeadOrder bool `json:"head_order"`
+		// TLSFingerprint 出站 ClientHello 指纹档位："node" 复刻官方 Node/OpenSSL
+		// （JA3+JA4 双对齐）；"go"（默认/空）保持 crypto/tls 原生形态。
+		// 指纹级变更，先灰度验证再开；运行期可切，回滚改配置即可。
+		TLSFingerprint string `json:"tls_fingerprint"`
 	} `json:"upstream"`
 
 	Features struct {

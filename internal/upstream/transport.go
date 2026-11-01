@@ -18,6 +18,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // 连接层参数集中定义（与 server/backoff.go 同风格：一处定义，测试可回读断言）。
@@ -106,12 +108,41 @@ func newTLSDialer(d *net.Dialer, cfgOf func() *tls.Config) func(context.Context,
 		} else {
 			tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
-		tc0.ServerName = host
+		// 调用方显式指定 ServerName 时优先（测试把连接指到 127.0.0.1 但仍要发
+		// 真实域名的 SNI，否则 uTLS 对 IP 按 RFC 不发 SNI，ClientHello 少一项）。
+		if tc0.ServerName == "" {
+			tc0.ServerName = host
+		}
 		// NextProtos 留空：与「禁 h2」口径一致——原 Transport 禁 h2 后同样不发 ALPN。
 		tc0.NextProtos = nil
-		tc := tls.Client(raw, tc0)
 		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
 		defer cancel()
+
+		// 指纹复刻路径：uTLS 手搓官方 Node/OpenSSL ClientHello。
+		// ALPN 刻意留空——官方 Node 栈不带 ALPN，与禁 h2 口径一致。
+		if useNodeFingerprint(currentTLSFingerprint()) {
+			uc := utls.UClient(raw, &utls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: tc0.InsecureSkipVerify,
+				RootCAs:            tc0.RootCAs,
+				MinVersion:         tls.VersionTLS12,
+			}, utls.HelloCustom)
+			if perr := uc.ApplyPreset(officialHelloSpec()); perr != nil {
+				_ = raw.Close()
+				return nil, fmt.Errorf("tls fingerprint preset: %w", perr)
+			}
+			if herr := uc.HandshakeContext(hctx); herr != nil {
+				_ = raw.Close()
+				return nil, herr
+			}
+			if headOrderEnabled.Load() {
+				return newHeadOrderConn(uc), nil
+			}
+			return uc, nil
+		}
+
+		// 原生路径：crypto/tls。
+		tc := tls.Client(raw, tc0)
 		if herr := tc.HandshakeContext(hctx); herr != nil {
 			_ = raw.Close()
 			return nil, herr
