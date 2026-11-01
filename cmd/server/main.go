@@ -762,6 +762,7 @@ func liveSnapshot(c *Config) livecfg.Snapshot {
 		HiddenModels:         livecfg.NormalizeHiddenModels(c.Models.Hidden),
 		AllowedModels:        allowedModels,
 		AllowlistEnabled:     allowlistEnabled,
+		ModelFallback:        c.Pool.ModelFallback,
 		RequestProfile:       c.Upstream.RequestProfile,
 		IdentityEnabled:      c.Identity.Enabled,
 		IdentityTarget:       c.Identity.Target,

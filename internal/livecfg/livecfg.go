@@ -36,6 +36,11 @@ type Snapshot struct {
 	AllowedModels map[string]struct{}
 	// AllowlistEnabled 白名单是否启用（归一化结果非空即启用）；false = 全部放行。
 	AllowlistEnabled bool
+	// ModelFallback 模型降级路由表（pool.model_fallback）：6004 模型级限流时改用的
+	// 等价模型（裸名或 "cn:x"/"global:x" 前缀键 → 裸名）。nil = 不降级。
+	// 与 aliases 的区别：aliases 是「客户端名→真实名」的静态映射，本表是「限流时的
+	// 临时改道」，且不写持久状态。
+	ModelFallback map[string]string
 
 	// —— 反 11-128 出站兼容（Task 1）：随面板保存热生效，在途请求不受影响。 ——
 	RequestProfile       string            // upstream.request_profile；legacy（默认）/ official

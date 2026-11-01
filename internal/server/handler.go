@@ -89,6 +89,9 @@ type Config struct {
 	// ModelsAllowed 模型白名单原始条目（config models.allowed，issue #68；
 	// Live 为 nil 的裸用/测试路径经 loadLive() 归一化后使用）。
 	ModelsAllowed []string
+	// ModelsFallback 模型降级路由表原始值（config pool.model_fallback；Live 为 nil
+	// 的裸用/测试路径经 loadLive() 透传使用）。
+	ModelsFallback map[string]string
 
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
 	Usage *usage.Recorder
@@ -446,6 +449,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		HiddenModels:     livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
 		AllowedModels:    allowedModels,
 		AllowlistEnabled: allowlistEnabled,
+		ModelFallback:    h.cfg.ModelsFallback,
 	}
 }
 

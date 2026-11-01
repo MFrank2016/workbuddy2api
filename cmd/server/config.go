@@ -430,6 +430,15 @@ type Config struct {
 		AccountFaultDisableAfter int `json:"account_fault_disable_after"`
 		// CrossDomainFallback 裸模型名跨域回退开关（issue #135），默认 false（零回归）。
 		CrossDomainFallback bool `json:"cross_domain_fallback"`
+		// ModelFallback 模型降级路由表：key = 客户端请求的模型（裸名或 "cn:x"/"global:x"
+		// 前缀键），value = 该模型被 6004 模型级限流时改用的等价模型。
+		// 例：{"deepseek-v4.1-flash": "deepseek-v4-flash"}。
+		//
+		// 语义：等价模型是同一底层能力、只是计价不同；便宜的那个被限流时改用稍贵的
+		// 继续服务（可用性优先），限流解除后自动回原模型（不写任何持久状态）。
+		// 只对 6004 生效；11102/11101/普通 429/5xx 都不降级。
+		// 缺省 nil = 不降级（对老配置零影响）；面板保存后经 livecfg 热生效。
+		ModelFallback map[string]string `json:"model_fallback"`
 	} `json:"pool"`
 
 	// Panel 管理面板鉴权（吸收自 hub 的独立面板密码）：password_hash 非空时启用

@@ -392,6 +392,45 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 	realm := prep.Realm
 	bareModel := prep.BareModel
 	modelRate := prep.ModelRate
+	// curModel 是本轮**实际使用**的模型（模型降级时指向等价模型）；bareModel 始终是
+	// 客户端请求的原模型，用于冷却记账（限流的是原模型）。两者在降级后不同：
+	//   - 选号 / 出站 body 重写 / 成本记账 / BlockModelClear → curModel
+	//   - applyErrorPolicy（6004 冷却记账）→ bareModel
+	curModel := bareModel
+	// 原模型也记为「已试过」：防止 B→A 回环时把原模型当成降级目标（日志/选号都会
+	// 多绕一圈，虽然模型冷却最终会兜住，但语义上不该发生）。
+	fallbackTried := map[string]bool{bareModel: true}
+	// fallbackTo 返回 curModel 的等价模型（未配置 / 已试过 / 自指 → 空）。
+	// 键查找：先试域前缀键（"cn:x"/"global:x"，只在该域生效），再回退裸名键。
+	fallbackTo := func() string {
+		m := h.loadLive().ModelFallback
+		if len(m) == 0 {
+			return ""
+		}
+		to := m[realm+":"+curModel]
+		if to == "" {
+			to = m[curModel]
+		}
+		if to == "" || to == curModel || fallbackTried[to] {
+			return ""
+		}
+		return to
+	}
+	// applyFallback 把本轮模型切到等价模型，并重写出站 body 的顶层 model。
+	// 只改 curModel —— bareModel 保持原模型，供 6004 冷却记账使用。
+	applyFallback := func(to string) bool {
+		if to == "" {
+			return false
+		}
+		fallbackTried[to] = true
+		log.Printf("model fallback: %s -> %s (6004 model rate limit)", curModel, to)
+		curModel = to
+		body = rewriteModel(body, to)
+		if h.cfg.Upstream != nil {
+			modelRate = h.cfg.Upstream.ModelRate(realm, to)
+		}
+		return true
+	}
 	crossRealm := prep.CrossRealm
 	profile := prep.Profile
 	key := authKeyFrom(r.Context())
@@ -506,7 +545,7 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 	// 显式入参而不是读 st.ttfb：后者在流式分支里是**调用之后**才赋值的，
 	// 靠顺序传递会让将来重排代码时静默把速率算回旧的错口径。
 	recordAttempt := func(uid string, delta pool.TokenUsageDelta, credit float64, hasCredit bool, started time.Time, ttfb time.Duration) {
-		h.recordChatAttempt(st, keyName, bareModel, peek.Model, modelRate, uid, delta, credit, hasCredit, started, ttfb)
+		h.recordChatAttempt(st, keyName, curModel, peek.Model, modelRate, uid, delta, credit, hasCredit, started, ttfb)
 	}
 
 	// 系统提示词改写（出站前、轮转前；每个请求一次）。
@@ -527,10 +566,10 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		degradedApplied = true
 	}
 
-	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
-	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
-	if bareModel != peek.Model {
-		body = rewriteModel(body, bareModel)
+	// outbound model 名重写为 curModel（D6）：realm 前缀是网关侧路由协议，
+	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 curModel==peek.Model 恒等。
+	if curModel != peek.Model {
+		body = rewriteModel(body, curModel)
 	}
 
 	// 会话头族（issue #35 / #170）：后台按 X-Conversation-Request-ID 聚合请求，官方
@@ -608,7 +647,7 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		var acct *auth.Auth
 		if stickyUID != "" {
 			// 粘性命中同样受分组约束：绑定号若属于其他密钥的分组，返回 nil → 解绑重分配。
-			acct = h.cfg.Pool.PickByUIDForModelGroupsProfiles(stickyUID, bareModel, keyGroups, profile)
+			acct = h.cfg.Pool.PickByUIDForModelGroupsProfiles(stickyUID, curModel, keyGroups, profile)
 			if acct == nil || (realm != "" && acct.Realm() != realm && !crossRealm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）、realm 不符，
 				// 或不在本次密钥的可见分组内 → 解绑。
@@ -617,16 +656,22 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		}
 		if acct == nil {
 			pickRealm := realm
-			if crossRealm && h.cfg.Pool.ServableForModelRealm(bareModel, realm) == 0 &&
-				h.cfg.Pool.ServableForModelRealm(bareModel, otherRealm(realm)) > 0 {
+			if crossRealm && h.cfg.Pool.ServableForModelRealm(curModel, realm) == 0 &&
+				h.cfg.Pool.ServableForModelRealm(curModel, otherRealm(realm)) > 0 {
 				pickRealm = otherRealm(realm)
 			}
-			acct = h.cfg.Pool.PickExcludingForRealmGroupsProfiles(tried, bareModel, pickRealm, keyGroups, profile)
+			acct = h.cfg.Pool.PickExcludingForRealmGroupsProfiles(tried, curModel, pickRealm, keyGroups, profile)
 			if acct == nil && crossRealm {
-				acct = h.cfg.Pool.PickExcludingForRealmGroupsProfiles(tried, bareModel, otherRealm(pickRealm), keyGroups, profile)
+				acct = h.cfg.Pool.PickExcludingForRealmGroupsProfiles(tried, curModel, otherRealm(pickRealm), keyGroups, profile)
 			}
 		}
 		if acct == nil {
+			// 全池该模型都处于 6004 冷却时选号返回 nil；先尝试降级到等价模型，
+			// 而不是直接 503——恰好在最需要降级的场景（全池被限流）生效。
+			if to := fallbackTo(); to != "" {
+				applyFallback(to)
+				continue
+			}
 			st.status = http.StatusServiceUnavailable
 			if blockedByDaily > 0 {
 				dailyLimited = true
@@ -636,7 +681,7 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 			//   (b) 号都在，但每个号都对这个模型处于模型级冷却（11102/6004）。
 			// 两者此前都报 no_healthy_account，导致「模型不可用」被读成「号全挂了」。
 			// 在这里取一次快照，供下方错误构造区分（issue #102 附带发现 1）。
-			modelBlock = h.cfg.Pool.ModelBlocked(bareModel)
+			modelBlock = h.cfg.Pool.ModelBlocked(curModel)
 			break
 		}
 		st.uid = acct.UID
@@ -645,7 +690,7 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		if crossRealm && h.cfg.Upstream != nil && acct.Realm() != realm {
 			// 跨域回退命中：按实际服务域取积分倍率，用量/账本记的是真实域口径，
 			// 而不是请求前缀声明的域。
-			modelRate = h.cfg.Upstream.ModelRate(acct.Realm(), bareModel)
+			modelRate = h.cfg.Upstream.ModelRate(acct.Realm(), curModel)
 		}
 		tried[acct.UID] = true
 
@@ -882,6 +927,19 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 				st.status = http.StatusBadRequest
 				return nil, false
 			}
+			// 模型降级（pool.model_fallback）：**仅 6004 模型级限流**触发。等价模型是
+			// 同一底层能力、只是计价不同；同账号换模型重试（不换号），比等冷却更快。
+			// 冷却必须记在 bareModel（原模型）名下——记成等价模型会把好好的等价模型
+			// 也冷却掉，降级就白做了。
+			if kind == upstream.ErrSoftRate && upstream.IsModelRateLimit(string(respBody)) {
+				if to := fallbackTo(); to != "" {
+					h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+					releaseHeld()
+					applyFallback(to)
+					delete(tried, acct.UID) // 降级是换模型不是换号，同账号仍应有机会
+					continue
+				}
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -928,7 +986,7 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 			}
 			return &ChatExecution{
 				RC: rc, Account: acct, Release: releaseHeld, Status: http.StatusOK,
-				BareModel: bareModel, Realm: realm, ModelRate: modelRate,
+				BareModel: curModel, Realm: realm, ModelRate: modelRate,
 				ChatMeta: prep.ChatMeta, Stat: st, AttemptStarted: attemptStarted,
 				Reopen: reopen,
 			}, true
@@ -959,7 +1017,7 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		keepLease = true
 		return &ChatExecution{
 			Aggregated: raw, Account: acct, Release: releaseHeld, Status: http.StatusOK,
-			BareModel: bareModel, Realm: realm, ModelRate: modelRate,
+			BareModel: curModel, Realm: realm, ModelRate: modelRate,
 			ChatMeta: prep.ChatMeta, Stat: st, AttemptStarted: attemptStarted,
 		}, true
 	}
