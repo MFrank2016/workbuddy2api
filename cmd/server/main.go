@@ -264,6 +264,8 @@ func main() {
 	// 账号文件顶层的 `proxy` 写线路名，这里注入「线路名 → 代理地址」映射。
 	// 未绑线路的账号行为不变；绑了未配置的线路名时明确报错，不静默直连。
 	upstream.ConfigureProxies(cfg.Proxies)
+	// 出站头顺序对齐（conn 层重排；默认关闭，见 config upstream.head_order）。
+	upstream.SetHeadOrder(cfg.Upstream.HeadOrder)
 	if names := upstream.RouteNames(); len(names) > 0 {
 		log.Printf("出口线路已加载：%d 条（%s）—— 账号绑定的线路名按它解析",
 			len(names), strings.Join(names, ", "))
@@ -903,6 +905,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 快照走 liveSnapshot —— 与启动期同一份映射（见那里的注释）。
 	// auth.file_mode 不在其中：它 restart-only，改值只落盘，重启才生效。
 	live.Store(liveSnapshot(newCfg))
+	upstream.SetHeadOrder(newCfg.Upstream.HeadOrder)
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	up.SetIdentity(identityOptionsFrom(newCfg.Identity))
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)

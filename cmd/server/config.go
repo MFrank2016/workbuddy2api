@@ -326,6 +326,10 @@ type Config struct {
 		// FirstByteRetry 首字节前传输层失败时同账号重开一次。nil（未配置）= 默认
 		// 开启；显式 false 关闭。用指针是为了区分「没写」与「写了 false」。
 		FirstByteRetry *bool `json:"first_byte_retry"`
+		// HeadOrder 出站请求头按官方真机顺序发送（conn 层重排）。默认 false：
+		// 顺序对齐属于指纹级变更，先灰度验证再开。开启后新连接生效；已池化连接
+		// 保持原状（重启或连接自然回收后全部生效）。
+		HeadOrder bool `json:"head_order"`
 	} `json:"upstream"`
 
 	Features struct {

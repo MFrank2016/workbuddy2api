@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -51,6 +52,10 @@ func (c *Client) SetDNSDialer(d *net.Dialer) {
 		}
 		if t, ok := cl.Transport.(*http.Transport); ok {
 			t.DialContext = d.DialContext
+			// TLS 拨号闭包捕获的是旧 dialer，换 DNS 必须重建，否则新解析器不生效。
+			if t.DialTLSContext != nil {
+				t.DialTLSContext = newTLSDialer(d, func() *tls.Config { return t.TLSClientConfig })
+			}
 		}
 	}
 }

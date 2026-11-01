@@ -6,6 +6,7 @@
 package upstream
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -69,6 +71,58 @@ func newDialer() *net.Dialer {
 	}
 }
 
+// headOrderEnabled 控制是否在已握手的 TLS conn 外重排请求头（upstream.head_order）。
+// 默认关闭：失败安全（重排解析失败只会原样透传），但顺序对齐属于指纹级变更，
+// 先灰度验证再开。
+var headOrderEnabled atomic.Bool
+
+// SetHeadOrder 开启/关闭出站请求头顺序对齐。新连接生效；已池化连接保持原状，
+// 切换后建议 CloseIdleConnections（调用方负责）。
+func SetHeadOrder(v bool) { headOrderEnabled.Store(v) }
+
+// newTLSDialer 构造 DialTLSContext：TCP → TLS 握手 →（开关开启时）头序包装。
+//
+// 为什么必须接管整个 TLS 拨号（而不是只包 DialContext）：http.Transport 在
+// DialContext 之上自己完成 TLS 握手，写进 conn 的是**加密记录**，在那一层看不到
+// 也改不了请求头。只有 DialTLSContext 返回已完成的 TLS conn 时，上层写入的才是
+// 明文 HTTP 字节，headOrderConn 才能重排。
+//
+// 代价：设了 DialTLSContext 之后 Transport 的 TLSHandshakeTimeout 与
+// TLSClientConfig 不再自动生效——握手超时与 ServerName 由本函数保证，
+// TLSClientConfig 通过 cfgOf() 在拨号时读取（ca_bundle 仍然生效）。
+func newTLSDialer(d *net.Dialer, cfgOf func() *tls.Config) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		host, _, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			host = addr
+		}
+		var tc0 *tls.Config
+		if cfg := cfgOf(); cfg != nil {
+			tc0 = cfg.Clone()
+		} else {
+			tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		tc0.ServerName = host
+		// NextProtos 留空：与「禁 h2」口径一致——原 Transport 禁 h2 后同样不发 ALPN。
+		tc0.NextProtos = nil
+		tc := tls.Client(raw, tc0)
+		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+		defer cancel()
+		if herr := tc.HandshakeContext(hctx); herr != nil {
+			_ = raw.Close()
+			return nil, herr
+		}
+		if headOrderEnabled.Load() {
+			return newHeadOrderConn(tc), nil
+		}
+		return tc, nil
+	}
+}
+
 // newTransport 构造共享出站 Transport（HTTP 与 ChatHTTP 同一实例，连接池不重复）。
 // 分两层防半死连接：
 //   - TLS 层：空 TLSNextProto 真正禁 h2（kongjianguan 二次修正的实证：ForceAttemptHTTP2=false
@@ -79,7 +133,7 @@ func newDialer() *net.Dialer {
 //     和复用期都能被快速识别（见 dialTimeout/dialKeepAlive 注释）。
 func newTransport() *http.Transport {
 	dialer := newDialer()
-	return &http.Transport{
+	tr := &http.Transport{
 		DialContext: dialer.DialContext,
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
@@ -93,6 +147,10 @@ func newTransport() *http.Transport {
 		// 自动读取环境变量中的代理配置
 		Proxy: http.ProxyFromEnvironment,
 	}
+	// 拨号时读取 tr.TLSClientConfig：ca_bundle 在 newTransport 之后才注入，
+	// 闭包捕获变量而不是值才能生效。
+	tr.DialTLSContext = newTLSDialer(dialer, func() *tls.Config { return tr.TLSClientConfig })
+	return tr
 }
 
 // DirectRouteName 是账号级「强制直连」的保留线路名（issue #223）。
