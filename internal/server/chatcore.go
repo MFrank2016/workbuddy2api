@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -21,13 +22,20 @@ import (
 	"workbuddy2api/internal/usage"
 )
 
+// upstreamBusyMaxRetryAfterSec 渠道级排队 Retry-After 的本地封顶（防上游口径漂移
+// 时把天文数字带给客户端；与上游 retryAfterSanity 同量级）。
+const upstreamBusyMaxRetryAfterSec = 600
+
 type ChatExecOptions struct {
 	Body      []byte
 	Stream    bool
 	Protocol  string
 	OnError   func(status int, code, msg, hint string)
 	OnAccount func(*auth.Auth)
-	Stat      *chatStat
+	// OnRetryAfter 在可重试的渠道级排队（6020/6021）时写入 Retry-After 秒数；
+	// nil = 不写。与 OnError 分开，避免给所有协议的错误写入器加参数。
+	OnRetryAfter func(seconds int)
+	Stat         *chatStat
 	// RequestProfile 出站兼容 profile 覆盖（空 = 用 livecfg 的 upstream.request_profile）。
 	RequestProfile upstream.RequestProfile
 }
@@ -65,9 +73,10 @@ type preparedChat struct {
 	Body       []byte
 	Stream     bool
 	Protocol   string
-	OnError    func(status int, code, msg, hint string)
-	OnAccount  func(*auth.Auth)
-	Peek       chatPeek
+	OnError      func(status int, code, msg, hint string)
+	OnAccount    func(*auth.Auth)
+	OnRetryAfter func(seconds int)
+	Peek         chatPeek
 	Realm      string
 	BareModel  string
 	ModelRate  string
@@ -257,6 +266,7 @@ func (h *Handler) prepareChatRequest(r *http.Request, opt ChatExecOptions) (*pre
 		Protocol:       opt.Protocol,
 		OnError:        opt.OnError,
 		OnAccount:      opt.OnAccount,
+		OnRetryAfter:   opt.OnRetryAfter,
 		Peek:           peek,
 		Realm:          realm,
 		BareModel:      bareModel,
@@ -806,21 +816,35 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 				st.status = http.StatusBadRequest
 				return nil, false
 			}
-			// 6021「queue.full.title」渠道级容量满载：**不罚号不轮转**，立即透传
-			// 上游原文回客户端（503 + upstream_busy）。上游集群排队打满时换任何
-			// 账号都撞同一堵墙——按限流处置会逐号软冷却，实测 2 秒绞杀整池健康号
-			// （2026-10-15 实案），且换号白撞把无效请求放大 MaxRotate 倍。客户端
-			// 按 SDK 退避重试即可；等待窗口过去渠道恢复即成功。
+			// 6020「queue.waiting」/ 6021「queue.full」渠道级排队/满载：**不罚号不轮转**，
+			// 立即透传上游原文回客户端（429 + Retry-After）。上游队列按 client_user_type
+			// 全局共享，换号必撞同一堵墙——按限流处置会逐号软冷却，实测 2 秒绞杀整池
+			// 健康号（2026-10-15 实案），换号白撞还会把无效请求放大 MaxRotate 倍。
+			// 按上游原状态 429 透传：WorkBuddy CLI 对 429 自动睡后重发、对 503 直接中断
+			// 任务（2026-10-28 生产实案）；等待时长取 body 的 data.retry_after，缺省 5s。
 			if kind == upstream.ErrUpstreamBusy {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
-					msg = "upstream capacity is full (queue.full); retry after a short wait"
+					msg = "upstream queue is busy (queue.waiting/queue.full); retry after a short wait"
 				}
-				h.writeChatError(prep.OnError, http.StatusServiceUnavailable, "upstream_busy", msg,
+				retrySec := 5
+				if uerr.RetryAfter > 0 {
+					retrySec = int(math.Ceil(uerr.RetryAfter.Seconds()))
+					if retrySec < 1 {
+						retrySec = 1
+					}
+					if retrySec > upstreamBusyMaxRetryAfterSec {
+						retrySec = upstreamBusyMaxRetryAfterSec
+					}
+				}
+				if prep.OnRetryAfter != nil {
+					prep.OnRetryAfter(retrySec)
+				}
+				h.writeChatError(prep.OnError, http.StatusTooManyRequests, "upstream_busy", msg,
 					h.hintOf(upstream.ErrUpstreamBusy, string(respBody), realm, bareModel, reqHasImage, uerr))
-				st.status = http.StatusServiceUnavailable
+				st.status = http.StatusTooManyRequests
 				return nil, false
 			}
 			// 11133「Invalid request parameters」：上游对**请求本身**的拒绝（如 Kimi 系
@@ -973,11 +997,25 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
 		case upstream.ErrUpstreamBusy:
-			// 6021 queue.full 渠道级容量满载（防御路径：正常已在轮转循环内
-			// fail-fast 拦截）。503 + 可重试语义——上游原文（下方统一透传）
-			// 含 requestId，客户端按 SDK 退避重试即可。
+			// 6020/6021 渠道级排队/满载（防御路径：正常已在轮转循环内 fail-fast
+			// 拦截）。429 + Retry-After：上游原文（下方统一透传）含 requestId 与
+			// 排队位置，客户端按 OpenAI 限流语义睡后重试即可。
+			status = http.StatusTooManyRequests
 			code = "upstream_busy"
-			msg = "upstream capacity is full (queue.full); retry after a short wait"
+			msg = "upstream queue is busy (queue.waiting/queue.full); retry after a short wait"
+			retrySec := 5
+			if ue.RetryAfter > 0 {
+				retrySec = int(math.Ceil(ue.RetryAfter.Seconds()))
+				if retrySec < 1 {
+					retrySec = 1
+				}
+				if retrySec > upstreamBusyMaxRetryAfterSec {
+					retrySec = upstreamBusyMaxRetryAfterSec
+				}
+			}
+			if prep.OnRetryAfter != nil {
+				prep.OnRetryAfter(retrySec)
+			}
 		case upstream.ErrModelBlocked:
 			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
 			// code 此前停在默认的 no_healthy_account —— 那是"服务端过载"的语义，

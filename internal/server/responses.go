@@ -91,7 +91,8 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		OnError: func(status int, code, msg, hint string) {
 			writeResponsesErrorStatus(w, status, code, msg, hint)
 		},
-		OnAccount: func(a *auth.Auth) { w.Header().Set("X-Wb-Account", a.UID) },
+		OnAccount:    func(a *auth.Auth) { w.Header().Set("X-Wb-Account", a.UID) },
+		OnRetryAfter: func(secs int) { w.Header().Set("Retry-After", fmt.Sprintf("%d", secs)) },
 	})
 	if perr != nil {
 		st.status = perr.Status

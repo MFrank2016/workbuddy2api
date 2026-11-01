@@ -3046,7 +3046,8 @@ func TestChatAccountDailyLimitAllBlocked(t *testing.T) {
 // TestChatQueueFullFailsFastWithoutPenalty 上游 429 + code 6021「queue.full.title」
 // 是渠道级容量满载（推理集群排队打满），**不是账号问题**（2026-10-15 实案：按
 // 限流逐号软冷却，2 秒绞杀整池健康号）。端到端断言：不轮转（只打一次上游）、
-// 直接回 503 + upstream_busy（可重试语义）、账号零惩罚（无冷却/无熔断/无连败）。
+// 直接回 429 + Retry-After（可重试语义；WorkBuddy CLI 对 429 自动睡后重发，
+// 对 503 直接中断任务）、账号零惩罚（无冷却/无熔断/无连败）。
 func TestChatQueueFullFailsFastWithoutPenalty(t *testing.T) {
 	calls := map[string]int{}
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -3062,8 +3063,13 @@ func TestChatQueueFullFailsFastWithoutPenalty(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("code=%d body=%s (want 503: channel-level busy, client should back off and retry)", rec.Code, rec.Body)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d body=%s (want 429: channel-level busy, client should back off and retry)", rec.Code, rec.Body)
+	}
+	// 6021 的等待口径不在 body（无 retry_after）→ 本地兜底 5s；头必须存在，
+	// 否则客户端只能靠猜（CLI 按 Retry-After 睡）。
+	if ra := rec.Header().Get("Retry-After"); ra != "5" {
+		t.Errorf("Retry-After=%q want 5（6021 无 body 口径时的本地兜底）", ra)
 	}
 	if calls["Bearer at-busy1"] != 1 || calls["Bearer at-busy2"] != 0 {
 		t.Errorf("calls=%v want busy1 1 次、busy2 0 次（零轮转）", calls)
@@ -3074,10 +3080,10 @@ func TestChatQueueFullFailsFastWithoutPenalty(t *testing.T) {
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "6021") || !strings.Contains(body, "queue.full.title") {
-		t.Errorf("503 message should carry upstream 6021 info: %s", body)
+		t.Errorf("429 message should carry upstream 6021 info: %s", body)
 	}
 	if !strings.Contains(body, "upstream_busy") {
-		t.Errorf("503 body should carry upstream_busy code: %s", body)
+		t.Errorf("429 body should carry upstream_busy code: %s", body)
 	}
 	if strings.Contains(body, "no_healthy_account") {
 		t.Errorf("channel-busy failure must not be reported as account exhaustion: %s", body)
