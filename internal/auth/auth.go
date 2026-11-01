@@ -241,6 +241,11 @@ func (a *Auth) Realm() string {
 	return a.realmLocked()
 }
 
+// RealmLocked 已持 a.mu 的锁内版本（与 realmLocked 同语义，供跨包锁内调用方使用）。
+// sync.Mutex 不可重入：锁内调 Realm() 会自锁（生产事故：refresh 写回段锁内
+// validateRefreshedToken → Realm() 自锁，keepalive 卡死全池）。
+func (a *Auth) RealmLocked() string { return a.realmLocked() }
+
 // realmLocked Realm 的无锁内部实现：仅限**已持 a.mu** 的调用方使用（sync.Mutex 不可重入，
 // 锁内再调 Realm() 会自锁）。realm 由 BackfillRealm 改写、Domain 由 RefreshToken 在锁内
 // 改写，故读取必须与写方同锁（理由见 AccessTokenValue 注释）。

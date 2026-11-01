@@ -36,25 +36,29 @@ func parseJWTClaims(token string) (*jwtClaims, error) {
 // validateRefreshedToken 在写回刷新结果前校验新 token 的身份：
 // sub 必须匹配旧 UID；iss 不得跨 realm（CN <-> INTL）。
 // 解析失败（opaque token）放行，避免因上游 token 形态变化阻断刷新。
-func validateRefreshedToken(old *auth.Auth, newAccessToken string) error {
-	if old == nil || strings.TrimSpace(old.UID) == "" {
+//
+// 参数是**快照值**（uid / realm）而非 *auth.Auth：本函数在 refreshTokenOnce 的
+// 写回段被调用，调用方已持 a.mu；若改收 *auth.Auth 再调 Realm() 会二次加锁自锁
+// （sync.Mutex 不可重入）。
+func validateRefreshedToken(uid, realm, newAccessToken string) error {
+	if strings.TrimSpace(uid) == "" {
 		return nil
 	}
 	claims, err := parseJWTClaims(newAccessToken)
 	if err != nil {
 		return nil
 	}
-	if claims.Sub != "" && claims.Sub != old.UID {
-		return fmt.Errorf("sub=%q does not match uid=%q", claims.Sub, old.UID)
+	if claims.Sub != "" && claims.Sub != uid {
+		return fmt.Errorf("sub=%q does not match uid=%q", claims.Sub, uid)
 	}
 	iss := strings.ToLower(claims.Iss)
 	if iss == "" {
 		return nil
 	}
-	if old.Realm() == "global" && strings.Contains(iss, "copilot.tencent.com") {
+	if realm == "global" && strings.Contains(iss, "copilot.tencent.com") {
 		return fmt.Errorf("iss=%q looks CN but account realm is global", claims.Iss)
 	}
-	if old.Realm() == "cn" && strings.Contains(iss, "workbuddy.ai") {
+	if realm == "cn" && strings.Contains(iss, "workbuddy.ai") {
 		return fmt.Errorf("iss=%q looks INTL but account realm is cn", claims.Iss)
 	}
 	return nil
