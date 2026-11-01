@@ -43,7 +43,7 @@ const (
 	ErrWafBlock                        // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
 	ErrPromptTooLong                   // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                    // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
-	ErrUpstreamBusy                    // 6021「queue.full.title」渠道级容量满载 → 不罚号、不轮转，末端 503 + upstream_busy
+	ErrUpstreamBusy                    // 6020「queue.waiting.title」/ 6021「queue.full.title」渠道级排队/满载 → 不罚号、不轮转，末端 429 + Retry-After
 	ErrModelEntitlement                // 11158「model not allowed for user type」（免费号不可用）→ 模型级权限，不罚号、仍轮换
 	ErrClient                          // 其他 4xx / 业务错误
 	ErrToolCallMismatch                // 11148 工具调用/结果历史错配 → 请求级错误：不罚号、不轮转
@@ -302,9 +302,16 @@ var inactiveCheckinPatterns = []*regexp.Regexp{
 
 // isQueueFullBody 判定渠道级容量满载文案（6021 queue.full.title 家族）。
 // 该形态表明上游推理集群排队队列打满，与具体账号无关；换号在任何时刻都会撞
-// 同一堵墙，正确处置是不罚号不轮转（见 Classify 的 6021 分支）。
+// 同一堵墙，正确处置是不罚号不轮转（见 Classify 的 6020/6021 分支）。
 func isQueueFullBody(lower string) bool {
 	return strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full")
+}
+
+// isQueueWaitingBody 判定渠道级排队等待文案（6020 queue.waiting.title 家族）。
+// 与 6021 同族：上游按 client_user_type 全局共享队列，换号只会把同一份排队
+// 请求重发多次（2026-10-24 实测 position 只随时间上涨）。
+func isQueueWaitingBody(lower string) bool {
+	return strings.Contains(lower, "queue.waiting") || strings.Contains(lower, "queue waiting")
 }
 
 // accountFaultRule 账号级授权/配额故障关键词（大小写不敏感子串匹配）。
@@ -555,6 +562,28 @@ func ParseRetryAfter(h http.Header) (time.Duration, bool) {
 	return 0, false
 }
 
+// parseQueueRetryAfter 从 6020/6021 排队响应的 body 抽上游明示的重试等待
+// （data.retry_after，整数秒）。上游把排队口径放在 body 而不是 Retry-After 头
+// （实测 429 + code 6020，data 含 queue_position/queue_size/retry_after/
+// estimated_wait，头侧无等待信息），ParseRetryAfter（只认头）拿不到。
+// 只认结构化 data 字段：msg 是 i18n 键无数值，requestId 等恰好含数字的字段
+// 不会误伤。超过 retryAfterSanity 按异常值封顶；解析不到返回 false。
+func parseQueueRetryAfter(body []byte) (time.Duration, bool) {
+	var env struct {
+		Data struct {
+			RetryAfter int64 `json:"retry_after"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || env.Data.RetryAfter <= 0 {
+		return 0, false
+	}
+	d := time.Duration(env.Data.RetryAfter) * time.Second
+	if d > retryAfterSanity {
+		d = retryAfterSanity
+	}
+	return d, true
+}
+
 // isAllDigits 报告 s 是否为纯数字（前置快筛，免 strconv 之后再判语义）。
 func isAllDigits(s string) bool {
 	if s == "" {
@@ -713,9 +742,12 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
 	}
-	// 6021「queue.full.title」是渠道级容量满载，必须先于通用 429 兜底：
-	// 按限流逐号软冷却会在数秒内把整池健康号误杀，且换号也撞同一堵墙。
-	if (status == http.StatusTooManyRequests && hasBusinessCode(body, "6021")) || isQueueFullBody(lower) {
+	// 6020「queue.waiting.title」/ 6021「queue.full.title」是渠道级排队/满载，
+	// 必须先于通用 429 兜底：按限流逐号软冷却会在数秒内把整池健康号误杀，
+	// 且换号也撞同一堵墙（队列按 client_user_type 全局共享）。两个 code 同族同判；
+	// 结构化 code 主判，requestId 等恰好含数字的字段不误伤。
+	if hasBusinessCode(body, "6020") || hasBusinessCode(body, "6021") ||
+		isQueueFullBody(lower) || isQueueWaitingBody(lower) {
 		return ErrUpstreamBusy
 	}
 	// status==429 先于 hardRule（fork-scan-absorb T-3）：限流响应 body
@@ -1629,6 +1661,9 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 				}
 				ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
 				if d, ok := ParseRetryAfter(resp.Header); ok {
+					ue.RetryAfter = d
+				} else if d, ok := parseQueueRetryAfter(raw); ok {
+					// 6020/6021 的等待口径在 body（data.retry_after），头侧没有。
 					ue.RetryAfter = d
 				}
 				return nil, resp.StatusCode, raw, ue
