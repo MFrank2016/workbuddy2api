@@ -66,3 +66,30 @@ func TestNormalizeHeaderSpellingSpecialCases(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyConnectionHeader 官方显式发送的 Connection 头：
+// chat / chat.busy / report → keep-alive；/v3/config → req.Close=true
+// （Go 自己写 close，手写会重复）；其余 path 不臆造。
+func TestApplyConnectionHeader(t *testing.T) {
+	cases := []struct {
+		path       string
+		wantHeader string
+		wantClose  bool
+	}{
+		{"/v2/chat/completions", "keep-alive", false},
+		{"/v2/chat/busy", "keep-alive", false},
+		{"/v2/report", "keep-alive", false},
+		{"/v3/config", "", true},
+		{"/v2/plugin/auth/token/refresh", "", false},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest("POST", "https://example.com"+tc.path, nil)
+		applyConnectionHeader(req)
+		if got := req.Header.Get("Connection"); got != tc.wantHeader {
+			t.Errorf("%s: Connection=%q want %q", tc.path, got, tc.wantHeader)
+		}
+		if req.Close != tc.wantClose {
+			t.Errorf("%s: Close=%v want %v", tc.path, req.Close, tc.wantClose)
+		}
+	}
+}

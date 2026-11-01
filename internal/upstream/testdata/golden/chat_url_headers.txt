@@ -2,6 +2,7 @@ url: https://chat.example/v2/chat/completions
 accept: application/json, text/event-stream
 accept-language: zh-CN
 authorization: Bearer golden-access-token
+connection: keep-alive
 content-type: application/json
 origin: https://www.workbuddy.cn
 referer: https://www.workbuddy.cn/

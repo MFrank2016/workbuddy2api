@@ -112,8 +112,30 @@ func normalizeHeaderSpelling(req *http.Request) *http.Request {
 	return r2
 }
 
-// doRequest 是所有出站请求的统一发送出口：发送前对齐头名拼写。
-// 13 个出站点全部经由它，避免「某条链路漏挂 normalize」导致指纹不一致。
+// applyConnectionHeader 补回官方客户端显式发送的 Connection 头。
+//
+// 真机抓包：除 /v3/config 是 close 外，chat / chat.busy / report 全部显式写
+// `Connection: keep-alive`。HTTP/1.1 里 keep-alive 是默认语义，Go 因此**永远
+// 不发这一行**——头集合少了它，风控按白名单查头时和「多一个头」一样显眼。
+//
+// close 不能写进 Header：net/http 会按 req.Close 自己写一行 Connection: close，
+// 手写会重复成两行。没抓到过的 path 保持 Go 默认，不臆造。
+func applyConnectionHeader(req *http.Request) {
+	if req == nil || req.URL == nil {
+		return
+	}
+	switch req.URL.Path {
+	case "/v3/config":
+		req.Close = true
+	case "/v2/chat/completions", "/v2/chat/busy", "/v2/report":
+		req.Header.Set("Connection", "keep-alive")
+	}
+}
+
+// doRequest 是所有出站请求的统一发送出口：发送前对齐头名拼写 + 补 Connection。
+// 13 个出站点全部经由它，避免「某条链路漏挂」导致指纹不一致。
 func doRequest(client *http.Client, req *http.Request) (*http.Response, error) {
-	return client.Do(normalizeHeaderSpelling(req))
+	req = normalizeHeaderSpelling(req)
+	applyConnectionHeader(req)
+	return client.Do(req)
 }
