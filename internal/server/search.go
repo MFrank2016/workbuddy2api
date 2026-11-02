@@ -102,6 +102,9 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Query      string `json:"query"`
 		MaxResults *int   `json:"max_results"`
+		// Deep 显式开启综述式检索（上游 agentic_search，40~66s、47K prompt）。
+		// 默认 false 走 snippet 快路径；不按 max_uses 猜模式——猜错代价是白等 40s+。
+		Deep bool `json:"deep"`
 		// Count DeepSeek Search API 形状的条数字段（DSH 发 count 而不是 max_results）；
 		// max_results 缺省时回落到它。
 		Count *int `json:"count"`
@@ -151,6 +154,11 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		obs.Header().Set("Retry-After", "60")
 		writeOpenAIError(obs, http.StatusTooManyRequests, "rate_limit_exceeded",
 			"search rate limit exceeded (600 requests/minute per api key)")
+		return
+	}
+
+	if in.Deep {
+		h.searchDeep(obs, r, pick, query)
 		return
 	}
 
@@ -259,4 +267,41 @@ func (h *Handler) recordSearchUsage(realm, uid, keyName string, latency time.Dur
 		LatencyMs:  ms,
 		HasLatency: true,
 	}, ok)
+}
+
+// searchDeep 综述式检索（deep:true）：返回上游 done 帧 data 原文。
+// 长延迟（40~66s）由调用方承担；字段一个不改写、不裁剪（results 里的整页正文
+// 正是它的价值）。取号与失败处置与 snippet 路径同口径。
+func (h *Handler) searchDeep(w http.ResponseWriter, r *http.Request, pick searchPick, query string) {
+	tried := map[string]bool{}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		a := h.cfg.Pool.PickExcludingForRealm(tried, "", pick.Realm)
+		if a == nil {
+			break
+		}
+		tried[a.UID] = true
+		data, err := h.cfg.Upstream.AgenticSearch(r.Context(), a, query)
+		if err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(data)
+			return
+		}
+		lastErr = err
+		var ue *upstream.Error
+		if errors.As(err, &ue) && requestLevelFailFastKind(ue.Kind) {
+			status := ue.Status
+			if status < 400 {
+				status = http.StatusBadRequest
+			}
+			writeOpenAIError(w, status, "upstream_error", ue.Msg)
+			return
+		}
+	}
+	if lastErr == nil {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_account",
+			"no available account for realm "+pick.Realm)
+		return
+	}
+	writeOpenAIError(w, http.StatusBadGateway, "upstream_error", lastErr.Error())
 }

@@ -327,3 +327,30 @@ func TestSearchDeepSeekCompatCountAndDate(t *testing.T) {
 		t.Errorf("response must carry date:null for DSH: %s", rec.Body)
 	}
 }
+
+// TestSearchDeepSwitch deep:true 走上游 agentic_search，返回 done 帧 data 原文；
+// 缺省仍走 snippet 快路径（既有用例覆盖）。
+func TestSearchDeepSwitch(t *testing.T) {
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if !strings.HasSuffix(r.URL.Path, "/agenttool/v1/agentic_search") {
+				t.Errorf("deep must hit agentic_search, got %s", r.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader("event: done\ndata: {\"synthesis\":{\"content\":\"sum\"},\"partial\":false}\n\n")),
+			}, nil
+		})},
+		ChatBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "cn1", AccessToken: "at_cn", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, AuthKeys: []AuthKey{searchKey()}, SearchEnabled: true})
+	rec := doSearch(t, h, "sk-search", `{"query":"x","deep":true}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"synthesis"`) {
+		t.Errorf("deep response must be the done-frame data: %s", rec.Body)
+	}
+}
