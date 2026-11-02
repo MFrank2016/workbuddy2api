@@ -2138,6 +2138,10 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	out := make([]ModelInfo, 0, len(cliIDs))
 	for _, id := range cliIDs {
+		// auto / auto-chat 是客户端「自动模式」开关，不是菜单项（见 clientpick.go）。
+		if isAutoModeID(id) {
+			continue
+		}
 		m, ok := dynMap[id]
 		if !ok || m.Disabled {
 			continue
@@ -2191,15 +2195,31 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	if len(names) == 0 {
 		return nil, fmt.Errorf("v3 config empty list")
 	}
-	// v3 面全量 models 不经 agents[cli] 过滤，nes-/completion-/codewise- 嵨补全/图片
-	// 生成等非对话条目（企业端点的 nonChatModel 口径）同样要挡在目录外——
-	// 这里按同一 nonChatModel 规则过滤（selected ID 会选模型报 code=11102）。
-	out := make([]ModelInfo, 0, len(infos))
+	// 可见性口径：菜单 = 默认 agent 的 models − paidId + 三个速度预设（见 clientpick.go）。
+	// 上游没下发 agents 时 pick 为 nil，回落全量（老版本/私有化不裁剪）。
+	// 两条分支都照旧过 nonChatModel：补全/短输出/出图出视频模型即使出现在 agent
+	// 名单里也不能进对话列表（选了上游回 11102）。
+	pick := parseV3ClientPick(raw)
+	byID := make(map[string]ModelInfo, len(infos))
 	for _, mi := range infos {
-		if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
-			continue
+		byID[mi.ID] = mi
+	}
+	out := make([]ModelInfo, 0, len(infos))
+	if ids := pick.ordered(); ids != nil {
+		for _, id := range ids {
+			mi, ok := byID[id]
+			if !ok || nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
+				continue
+			}
+			out = append(out, mi)
 		}
-		out = append(out, mi)
+	} else {
+		for _, mi := range infos {
+			if nonChatModel(mi.ID, mi.MaxTokens, mi.Tags) {
+				continue
+			}
+			out = append(out, mi)
+		}
 	}
 	return out, nil
 }

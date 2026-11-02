@@ -54,13 +54,8 @@ func TestModelListContextLengthThreeLevelLookup(t *testing.T) {
 	if _, ok := byID["cn:never-seen-model"]["max_output_tokens"]; ok {
 		t.Error("unknown model max_output_tokens must be omitted")
 	}
-	// 4) 知识表条目但输出上限未知（auto）→ context 走表 168000，输出省略。
-	if c := byID["cn:auto"]["context_length"]; c != int64(168000) {
-		t.Errorf("auto context_length=%v want 168000 (knowledge table)", c)
-	}
-	if _, ok := byID["cn:auto"]["max_output_tokens"]; ok {
-		t.Error("auto max_output_tokens must be omitted (output unknown)")
-	}
+	// 注：auto 已被 clientpick 剔除（它是「自动模式」开关，不是菜单项），
+	// 不再作为知识表样本；输出上限未知的场景由 never-seen-model 覆盖。
 	// 全表扫描：任何条目都不得再出现 131072 假兜底充当 context_length
 	//（dyn-full 的 65536 等真实值不受影响；本 fixture 无真 131072 值）。
 	for id, m := range byID {
