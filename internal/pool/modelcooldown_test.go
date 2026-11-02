@@ -691,7 +691,7 @@ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
 	first := time.Until(p.byUID["u1"].modelCooldowns["m"].Until)
 	p.mu.RUnlock()
 	if d := first - modelBlockBaseTTL; d > time.Second || d < -time.Second {
-		t.Errorf("首次 TTL=%v want ~6h", first)
+		t.Errorf("首次 TTL=%v want ~%v", first, modelBlockBaseTTL)
 	}
 
 	p.BlockModelBackoff("u1", "m", "11102 model not available")
@@ -703,8 +703,8 @@ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
 	if hits != 2 {
 		t.Errorf("hits=%d want 2", hits)
 	}
-	if d := second - 12*time.Hour; d > time.Second || d < -time.Second {
-		t.Errorf("二次 TTL=%v want ~12h", second)
+	if d := second - 2*modelBlockBaseTTL; d > time.Second || d < -time.Second {
+		t.Errorf("二次 TTL=%v want ~%v（Hits 指数退避）", second, 2*modelBlockBaseTTL)
 	}
 
 	// 连打到远超封顶：TTL 封顶 24h。
@@ -715,7 +715,7 @@ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
 	capped := time.Until(p.byUID["u1"].modelCooldowns["m"].Until)
 	p.mu.RUnlock()
 	if d := capped - modelBlockMaxTTL; d > time.Second || d < -time.Second {
-		t.Errorf("封顶 TTL=%v want ~24h", capped)
+		t.Errorf("封顶 TTL=%v want ~%v", capped, modelBlockMaxTTL)
 	}
 }
 

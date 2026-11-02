@@ -156,9 +156,10 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 //
 // 语义与 6004 正交：6004 是「模型被限流、对齐重置墙钟」，本入口是「官方确定该后端无此模型、
 // 重试无意义，只能换模型/换账号」。退避按 reference model_blocks.py 口径（吸收语义、不抄实现）：
-//   - 首次命中 TTL = modelBlockBaseTTL（6h）；
+//   - 首次命中 TTL = modelBlockBaseTTL（2m）；11102 不总是「真没这模型」——
+//     路径级/瞬时抖动/分类误判都会给同一个码，6h 会把一次误判放大成整池该模型 503；
 //   - 半开到期后允许放行重试；再次命中 Hits++ → TTL = base × 2^min(hits-1, modelBlockShift)；
-//   - 封顶 modelBlockMaxTTL（24h，最多一天再试一次）；
+//   - 封顶 modelBlockMaxTTL（10m，真没模型的号不会变成每请求重试）；
 //   - 该模型请求成功即由 BlockModelClear 清除（注意：6004 的 NoteSuccess 不清 modelCooldowns，
 //     故清理必须由 handler 在成功且 model 命中 11102 条目时显式调用，见 BlockModelClear）。
 //

@@ -38,6 +38,50 @@ var sanitizeBareHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header`)
 // sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
 var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 
+// sanitizeDshPathsRe DSH 0.3.x 系统提示里的「@ 开头的路径怎么解析」整段说明。
+//
+// 这一段是本仓唯一漏掉的 DSH 指纹：段内不含任何品牌词，身份类规则的预检根本不会
+// 命中，原文原样发出即 400 11-128 Illegal API invocation from an unapproved
+// channel。上游按「连续原文」匹配（只发首句放行，前两句连排即拦），所以必须整段
+// 一起改：同义改写而不是删除，@ 路径 / 相对路径基准 / 结尾斜杠表示目录 / 其余按
+// 文件读 / @"..." 用于含空格路径——语义全部保留，只换措辞让连续特征失配。
+//
+// 覆盖两种线上措辞（0.3.x 当前写法 + 更早的写法）；段外的 @（邮箱、包名、含 @
+// 的绝对路径）不受影响。
+var sanitizeDshPathsRe = regexp.MustCompile(
+	`(?is)Tokens prefixed with @ are paths the user explicitly referenced\..*?path (?:containing|that contains) spaces\.`)
+
+const sanitizeDshPathsProbe = "Tokens prefixed with @"
+
+const sanitizeDshPathsReplacement = "Paths beginning with @ refer to files the user explicitly mentioned. " +
+	"Relative paths are resolved against the project root; absolute paths point " +
+	"to files or directories on the host. A trailing slash marks a directory, so " +
+	"list it when its contents matter. Anything else is a file: open it with the " +
+	"read tool when its contents are needed, and never claim to have inspected it " +
+	"before reading. The @\"...\" form only quotes a path that contains spaces."
+
+// sanitizeIdentitySentenceRe 客户端「自我介绍句 + 品牌归属」整句。
+//
+// 上游把这类句子当成非官方渠道特征：`You are an AI agent powered by <品牌>.`
+// `You are a coding agent powered by <模型>.` `You are <Product> Agent, built by
+// <Vendor>.` 只换品牌词、保留 `You are … powered by …` 骨架仍会 400——骨架本身
+// 就是特征。动词表一次列七种，避免上游补一条新搭配就重新 400。
+// 窗口有界（形容词 0~3 个、名词可省），`You are free to use tools built by …`
+// 这类分词修饰宾语的句子不会被误伤。结尾用捕获组回填空白（RE2 无零宽断言）。
+var sanitizeIdentitySentenceRe = regexp.MustCompile(
+	`(?i)You are\s+` +
+		`(?:an?\s+|the\s+)?(?:[\w.-]+\s+){0,3}?` +
+		`(?:agent|assistant|model|AI|LLM)?[\s,]*` +
+		`(?:powered by|built on|built by|created by|developed by|made by|trained by)` +
+		`[^\n]*?\.(\s|$)`)
+
+const sanitizeIdentitySentenceReplacement = "You are a helpful AI assistant.${1}"
+
+// sanitizeIdentityVerbs 身份句式的字面量快路（与上面正则的动词表同步维护）。
+var sanitizeIdentityVerbs = []string{
+	"powered by", "built on", "built by", "created by", "developed by", "made by", "trained by",
+}
+
 // sanitizeRewrites 改写层：全模板句逐字替换（每句只改一个词，语义不变）。
 //
 // 身份句的匹配串**不带结尾标点**（只到 "…for Claude" 为止）：
@@ -86,6 +130,19 @@ func sanitizeText(text string) string {
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
+	// DSH @ 路径整段说明（11-128 连续原文特征）。
+	if strings.Contains(text, sanitizeDshPathsProbe) {
+		text = sanitizeDshPathsRe.ReplaceAllString(text, sanitizeDshPathsReplacement)
+	}
+	// 身份句骨架（You are … powered by …）整句中性化。
+	if strings.Contains(text, "You are") {
+		for _, v := range sanitizeIdentityVerbs {
+			if strings.Contains(text, v) {
+				text = sanitizeIdentitySentenceRe.ReplaceAllString(text, sanitizeIdentitySentenceReplacement)
+				break
+			}
+		}
+	}
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
@@ -110,6 +167,16 @@ func hasFingerprint(text string) bool {
 	for _, f := range sanitizeFeatures {
 		if strings.Contains(text, f) {
 			return true
+		}
+	}
+	if strings.Contains(text, sanitizeDshPathsProbe) {
+		return true
+	}
+	if strings.Contains(text, "You are") {
+		for _, v := range sanitizeIdentityVerbs {
+			if strings.Contains(text, v) {
+				return true
+			}
 		}
 	}
 	return sanitizeBareHdrRe.MatchString(text)

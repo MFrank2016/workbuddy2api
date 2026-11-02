@@ -658,8 +658,8 @@ const defaultSoftRateMax = 2 * time.Hour
 // 机制承载）。首次命中冷却 6h，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
 // 封顶 24h（最多一天再试一次）；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
 const (
-	modelBlockBaseTTL = 6 * time.Hour
-	modelBlockMaxTTL  = 24 * time.Hour
+	modelBlockBaseTTL = 2 * time.Minute
+	modelBlockMaxTTL  = 10 * time.Minute
 	modelBlockShift   = 6 // 2^6=64 倍后封顶：6h×64>24h，实际封顶锚定 24h
 )
 
