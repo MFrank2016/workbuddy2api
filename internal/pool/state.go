@@ -183,6 +183,9 @@ func (p *Pool) ManualDisabledState(uid string) (disabled bool, reason string, ok
 // softStreak/modelCooldowns）并更新 credits，不动熔断器（fails/retryCount/breakerUntil）——
 // 签到成功只证明余额恢复与 billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx
 // 信号）不应被签到覆盖。remain==0 或禁用时只更新 credits（不动冷却/禁用）。
+// 11140 账号级风控的 hold（accountFaultHolds>0）同样不属于余额冷却：只更新 credits，
+// 保留 until/coolKind/reason，否则 5 分钟一次的余额刷新会把 24h hold 清空，
+// 账号在短时间内被重复选中并升级永久禁用。
 // total 可选：给出时同步更新 creditsTotal（面板余额显示用）。
 func (p *Pool) ReenableIfCredits(uid string, remain int64, total ...int64) {
 	p.mu.Lock()
@@ -192,7 +195,14 @@ func (p *Pool) ReenableIfCredits(uid string, remain int64, total ...int64) {
 			e.creditsTotal = total[0]
 		}
 		if remain > 0 && !e.disabled {
-			p.reviveCoolingLocked(e, remain)
+			// 11140 的冷静期不能被余额刷新清掉：余额恢复只证明 billing 通道
+			// 健康，不证明 chat 风控解除。否则 5 分钟一次的余额刷新会把 24h
+			// hold 反复清空，账号在 1–2 小时内被重试 3 次直接升级永久禁用。
+			if e.accountFaultHolds > 0 {
+				e.credits = remain
+			} else {
+				p.reviveCoolingLocked(e, remain)
+			}
 		} else {
 			e.credits = remain
 		}

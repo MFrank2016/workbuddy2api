@@ -57,3 +57,30 @@ func TestNoteAccountFaultLegacyImmediateDisable(t *testing.T) {
 		t.Fatalf("应立即禁用并带 re-login 原因: %+v", st)
 	}
 }
+
+func TestReenableIfCreditsKeepsAccountFaultHold(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	if p.NoteAccountFault("u1", "11140 test") {
+		t.Fatal("首次 11140 不应禁用")
+	}
+	p.ReenableIfCredits("u1", 500)
+	st, _ := p.Status("u1")
+	if !st.Cooling {
+		t.Fatalf("余额刷新不得清掉 11140 冷静期: %+v", st)
+	}
+	if st.AccountFaultHolds != 1 {
+		t.Fatalf("余额刷新不得清零 11140 计数: %+v", st)
+	}
+	if got := p.Pick(""); got == nil || got.UID != "u2" {
+		t.Fatalf("冷静期账号不应压过健康账号: %+v", got)
+	}
+	if p.NoteAccountFault("u1", "11140 test") {
+		t.Fatal("第 2 次不应禁用")
+	}
+	st, _ = p.Status("u1")
+	if st.AccountFaultHolds != 2 {
+		t.Fatalf("第 2 次计数应为 2: %+v", st)
+	}
+}
