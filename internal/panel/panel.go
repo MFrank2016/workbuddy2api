@@ -103,6 +103,11 @@ type Panel struct {
 	loginMu sync.Mutex
 	logins  map[string]loginSession
 
+	// softRateMu/softRateUntil 上游软限流（429）账号级冷却截止：一轮任务里撞限流后
+	// 后续动作快失败，不再每个动作各睡一遍（见 autotask.go 的 listTasksSoftRate）。
+	softRateMu    sync.Mutex
+	softRateUntil map[string]time.Time
+
 	// taskMu/taskLocks 一键完成任务的 per-account 互斥：同一账号的任务动作
 	// （单任务 / 全量）同时只允许一条在跑。重复点击直接返回 409"仍在执行"，
 	// 而不是并发跑两遍浪费上游请求（动作虽幂等，expert 系每遍含 8 次真实对话）。
