@@ -2146,8 +2146,9 @@ func TestContentBlockedTriggersDegradedRetry(t *testing.T) {
 	if !strings.Contains(string(bodies[1]), prompt.Degraded) {
 		t.Errorf("second body should contain Degraded prompt: %s", bodies[1])
 	}
-	if strings.Contains(string(bodies[1]), "原始指纹") {
-		t.Errorf("second body should not contain original system: %s", bodies[1])
+	// 三层抢救：单句 system 拆不动 → 搬家（原文搬进首条 user，一个字符不丢）。
+	if !strings.Contains(string(bodies[1]), "原始指纹") {
+		t.Errorf("second body should preserve original text (moved into user): %s", bodies[1])
 	}
 }
 
@@ -2265,12 +2266,12 @@ func TestContentBlockedSecondHitReturns400(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"system","content":"原始指纹"},{"role":"user","content":"hi"}]}`)))
 
-	// passthrough 首遇（body 含原始 system）→ 降级重试一次；第二次仍拦 → 立即 400，不轮转。
+	// 三层抢救各一次（拆句 → 搬家 → 降级替换），全部仍拦 → 400；不轮转。
 	if rec.Code != 400 {
 		t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body)
 	}
-	if calls != 2 {
-		t.Errorf("want exactly 2 upstream calls (first 400 + one degraded retry, then stop), got %d", calls)
+	if calls != 4 {
+		t.Errorf("want exactly 4 upstream calls (first 400 + split/move/degraded retries), got %d", calls)
 	}
 	body := rec.Body.String()
 	if !assertJSONErrorCode(t, body, "content_blocked") {
@@ -2783,8 +2784,9 @@ func TestHandlerAppendDegradedActiveReplaces(t *testing.T) {
 	if !strings.Contains(out, prompt.Degraded) {
 		t.Errorf("body should contain Degraded: %s", out)
 	}
-	if strings.Contains(out, "原始指纹") {
-		t.Errorf("original system must be REMOVED in degraded append (replace fallback): %s", out)
+	// 三层抢救：拆不动 → 搬家，原文保留在首条 user 里（不再整体替换丢弃）。
+	if !strings.Contains(out, "原始指纹") {
+		t.Errorf("original system should be preserved (moved into user): %s", out)
 	}
 	if strings.Contains(out, "网关人格") {
 		t.Errorf("append PromptText should NOT be used in degraded window: %s", out)
@@ -2823,8 +2825,9 @@ func TestHandlerAppendContentBlockedTriggersDegrade(t *testing.T) {
 	if !strings.Contains(string(bodies[1]), prompt.Degraded) {
 		t.Errorf("retry body should contain Degraded: %s", bodies[1])
 	}
-	if strings.Contains(string(bodies[1]), "原始指纹") {
-		t.Errorf("retry body should not contain original system: %s", bodies[1])
+	// 三层抢救：单句 system 拆不动 → 搬家，原文保留在首条 user 里。
+	if !strings.Contains(string(bodies[1]), "原始指纹") {
+		t.Errorf("retry body should preserve original text (moved into user): %s", bodies[1])
 	}
 	if !h.degrade.Active() {
 		t.Error("degrade should be active after content-blocked trigger in append mode")
@@ -2857,8 +2860,8 @@ func TestHandlerAppendContentBlockedSecondFailPassthrough(t *testing.T) {
 	if !strings.Contains(body, "blocked by security policy") || !strings.Contains(body, "11128") {
 		t.Errorf("want upstream raw body passthrough: %s", body)
 	}
-	if len(bodies) != 2 {
-		t.Errorf("want 2 upstream calls (first + one degraded retry), got %d", len(bodies))
+	if len(bodies) != 4 {
+		t.Errorf("want 4 upstream calls (first + split/move/degraded retries), got %d", len(bodies))
 	}
 }
 

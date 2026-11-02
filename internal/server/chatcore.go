@@ -557,13 +557,26 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
 	degradedApplied := false
+	// splitApplied / movedApplied 11-128 的两层「不改文本」抢救各用一次（拆句留在
+	// system、搬家进 user），与 degradedApplied（中性提示词替换）按顺序各用一次。
+	splitApplied := false
+	movedApplied := false
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
 	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
 		body = prompt.Append(body, h.cfg.PromptText)
 	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
-		body = prompt.Rewrite(body, prompt.Degraded)
-		degradedApplied = true
+		// 降级期：与重试阶梯同一优先级——拆句留在 system 最好，其次搬家，都不行才替换。
+		if split, ok := prompt.SplitSystemMessages(body); ok {
+			body = split
+			splitApplied = true
+		} else if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
+			body = moved
+			movedApplied = true
+		} else {
+			body = prompt.Rewrite(body, prompt.Degraded)
+			degradedApplied = true
+		}
 	}
 
 	// outbound model 名重写为 curModel（D6）：realm 前缀是网关侧路由协议，
@@ -823,14 +836,46 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 			// 降级重试同样退化为 replace——原文在场只会确定性再撞 400）。
 			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
-			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
-				h.degrade.Trigger()
-				body = prompt.Rewrite(body, prompt.Degraded)
-				degradedApplied = true
-				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
-				releaseHeld()
-				log.Printf("WARN: [server] content-blocked (likely fingerprint false positive) -> degraded prompt retry")
-				continue
+			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") {
+				// 三层抢救，从「改动最小」到「改动最大」：
+				//   ① 拆句留在 system（文本一字不改，指令优先级不变）
+				//   ② 搬家进首条 user（原文一个字符不丢）
+				//   ③ 中性提示词整体替换（保底）
+				// 每层只在本就会失败的请求上多花一次上游调用，正常流量零影响。
+				if !splitApplied {
+					if split, ok := prompt.SplitSystemMessages(body); ok {
+						body = split
+						splitApplied = true
+						h.degrade.Trigger()
+						delete(tried, acct.UID)
+						releaseHeld()
+						log.Printf("WARN: [server] content-blocked (system fingerprint) -> split system into sentences, retry")
+						i-- // 抢救重试不占轮转名额
+						continue
+					}
+				}
+				if !movedApplied {
+					if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
+						body = moved
+						movedApplied = true
+						h.degrade.Trigger()
+						delete(tried, acct.UID)
+						releaseHeld()
+						log.Printf("WARN: [server] content-blocked (system fingerprint) -> move system into first user, retry")
+						i-- // 抢救重试不占轮转名额
+						continue
+					}
+				}
+				if !degradedApplied {
+					h.degrade.Trigger()
+					body = prompt.Rewrite(body, prompt.Degraded)
+					degradedApplied = true
+					delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
+					releaseHeld()
+					log.Printf("WARN: [server] content-blocked (likely fingerprint false positive) -> degraded prompt retry")
+					i-- // 抢救重试不占轮转名额
+					continue
+				}
 			}
 			if kind == upstream.ErrContentBlocked {
 				// 内容命中网关内容防火墙：立即回客户端，**不轮转**——换任何账号都会撞同一
