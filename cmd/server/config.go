@@ -339,6 +339,9 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// EmbeddingsEnabled 实验性 /v1/embeddings 端点开关（默认 false；关闭时端点回
+		// 403 embeddings_disabled）。面板保存后经 livecfg 热生效。
+		EmbeddingsEnabled bool `json:"embeddings_enabled"`
 	} `json:"features"`
 
 	// Thinking 网关思考档位策略（issue #18/#21）：enabled=false 时不碰档位，

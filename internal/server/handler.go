@@ -114,6 +114,8 @@ type Config struct {
 	CapabilityGuard bool   // upstream.capability_guard
 	SearchEnabled   bool   // search.enabled
 	MCPEnabled      bool   // mcp.enabled
+	// EmbeddingsEnabled 实验性 /v1/embeddings 开关（Live 为 nil 的裸用/测试路径使用）。
+	EmbeddingsEnabled bool
 	// RequestProfile 出站请求兼容 profile（upstream.request_profile）：legacy / official。
 	// 经 livecfg 热生效；Live 为 nil 时由 loadLive 回落本字段。
 	RequestProfile string
@@ -341,6 +343,7 @@ func NewHandler(cfg Config) *Handler {
 	// 搜索工具端点（契约 §4）。flag 闸在 gatedSearch 内、withAuth 之外：
 	// search.enabled=false 时回纯文本 404，与「路由未注册」不可区分。
 	h.mux.HandleFunc("POST /v1/search", h.gatedSearch)
+	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
 	// Anthropic Messages 兼容搜索端点（DSH 内置搜索 provider 的硬编码路径）。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
 	// MCP 工具端点（契约 §4 / Todo 27）：同样是 flag 闸在外、鉴权在内。
@@ -438,18 +441,19 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 		// 图片/能力门禁与工具端点：**从 cfg 取**，不在这里硬编码 ——
 		// 硬编码会让「无 Live 的裸用路径」永远显示旧值，而面板改了配置
 		// 也不报错，只让 flag 看起来没生效。
-		MaxImages:       h.cfg.MaxImages,
-		ImagePolicy:     imagePolicyOr(h.cfg.ImagePolicy),
-		CapabilityGuard: h.cfg.CapabilityGuard,
-		SearchEnabled:   h.cfg.SearchEnabled,
-		MCPEnabled:      h.cfg.MCPEnabled,
-		RequestProfile:  h.cfg.RequestProfile,
-		StreamKeepalive: h.cfg.StreamKeepalive,
-		FirstByteRetry:  h.cfg.FirstByteRetry,
-		HiddenModels:     livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
-		AllowedModels:    allowedModels,
-		AllowlistEnabled: allowlistEnabled,
-		ModelFallback:    h.cfg.ModelsFallback,
+		MaxImages:         h.cfg.MaxImages,
+		ImagePolicy:       imagePolicyOr(h.cfg.ImagePolicy),
+		CapabilityGuard:   h.cfg.CapabilityGuard,
+		SearchEnabled:     h.cfg.SearchEnabled,
+		MCPEnabled:        h.cfg.MCPEnabled,
+		EmbeddingsEnabled: h.cfg.EmbeddingsEnabled,
+		RequestProfile:    h.cfg.RequestProfile,
+		StreamKeepalive:   h.cfg.StreamKeepalive,
+		FirstByteRetry:    h.cfg.FirstByteRetry,
+		HiddenModels:      livecfg.NormalizeHiddenModels(h.cfg.ModelsHidden),
+		AllowedModels:     allowedModels,
+		AllowlistEnabled:  allowlistEnabled,
+		ModelFallback:     h.cfg.ModelsFallback,
 	}
 }
 

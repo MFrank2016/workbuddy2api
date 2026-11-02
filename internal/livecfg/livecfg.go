@@ -27,6 +27,8 @@ type Snapshot struct {
 	CapabilityGuard bool   // upstream.capability_guard；false = 不预检
 	SearchEnabled   bool   // search.enabled；false = /v1/search 不存在
 	MCPEnabled      bool   // mcp.enabled；false = /v1/mcp 不存在
+	// EmbeddingsEnabled features.embeddings_enabled；false = /v1/embeddings 回 403。
+	EmbeddingsEnabled bool
 
 	// HiddenModels 精确隐藏的模型 id（已归一化为 "cn:x"/"global:x"）；nil = 不隐藏。
 	HiddenModels map[string]struct{}
