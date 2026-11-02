@@ -198,6 +198,9 @@ type ModelCostStatus struct {
 	LastSeen time.Time `json:"last_seen"`
 	// Samples 累计观测次数（EMA 收敛度参考）。
 	Samples int `json:"samples,omitempty"`
+	// WinTokens 当前用量窗口内该模型已消费的 token（issue #112 窗口用量调度的输入）。
+	// 0 = 本窗口无用量或调度关闭。运维据此看「为什么这次没选它」。
+	WinTokens int64 `json:"win_tokens,omitempty"`
 }
 
 type entry struct {
@@ -361,6 +364,18 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 		return modelCostEntry{}, false // 过期：时段性优惠（夜间免费）不得跨时段生效
 	}
 	return mc, true
+}
+
+// windowTokens 返回 (账号, 模型) 在当前窗口内的 token 用量；窗口过期/未配置返回 0。
+func (e *entry) windowTokens(model string, window time.Duration, now time.Time) int64 {
+	if window <= 0 {
+		return 0
+	}
+	mc, ok := e.modelCost[model]
+	if !ok || mc.WinStart.IsZero() || now.Sub(mc.WinStart) > window {
+		return 0
+	}
+	return mc.WinTokens
 }
 
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/连败降权期）。
@@ -608,6 +623,10 @@ const modelCostTTL = 6 * time.Hour
 
 // modelCostEntry 运行时成本账本（持久化镜像 stateModelCost 与其字段一一对应）。
 type modelCostEntry struct {
+	// WinStart/WinTokens 用量窗口起点与该窗口内累计消费的 token（issue #112 窗口
+	// 用量调度）。**不持久化**：重启后窗口重新起算，与 lastUsed/usedSeq 同口径。
+	WinStart  time.Time
+	WinTokens int64
 	CostPer1k float64
 	LastSeen  time.Time
 	Samples   int

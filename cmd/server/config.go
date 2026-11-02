@@ -422,6 +422,9 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// BalanceWindow 窗口用量调度窗口（issue #112）：按 (账号, 模型) 本窗口 token
+		// 用量反比降权，打散热点号。默认 "1h"；"0" 关停（行为与旧版逐字节一致）。
+		BalanceWindow string `json:"balance_window"`
 		// WeightDefault 账号级选号权重默认值（weight 乘子）：默认 1.0（等价现行
 		// 纯三因子权重，行为逐字一致）。auth 文件显式 weight 的账号用其配置值；
 		// 0 = 只读备用（不参与自动轮转）。钳 (0,1000]。
@@ -505,6 +508,8 @@ type Config struct {
 	CreditExhaustedDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// BalanceWindowDur 解析后的窗口用量调度窗口（issue #112）；0 = 关停。
+	BalanceWindowDur time.Duration `json:"-"`
 	// AcquireTimeoutDur 解析后的满额等待上限；0 = 不等待。
 	AcquireTimeoutDur time.Duration `json:"-"`
 }
@@ -1107,6 +1112,15 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
+	}
+	if c.Pool.BalanceWindow == "" {
+		c.Pool.BalanceWindow = "1h"
+	}
+	if c.BalanceWindowDur, err = time.ParseDuration(c.Pool.BalanceWindow); err != nil {
+		return fmt.Errorf("pool.balance_window: %w", err)
+	}
+	if c.BalanceWindowDur < 0 {
+		c.BalanceWindowDur = 0
 	}
 	if c.Pool.AcquireTimeout == "" {
 		c.Pool.AcquireTimeout = "30s"

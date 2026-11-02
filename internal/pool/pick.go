@@ -189,13 +189,33 @@ func (p *Pool) pickScopedProfile(tried map[string]bool, reqModel, realm string, 
 			explored = true
 		}
 	}
+	// 窗口用量调度（issue #112）：按 (账号, 模型) 本窗口 token 用量反比降权。
+	// mean 取同成本层均值——量纲自洽，换池规模与倍率不用调参；全层零用量时
+	// 除数恒 1，与旧版逐字节一致。权重在构建时统一除一次，top5 排序与抽签共用。
+	var meanUsed float64
+	if p.balanceWindow > 0 && reqModel != "" {
+		var sum, n int64
+		for _, e := range cands {
+			if ti, _ := costTier(e); ti == bestTier {
+				sum += e.windowTokens(reqModel, p.balanceWindow, now)
+				n++
+			}
+		}
+		if n > 0 {
+			meanUsed = float64(sum) / float64(n)
+		}
+	}
 	ws := make([]weighted, 0, len(cands))
 	for _, e := range cands {
 		ti, ci := costTier(e)
 		if ti == bestTier {
 			// weightMul（账号级流量整形，v0.1.3）：手动旋钮乘三因子权重。
 			// 默认 1.0 时 = weightOf 逐字一致；0 已在候选收集阶段被排除。
-			ws = append(ws, weighted{e: e, w: p.weightOf(e, maxCredits, now) * p.effectiveWeight(e), tier: ti, cost1k: ci})
+			w := p.weightOf(e, maxCredits, now) * p.effectiveWeight(e)
+			if meanUsed > 0 {
+				w /= 1 + float64(e.windowTokens(reqModel, p.balanceWindow, now))/meanUsed
+			}
+			ws = append(ws, weighted{e: e, w: w, tier: ti, cost1k: ci})
 		}
 	}
 	if strategy := p.strategyForRealmLocked(realm); strategy != WeightedRandom {

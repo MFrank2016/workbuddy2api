@@ -200,6 +200,7 @@ func main() {
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)         // 最早到期优先路由（panel prefer_expiring，默认 true）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
+	p.SetBalanceWindow(cfg.BalanceWindowDur)              // 窗口用量调度（issue #112，默认 1h；0 关停）
 	// 账号级流量整形 + 全池并发闸（config pool.weight_default 等，默认无此功能）。
 	// 必须与既有 entry 重算生效值（SetThrottleDefaults 内部遍历 byUID 重算）。
 	p.SetThrottleDefaults(cfg.Pool.WeightDefault, cfg.Pool.MaxConcurrencyDefault, cfg.Pool.MinIntervalDefault, cfg.Pool.MaxTotalConcurrency)
@@ -941,6 +942,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur)
+	p.SetBalanceWindow(newCfg.BalanceWindowDur)
 	p.SetCreditFloor(newCfg.Pool.CreditFloor)
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetThrottleDefaults(newCfg.Pool.WeightDefault, newCfg.Pool.MaxConcurrencyDefault, newCfg.Pool.MinIntervalDefault, newCfg.Pool.MaxTotalConcurrency)

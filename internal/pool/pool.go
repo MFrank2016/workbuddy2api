@@ -35,6 +35,8 @@ type Pool struct {
 	// 探索 ≥ 窗口时，本次 pick 生效层切 tier 1-only（探索=搭车改道，零新增上游请求）。
 	// 0 = 关停（完全回到现状行为）。
 	costExploreInterval time.Duration
+	// balanceWindow 窗口用量调度窗口（issue #112）；0 = 关停。
+	balanceWindow time.Duration
 	// exploreLast 各 (realm, 模型) 的上次探索时刻，键 = realm + "\x1f" + model。
 	// 运行态（不持久化，同 lastUsed/usedSeq 口径）：重启归零 → 每个仍冻结的
 	// (域, 模型) 多至 1 次即时重探；已毕业号经 ModelCosts 恢复 tier，学费不重付。
@@ -196,6 +198,16 @@ func (p *Pool) SetCostExploreInterval(d time.Duration) {
 		return // 负值非法，保留现值
 	}
 	p.costExploreInterval = d
+}
+
+// SetBalanceWindow 设置窗口用量调度的窗口长度（0 = 关停，行为与旧版逐字节一致）。
+func (p *Pool) SetBalanceWindow(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	p.balanceWindow = d
 }
 
 // CostExploreStatus 透出探索台账（/status 用）：累计探索事件数 + 各 (域, 模型)
