@@ -43,6 +43,9 @@ type searchResultItem struct {
 	Title   string `json:"title"`
 	URL     string `json:"url"`
 	Snippet string `json:"snippet"`
+	// Date DeepSeek Search API 兼容字段：DSH 校验 `date !== null && typeof date !== "string"`
+	// 会判 invalidResponse，字段缺失（undefined）也不行。上游不返回发布日期，恒 null。
+	Date any `json:"date"`
 }
 
 // searchResponseBody 对外响应信封。
@@ -99,6 +102,9 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Query      string `json:"query"`
 		MaxResults *int   `json:"max_results"`
+		// Count DeepSeek Search API 形状的条数字段（DSH 发 count 而不是 max_results）；
+		// max_results 缺省时回落到它。
+		Count *int `json:"count"`
 	}
 	if err := json.Unmarshal(body, &in); err != nil {
 		writeOpenAIError(obs, http.StatusBadRequest, "invalid_request",
@@ -119,6 +125,14 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		maxResults = *in.MaxResults
+	} else if in.Count != nil {
+		// DSH 兼容：count 作为 max_results 的回退（同样 1..10，越界本地 400）。
+		if *in.Count < 1 || *in.Count > searchMaxResults {
+			writeOpenAIError(obs, http.StatusBadRequest, "invalid_request",
+				"count must be between 1 and 10")
+			return
+		}
+		maxResults = *in.Count
 	}
 
 	key := authKeyFrom(r.Context())

@@ -307,3 +307,23 @@ func TestSearchDisabledAccountReturns503(t *testing.T) {
 	}
 	assertJSONErrorCode(t, rec.Body.String(), "no_healthy_account")
 }
+
+// TestSearchDeepSeekCompatCountAndDate DSH 兼容：count 作为 max_results 回退，
+// 响应每条补 date:null（DSH 校验 date 必须是 null 或 string）。
+func TestSearchDeepSeekCompatCountAndDate(t *testing.T) {
+	var hits []searchHit
+	h := searchHandler(t, &hits)
+	rec := doSearch(t, h, "sk-search", `{"query":"x","count":3}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("upstream hits=%d want 1", len(hits))
+	}
+	if got, _ := hits[0].body["max_results"].(float64); got != 3 {
+		t.Errorf("max_results=%v want 3 (count fallback)", hits[0].body["max_results"])
+	}
+	if !strings.Contains(rec.Body.String(), `"date":null`) {
+		t.Errorf("response must carry date:null for DSH: %s", rec.Body)
+	}
+}
