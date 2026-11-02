@@ -864,6 +864,11 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	SanitizeFingerprints atomic.Bool
 
+	// effortPolicy 网关思考档位策略（config thinking 节，见 effort_policy.go）：
+	// 面板保存配置热更新，chat 热路径用 atomic.Pointer 读取——存入的是规范化后的
+	// 不可变副本，读侧永不加锁，也无数据竞争。
+	effortPolicy atomic.Pointer[EffortPolicy]
+
 	// GzipBody chat 请求体超过 gzipBodyThreshold 时用 gzip 压缩后再发上游
 	// （issue #297）。false 完全还原为不压缩（排障开关）。
 	// 只压 chat：refresh/checkin/billing 的请求体都在几 KB 量级，压了纯耗 CPU。
@@ -1094,7 +1099,7 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string, pro
 		// （issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
-	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
+	body = PrepareBodyOptWithPolicy(body, c.SanitizeFingerprints.Load(), efforts, defs, realm, c.EffortPolicy())
 	// 身份替换 / DSH 归一（反 11-128）：只在 identity.enabled 时生效；同一请求
 	// 取一次快照，热更新不会中途混用。只改 system/assistant/developer 文本块。
 	if ident := c.IdentitySnapshot(); ident.Enabled {
@@ -1148,6 +1153,27 @@ func realmKey(realm string) string {
 		return "cn"
 	}
 	return realm
+}
+
+// SetEffortPolicy 热更新网关思考档位策略；nil = 关闭策略（行为退回旧管线）。
+func (c *Client) SetEffortPolicy(p *EffortPolicy) {
+	if c == nil {
+		return
+	}
+	if p == nil {
+		c.effortPolicy.Store(nil)
+		return
+	}
+	out := p.Normalized()
+	c.effortPolicy.Store(&out)
+}
+
+// EffortPolicy 返回当前策略快照（可能为 nil）；返回指针指向不可变副本，调用方不得修改。
+func (c *Client) EffortPolicy() *EffortPolicy {
+	if c == nil {
+		return nil
+	}
+	return c.effortPolicy.Load()
 }
 
 // storeEfforts 按 realm 写入 effort 能力缓存桶（efforts + defaultEfforts），并发安全。

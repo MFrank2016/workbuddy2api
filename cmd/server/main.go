@@ -271,6 +271,8 @@ func main() {
 		log.Printf("WARN: [upstream] tls_fingerprint: %v（回退 go）", err)
 		_ = upstream.SetTLSFingerprint("go")
 	}
+	// 网关思考档位策略（config thinking 节）：保存后热生效。
+	up.SetEffortPolicy(thinkingPolicyFromConfig(cfg))
 	if names := upstream.RouteNames(); len(names) > 0 {
 		log.Printf("出口线路已加载：%d 条（%s）—— 账号绑定的线路名按它解析",
 			len(names), strings.Join(names, ", "))
@@ -754,6 +756,21 @@ var restartRequiredPaths = []string{
 //
 // 不进快照的字段：auth.file_mode（restart-only，见 restartRequiredPaths）、
 // 以及一切只在启动期读取的部署路径类字段。
+// thinkingPolicyFromConfig 把 config 的 thinking 节映射成 upstream 策略快照。
+// 启动与热更新共用，避免两处映射漂移。
+func thinkingPolicyFromConfig(c *Config) *upstream.EffortPolicy {
+	if c == nil {
+		return nil
+	}
+	return &upstream.EffortPolicy{
+		Enabled:        c.Thinking.Enabled,
+		DefaultEffort:  c.Thinking.DefaultEffort,
+		ClientPriority: c.Thinking.ClientPriority,
+		OverrideScope:  c.Thinking.OverrideScope,
+		ModelDefaults:  c.Thinking.ModelDefaults,
+	}
+}
+
 func liveSnapshot(c *Config) livecfg.Snapshot {
 	allowedModels, allowlistEnabled := livecfg.NormalizeAllowedModels(c.Models.Allowed)
 	return livecfg.Snapshot{
@@ -914,6 +931,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := upstream.SetTLSFingerprint(newCfg.Upstream.TLSFingerprint); err != nil {
 		return nil, err
 	}
+	up.SetEffortPolicy(thinkingPolicyFromConfig(newCfg))
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	up.SetIdentity(identityOptionsFrom(newCfg.Identity))
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)

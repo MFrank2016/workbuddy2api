@@ -341,6 +341,20 @@ type Config struct {
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
 	} `json:"features"`
 
+	// Thinking 网关思考档位策略（issue #18/#21）：enabled=false 时不碰档位，
+	// 行为退回只有 injectThinking + 降级的旧管线。client_priority=true 时客户端
+	// 发了档位就按客户端（含 off），只在缺档时补默认；false 时网关优先改写。
+	// override_scope=level 只覆盖档位、尊重客户端主动关闭；all 连关闭也覆盖。
+	// default_effort 可为具体档位或 "max"（取模型支持的最高档）；model_defaults
+	// 支持 "realm:model" 精确键与裸名两域共用。保存后热生效。
+	Thinking struct {
+		Enabled        bool              `json:"enabled"`
+		DefaultEffort  string            `json:"default_effort"`
+		ClientPriority bool              `json:"client_priority"`
+		OverrideScope  string            `json:"override_scope"`
+		ModelDefaults  map[string]string `json:"model_defaults"`
+	} `json:"thinking"`
+
 	Models struct {
 		// Hidden 不对外暴露的模型黑名单。裸名=两域都藏；"cn:xxx"/"global:xxx"=只藏该域。
 		// 生效点：GET /v1/models 列表过滤 + POST /v1/chat/completions 点名拒绝。
