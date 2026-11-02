@@ -344,6 +344,8 @@ func NewHandler(cfg Config) *Handler {
 	// search.enabled=false 时回纯文本 404，与「路由未注册」不可区分。
 	h.mux.HandleFunc("POST /v1/search", h.gatedSearch)
 	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
+	// DeepSeek Fetch API 形状（DSH 的 web-deepseek-api 把 /search 与 /fetch 指向同一 base）。
+	h.mux.HandleFunc("POST /v1/fetch", h.withAuth(h.fetch))
 	// Anthropic Messages 兼容搜索端点（DSH 内置搜索 provider 的硬编码路径）。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
 	// MCP 工具端点（契约 §4 / Todo 27）：同样是 flag 闸在外、鉴权在内。

@@ -2961,3 +2961,7 @@ func (c *Client) SetCABundle(path string) error {
 	ConfigureBaseTransport(tr)
 	return nil
 }
+
+// HasCodeMarker 报告 body 是否带结构化业务码 want（供跨包做业务码分流）。
+// 与内部 hasBusinessCode 同口径：只认 "code": 键，requestId 等恰好含数字的字段不误伤。
+func HasCodeMarker(body, want string) bool { return hasBusinessCode(body, want) }
