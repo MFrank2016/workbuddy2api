@@ -74,7 +74,15 @@ func (m *ListenerManager) Addr() string {
 	return m.addr
 }
 
-// Close 关闭当前 listener 并优雅停机（5s）。
+// shutdownGrace 优雅停机时等待在途请求结束的上限。
+//
+// 为什么不是 5s：SSE 流的首字延迟实测 10–40s、整条流 10–45s，5s 会把正在
+// 生成的回答从中间掐断（客户端看到 ECONNRESET / incomplete chunked read）。
+// 这里给到 120s，覆盖绝大多数流；docker-compose 的 stop_grace_period 要比
+// 它再宽一点（见 docker-compose.yml），留出 p.Flush()/store.Close() 的时间。
+var shutdownGrace = 120 * time.Second
+
+// Close 关闭当前 listener 并优雅停机。
 func (m *ListenerManager) Close() error {
 	m.mu.Lock()
 	ln, srv := m.ln, m.srv
@@ -84,7 +92,7 @@ func (m *ListenerManager) Close() error {
 		_ = ln.Close()
 	}
 	if srv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 		return srv.Shutdown(ctx)
 	}

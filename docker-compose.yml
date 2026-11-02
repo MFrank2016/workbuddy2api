@@ -10,6 +10,10 @@ services:
         GOPROXY: ""
     container_name: workbuddy2api
     restart: unless-stopped
+    # 优雅停机窗口：必须大于 listener.go 的 shutdownGrace（120s），给
+    # p.Flush()/store.Close() 留出余量。默认 10s 会让在途 SSE 在容器重建时
+    # 被直接掐断，客户端表现为 ECONNRESET / incomplete chunked read。
+    stop_grace_period: 150s
     security_opt:
       - no-new-privileges:true
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
