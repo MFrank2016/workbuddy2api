@@ -172,6 +172,11 @@ func TestAnthropicStreamThinkingThenText(t *testing.T) {
 	if starts[0]["index"] != float64(0) || starts[0]["content_block"].(map[string]any)["type"] != "thinking" {
 		t.Fatalf("thinking block start = %v", starts[0])
 	}
+	// Anthropic SDK 的 ThinkingBlock 要求 signature 为 string：缺字段会让整条
+	// thinking 块在客户端解析阶段判非法（与 web_search_result 的 encrypted_content 同类）。
+	if sig, ok := starts[0]["content_block"].(map[string]any)["signature"]; !ok || sig != "" {
+		t.Fatalf("thinking block must carry signature:\"\" (SDK requires the field): %v", starts[0])
+	}
 	if starts[1]["index"] != float64(1) || starts[1]["content_block"].(map[string]any)["type"] != "text" {
 		t.Fatalf("text block start = %v", starts[1])
 	}

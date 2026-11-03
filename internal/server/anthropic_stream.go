@@ -106,6 +106,11 @@ func streamAnthropic(w http.ResponseWriter, rc io.ReadCloser, meta *anthropicMet
 			contentBlock["text"] = ""
 		case "thinking":
 			contentBlock["thinking"] = ""
+			// Anthropic SDK 的 ThinkingBlock 把 signature 定为必填 string：缺字段会让
+			// 客户端把整条 thinking 块判非法（与 web_search_result 的 encrypted_content
+			// 同一类问题）。网关没有可回传的签名（思考内容来自上游明文），空串是协议上
+			// 的合法值，且不影响客户端累计 thinking_delta。
+			contentBlock["signature"] = ""
 		case "tool_use":
 			id := b.id
 			if id == "" {
