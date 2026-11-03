@@ -21,10 +21,60 @@ type IdentityOptions struct {
 	Replacements map[string]string
 }
 
-// identityReplacement 排序后的替换项，key 以 rune 切片保存便于整词边界判断。
+// identityReplacement 排序后的替换项。字面规则用 key；通配规则用 prefix/suffix
+// 包住一个受限动态段（见 compileIdentityReplacement）。
 type identityReplacement struct {
-	key    []rune
-	target string
+	key      []rune
+	wildcard bool
+	prefix   []rune
+	suffix   []rune
+	target   string
+}
+
+const (
+	// identityWildcardToken 唯一有通配含义的 token；其余字节一律按字面匹配。
+	identityWildcardToken = "(.*)"
+	// identityWildcardMaxRunes 动态段上限（与上游 v1.14.43 同口径：256 个 Unicode 字符）。
+	identityWildcardMaxRunes = 256
+)
+
+// fixedLen 规则里固定文本的长度（字面=整个 key；通配=前缀+后缀），用于排序：
+// 固定文本更长的先匹配，避免短规则吃掉长句的一部分。
+func (r identityReplacement) fixedLen() int {
+	if r.wildcard {
+		return len(r.prefix) + len(r.suffix)
+	}
+	return len(r.key)
+}
+
+// compileIdentityReplacement 把一条配置规则编译成匹配项。
+//
+// 通配约束（与上游 v1.14.43 对齐）：只认精确的 `(.*)` token，且一条规则里最多一个；
+// 前缀与后缀都不能为空、不能含换行（匹配按行进行，天然不跨行）；动态段长度上限
+// identityWildcardMaxRunes。不满足的规则整条丢弃——宁可不改写，也不要产生过宽匹配。
+func compileIdentityReplacement(old, newValue string) (identityReplacement, bool) {
+	if strings.TrimSpace(old) == "" || old == newValue {
+		return identityReplacement{}, false
+	}
+	n := strings.Count(old, identityWildcardToken)
+	if n == 0 {
+		return identityReplacement{key: []rune(old), target: newValue}, true
+	}
+	if n > 1 {
+		return identityReplacement{}, false
+	}
+	i := strings.Index(old, identityWildcardToken)
+	prefix := old[:i]
+	suffix := old[i+len(identityWildcardToken):]
+	if prefix == "" || suffix == "" || strings.ContainsAny(prefix+suffix, "\r\n") {
+		return identityReplacement{}, false
+	}
+	return identityReplacement{
+		wildcard: true,
+		prefix:   []rune(prefix),
+		suffix:   []rune(suffix),
+		target:   newValue,
+	}, true
 }
 
 // SetIdentity 保存身份替换配置快照。深拷贝 map，避免调用方后续修改污染在途请求。
@@ -185,16 +235,19 @@ func ReplaceIdentityText(text string, opt IdentityOptions) string {
 	}
 	reps := make([]identityReplacement, 0, len(opt.Replacements))
 	for k, v := range opt.Replacements {
-		if k == "" || k == v {
-			continue
+		if rep, ok := compileIdentityReplacement(k, v); ok {
+			reps = append(reps, rep)
 		}
-		reps = append(reps, identityReplacement{key: []rune(k), target: v})
 	}
 	if len(reps) == 0 {
 		return text
 	}
+	// 字面规则优先于通配（精确 wins），同类按固定文本长度降序——与上游同口径。
 	sort.SliceStable(reps, func(i, j int) bool {
-		return len(reps[i].key) > len(reps[j].key)
+		if reps[i].wildcard != reps[j].wildcard {
+			return !reps[i].wildcard
+		}
+		return reps[i].fixedLen() > reps[j].fixedLen()
 	})
 	return transformProseLines(text, func(line string) string {
 		return replaceIdentityLine(line, reps, opt.Target)
@@ -241,6 +294,9 @@ func replaceLeadingIdentity(line string, reps []identityReplacement, target stri
 	}
 	rest := []rune(trimmed[len(prefix):])
 	for _, rep := range reps {
+		if rep.wildcard {
+			continue // 通配规则由 wholeWordReplace 统一处理（不参与行首前缀特判）
+		}
 		if len(rest) < len(rep.key) || !runesEqual(rest[:len(rep.key)], rep.key) {
 			continue
 		}
@@ -313,18 +369,28 @@ func wholeWordReplace(s string, reps []identityReplacement) string {
 	for i := 0; i < len(runes); {
 		matched := false
 		for _, rep := range reps {
-			n := len(rep.key)
-			if n == 0 || i+n > len(runes) || !runesEqual(runes[i:i+n], rep.key) {
-				continue
+			var end int
+			if rep.wildcard {
+				var ok bool
+				end, ok = matchIdentityWildcard(runes, i, rep)
+				if !ok {
+					continue
+				}
+			} else {
+				n := len(rep.key)
+				if n == 0 || i+n > len(runes) || !runesEqual(runes[i:i+n], rep.key) {
+					continue
+				}
+				end = i + n
 			}
 			if i > 0 && isWordRune(runes[i-1]) {
 				continue
 			}
-			if i+n < len(runes) && isWordRune(runes[i+n]) {
+			if end < len(runes) && isWordRune(runes[end]) {
 				continue
 			}
 			b.WriteString(rep.target)
-			i += n
+			i = end
 			matched = true
 			break
 		}
@@ -350,4 +416,24 @@ func runesEqual(a, b []rune) bool {
 
 func isWordRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// matchIdentityWildcard 在 runes[start:] 上匹配 prefix + (.*) + suffix。
+// 返回匹配结束下标（不含）。动态段取**最短**可行长度（首个 suffix 命中），
+// 长度上限 identityWildcardMaxRunes；按行处理，天然不跨行。
+func matchIdentityWildcard(runes []rune, start int, rep identityReplacement) (int, bool) {
+	p, sf := len(rep.prefix), len(rep.suffix)
+	if p == 0 || sf == 0 || start+p > len(runes) || !runesEqual(runes[start:start+p], rep.prefix) {
+		return 0, false
+	}
+	limit := start + p + identityWildcardMaxRunes
+	if limit > len(runes) {
+		limit = len(runes)
+	}
+	for end := start + p; end+sf <= limit; end++ {
+		if runesEqual(runes[end:end+sf], rep.suffix) {
+			return end + sf, true
+		}
+	}
+	return 0, false
 }

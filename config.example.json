@@ -12,7 +12,8 @@
       "Claude": "WorkBuddy",
       "DeepSeek Harness": "WorkBuddy",
       "Codex": "WorkBuddy",
-      "ZCode": "WorkBuddy"
+      "ZCode": "WorkBuddy",
+      "You are(.*)released by xAI": "You are WorkBuddy"
     }
   },
   "debug": {
