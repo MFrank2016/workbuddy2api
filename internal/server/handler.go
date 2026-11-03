@@ -1339,6 +1339,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// msg 同为 "request illegal"，但渠道失败 body 含 "channel verification" 标记。
 		// Classify 已在 ErrAccountFault 之前按该标记分流为 ErrBadParams，正常走不到本
 		// 分支；此处再挡一次，防未来 Classify 规则序被改回时健康账号被误 Disable。
+		if upstream.IsUpstreamRestriction(body) {
+			// 11140 + 「账号存在异常行为，已被限制使用」= 上游账号封禁，需向腾讯申诉；
+			// 重新登录不能解除，也不该在池子里反复重试。与普通 request illegal
+			// 的软冷却分开：后者仍按 account_fault_hold 自动重试。
+			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal, 账号存在异常行为/已被限制使用, appeal required, re-login ineffective)")
+			return
+		}
 		if upstream.IsAccountRestricted(body) {
 			// 处置策略可配（pool.account_fault_hold / account_fault_disable_after）：
 			// 默认长冷却 24h 后自动重试（上游风控通常 1–3 个工作日解除），连续 N 次

@@ -222,6 +222,26 @@ var accountFaultMarkers = []string{
 // accountRestrictedMsg 是 WorkBuddy 11140 账号限制的正文关键词。
 const accountRestrictedMsg = "request illegal"
 
+// IsUpstreamRestriction 判断响应是否是上游的「账号风控限制」（不是凭证失效）。
+//
+// 现场（2026-11-01，CN）：403 + `{"code":11140,"msg":"request illegal"}`，但封套里
+// displayMsg 明确写着「账号存在异常行为，已被限制使用」、displayTips 让用户「提交反馈
+// 申诉」。这类限制是**可申诉、会自行解除**的账号级风控，不是 OAuth 凭证被拒 ——
+// 按永久禁用处理会把还能救回来的号直接踢出池子（现场 6 个号被误标为「需重新登录」）。
+//
+// 只认带「异常行为 / unusual activity」话术的 11140；不带这层话术的
+// `request illegal`（历史上 global 的 auth_forbidden）仍走原有硬禁用策略。
+func IsUpstreamRestriction(body string) bool {
+	if !strings.Contains(body, "11140") {
+		return false
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "unusual activity") ||
+		strings.Contains(body, "异常行为") ||
+		strings.Contains(body, "異常行為") ||
+		strings.Contains(lower, "abnormal")
+}
+
 // IsAccountRestricted 报告上游 body 是否为 WorkBuddy 的账号级限制（11140
 // "request illegal"）。必须 code + 文案双条件：
 //   - 只看文案："request illegal" 也出现在 11128 通道校验失败里（健康账号）；
