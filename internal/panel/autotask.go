@@ -312,7 +312,7 @@ func (p *Panel) listTasksSoftRate(a *auth.Auth, mp bool) ([]upstream.Task, error
 
 // runActionWithSoftRateRetry 动作撞 429 时等窗口重发一次（任务动作幂等，重发不加重）。
 func (p *Panel) runActionWithSoftRateRetry(a *auth.Auth, act *autoAction) (string, error) {
-	msg, err := p.runActionWithSoftRateRetry(a, act)
+	msg, err := act.run(p, a)
 	if err != nil && isSoftRateErr(err) {
 		d := softRateWait(err, 1)
 		log.Printf("autotask %s: 动作 %s 撞上游软限流，等 %s 后重试一次",
