@@ -730,13 +730,13 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	// 企业上下文门控（企业版 / 企业切换会话）：行为事件会被上游静默丢弃或
-	// 直接 403，执行任何成长任务都是零收益白跑（含真实对话配额）——直接拒绝
-	// 并给出修复路径，不再让用户对着「已上报但进度 0/x」猜原因
-	// （见 auth.IsEnterpriseSession）。
-	if a.IsEnterpriseSession() {
+	// 企业版门控：成长端点上游 403（「growth system is only available for personal
+	// users」），执行任何成长任务都是零收益白跑（含真实对话配额），直接拒绝。
+	// 只看 enterpriseId：token_source=enterprise_switch 仅记授权流程，不是企业
+	// 形态（2026-10-14 实测证伪，见 auth.IsEnterpriseSession）。
+	if a.IsEnterprise() {
 		writeErr(w, http.StatusUnprocessableEntity,
-			"该账号为企业版/企业切换会话（token_source=enterprise_switch），无个人成长体系，成长任务行为事件会被上游忽略；请移除账号后以个人身份重新登录")
+			"该账号为企业版，无个人成长体系（成长端点上游 403）；请改用个人账号")
 		return
 	}
 	var body struct {
@@ -1343,9 +1343,9 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		item["progress_after"] = taskProgressText(after)
 		// 进度达标即自动领奖（mp 任务走 chat 域 mp 口径，其余 Web 端接口）。
 		// 领奖失败不掩盖主流程结果：status 仍为 done，附加 claim_error 供前端提示。
-	if after != nil && after.Claimable {
-		item["claimable"] = true
-		credit, energy, cerr := claimTaskReward(p, a, act.TaskCode)
+		if after != nil && after.Claimable {
+			item["claimable"] = true
+			credit, energy, cerr := claimTaskReward(p, a, act.TaskCode)
 			if cerr == nil {
 				item["claimed"] = true
 				item["credit"] = credit
@@ -1373,12 +1373,12 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	// 企业上下文门控（与单任务入口同口径）：企业版 / 企业切换会话的行为事件
-	// 会被上游静默丢弃或直接 403，全量跑一遍只会白烧真实对话配额——在加锁与
-	// 任何上游调用之前直接拒绝（见 auth.IsEnterpriseSession）。
-	if a.IsEnterpriseSession() {
+	// 企业版门控（与单任务入口同口径）：成长端点上游 403，全量跑一遍只会白烧
+	// 真实对话配额——在加锁与任何上游调用之前直接拒绝。只看 enterpriseId，
+	// 不按 JWT 的 token_source 声明判定（见 auth.IsEnterpriseSession）。
+	if a.IsEnterprise() {
 		writeErr(w, http.StatusUnprocessableEntity,
-			"该账号为企业版/企业切换会话（token_source=enterprise_switch），无个人成长体系，成长任务行为事件会被上游忽略；请移除账号后以个人身份重新登录")
+			"该账号为企业版，无个人成长体系（成长端点上游 403）；请改用个人账号")
 		return
 	}
 	// per-account 互斥（与单任务动作共用一把锁）：重复点击 409。

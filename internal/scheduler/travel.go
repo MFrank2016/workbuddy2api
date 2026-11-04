@@ -106,8 +106,8 @@ func (s *Scheduler) runTravel(ctx context.Context, trigger string) {
 			t.skipped++ // D4 门控：global 无猫猫旅行体系，不发起任何上游调用
 			continue
 		}
-		if a.IsEnterpriseSession() {
-			t.skipped++ // 企业版 / 企业切换会话：无个人成长体系
+		if a.IsEnterprise() {
+			t.skipped++ // 企业版：无个人成长体系
 			continue
 		}
 		if !first {

@@ -13,17 +13,21 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// enterpriseSessionJWT 拼一个 token_source=enterprise_switch 的最小 JWT。
-// IsEnterpriseSession 不校验签名，payload 之外的两段可为任意占位。
-func enterpriseSessionJWT() string {
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"ent","token_source":"enterprise_switch"}`))
+// stampedPersonalJWT 拼一个 token_source=enterprise_switch 的 JWT（个人号、
+// enterpriseId 为空）。该声明只记本次授权流程，不代表账号形态；2026-10-14
+// 实测证伪「带此章的号行为事件被静默丢弃」，详见 auth.IsEnterprise 说明。
+func stampedPersonalJWT() string {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"u1","token_source":"enterprise_switch","enterprise_id":""}`))
 	return "hdr." + payload + ".sig"
 }
 
-// TestAutoTaskAllEnterpriseGate 一键完成全部任务必须与企业切换会话的
-// 单任务入口同口径拒绝：返回同样的 422 文案，且不产生任何上游调用
-// （企业会话的行为事件会被上游静默丢弃，跑一遍只是白烧真实对话配额）。
-// 普通个人会话不受影响，仍进入正常流水线。
+// TestAutoTaskAllEnterpriseGate 一键完成全部任务只对**真企业版**（enterpriseId
+// 非空）返回 422，且不产生任何上游调用（成长端点上游 403，跑一遍只是白烧真实
+// 对话配额）。带 token_source=enterprise_switch 声明但 enterpriseId 为空的个人号、
+// 以及普通个人号，都必须照常进入流水线（200 且访问上游）。
+//
+// 回归钉子：曾有版本把该 JWT 声明当「企业上下文」，据此拒绝个人号并提示
+// 「请移除账号后以个人身份重新登录」——实测证伪，见 auth.IsEnterprise 说明。
 func TestAutoTaskAllEnterpriseGate(t *testing.T) {
 	newPanel := func(t *testing.T, a *auth.Auth, reqs *int32) *Panel {
 		t.Helper()
@@ -51,9 +55,9 @@ func TestAutoTaskAllEnterpriseGate(t *testing.T) {
 		return rec
 	}
 
-	t.Run("enterprise-switched session refused with zero upstream calls", func(t *testing.T) {
+	t.Run("real enterprise refused with zero upstream calls", func(t *testing.T) {
 		var reqs int32
-		a := &auth.Auth{UID: "ent", AccessToken: enterpriseSessionJWT()}
+		a := &auth.Auth{UID: "ent", EnterpriseID: "ent-1", AccessToken: "at"}
 		rec := callAutoAll(newPanel(t, a, &reqs), "ent")
 
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -63,16 +67,29 @@ func TestAutoTaskAllEnterpriseGate(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("解响应失败: %v；body=%s", err, rec.Body.String())
 		}
-		want := "该账号为企业版/企业切换会话（token_source=enterprise_switch），无个人成长体系，成长任务行为事件会被上游忽略；请移除账号后以个人身份重新登录"
+		want := "该账号为企业版，无个人成长体系（成长端点上游 403）；请改用个人账号"
 		if body["error"] != want {
-			t.Errorf("error = %q, want %q（须与单任务入口同文案）", body["error"], want)
+			t.Errorf("error = %q, want %q", body["error"], want)
 		}
 		if got := atomic.LoadInt32(&reqs); got != 0 {
 			t.Errorf("上游请求数 = %d, want 0（门控须在任何上游调用之前）", got)
 		}
 	})
 
-	t.Run("normal session unaffected", func(t *testing.T) {
+	t.Run("stamped personal session not gated", func(t *testing.T) {
+		var reqs int32
+		a := &auth.Auth{UID: "u1", AccessToken: stampedPersonalJWT()}
+		rec := callAutoAll(newPanel(t, a, &reqs), "u1")
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("带 enterprise_switch 声明的个人号 status = %d, want 200；body=%s", rec.Code, rec.Body.String())
+		}
+		if got := atomic.LoadInt32(&reqs); got == 0 {
+			t.Error("带声明的个人号应进入正常流水线并访问上游，实际请求数 = 0")
+		}
+	})
+
+	t.Run("normal personal session unaffected", func(t *testing.T) {
 		var reqs int32
 		a := &auth.Auth{UID: "u1", AccessToken: "opaque-token"}
 		rec := callAutoAll(newPanel(t, a, &reqs), "u1")
@@ -81,7 +98,7 @@ func TestAutoTaskAllEnterpriseGate(t *testing.T) {
 			t.Fatalf("status = %d, want 200；body=%s", rec.Code, rec.Body.String())
 		}
 		if got := atomic.LoadInt32(&reqs); got == 0 {
-			t.Error("普通会话应进入正常流水线并访问上游，实际请求数 = 0")
+			t.Error("普通个人号应进入正常流水线并访问上游，实际请求数 = 0")
 		}
 	})
 }
