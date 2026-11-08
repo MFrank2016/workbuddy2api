@@ -691,6 +691,16 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		// 账号日限额（pool.account_daily_credit_limit，0 = 关闭）：面板/运维可见。
 		"account_daily_credit_limit": h.cfg.AccountDailyCreditLimit,
+		// 账号日 token 闸（pool.account_daily_token_limit，0 = 关闭）。
+		// 与 credit 闸并列透出：事故里免费模型烧掉 100M+ tokens 而只扣 7~50 credit，
+		// 是 credit 闸完全拦不住这一类。运维必须能在 /status 确认这道闸是否开启。
+		"account_daily_token_limit": h.cfg.AccountDailyTokenLimit,
+		// 超大 prompt 保护（pool.large_prompt_threshold / large_prompt_max_wait）：
+		// 缺省开启，撞限流时同号重试而不跨账号重放。
+		"large_prompt": map[string]any{
+			"threshold_tokens": h.cfg.LargePromptThreshold,
+			"max_wait_sec":     int64(h.cfg.LargePromptMaxWait / time.Second),
+		},
 		// credit_floor 积分保底（panel）：账号触底后不接实测收费模型；0 = 关闭。显式写出。
 		"credit_floor": h.cfg.Pool.CreditFloor(),
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
