@@ -102,9 +102,13 @@ func TestResolveForModelWithoutHookKeepsHashAllocation(t *testing.T) {
 	}
 }
 
-// TestResolveForModelPickForModelOnModelSwitch 会话换模型触发重分配时，同样要按新模型
-// 的候选集做加权——被 6004 限额后重绑的路径不能悄悄退回哈希。
-func TestResolveForModelPickForModelOnModelSwitch(t *testing.T) {
+// TestResolveForModelPickForModelOnFirstBind 首次绑定（无既有绑定）时按新模型候选集
+// 做加权——不退回哈希。
+//
+// 语义变更（2026-11-07 封禁事故）：绑定号**临时**不可用不再触发重分配（只让本轮
+// 失效、保留绑定），故 PickForModel 只在「首次绑定」和「绑定已过期/被结构性摘除」
+// 时被调用。这里钉住首次绑定这条路径仍走回调。
+func TestResolveForModelPickForModelOnFirstBind(t *testing.T) {
 	r := routerWith(newCountingStore(), []string{"a1", "a2"}, time.Minute)
 	r.cfg.AvailableForModel = func(model string) []string {
 		if model == "limited-model" {
@@ -121,11 +125,11 @@ func TestResolveForModelPickForModelOnModelSwitch(t *testing.T) {
 	if uid, ok := r.ResolveForModel("c1", "normal-model"); !ok || uid != "a1" {
 		t.Fatalf("首次绑定应为 a1，got %q ok=%v", uid, ok)
 	}
-	// 换到限流模型：a1 不在候选里 → 命中失效 → 重分配，回调应被再次调用且拿到 a2。
-	if uid, ok := r.ResolveForModel("c1", "limited-model"); !ok || uid != "a2" {
-		t.Fatalf("换模型重分配应为 a2，got %q ok=%v", uid, ok)
+	// 另一会话首次绑定在限流模型上：回调必须收到该模型，且从 a2 候选集里选。
+	if uid, ok := r.ResolveForModel("c2", "limited-model"); !ok || uid != "a2" {
+		t.Fatalf("首次绑定到限流模型应为 a2，got %q ok=%v", uid, ok)
 	}
 	if len(models) != 2 || models[1] != "limited-model" {
-		t.Errorf("换模型时回调收到的模型序列=%v，want 第二次为 limited-model", models)
+		t.Errorf("回调收到的模型序列=%v，want 第二次为 limited-model", models)
 	}
 }

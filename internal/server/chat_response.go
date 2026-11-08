@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
@@ -87,9 +88,7 @@ func (h *Handler) streamChatResponse(w http.ResponseWriter, r *http.Request, pre
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.ClearModelEntitlement(realm, bareModel)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if stickyKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(stickyKey, acct.UID)
-		}
+		h.stickyFollowSuccess(stickyKey, acct, realm, prep.CrossRealm)
 	default:
 		// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
 		h.cfg.Pool.NoteSuccess(acct.UID)
@@ -97,11 +96,10 @@ func (h *Handler) streamChatResponse(w http.ResponseWriter, r *http.Request, pre
 		// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 		// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
-		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-		if stickyKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(stickyKey, acct.UID)
-		}
+		// 粘性跟随最终成功号：**仅当会话当前无绑定、或绑定已结构性失效**时才改绑。
+		// 绑定号只是临时不可用（冷却/占满/限流）时保留归属，本轮由别的号代跑——
+		// 否则每次限流都改绑，等于把长对话在账号间来回搬运（见 stickyFollowSuccess）。
+		h.stickyFollowSuccess(stickyKey, acct, realm, prep.CrossRealm)
 	}
 	if n := repair.Converted(); n > 0 {
 		// 修复命中：上游本来会把工具调用吐成正文标记，这里已还原成 tool_calls。
@@ -147,6 +145,23 @@ func (h *Handler) streamChatResponse(w http.ResponseWriter, r *http.Request, pre
 	rc.Close()
 }
 
+// stickyFollowSuccess 在请求成功后决定是否把会话改绑到本次成功号。
+//
+// 规则：**只有当前没有绑定、或绑定已结构性失效**时才改绑。绑定号只是临时不可用
+// （冷却/占满/限流）时，本轮由别的账号代跑，但归属仍留在原号——否则每遇一次限流
+// 就改绑一次，等于把长对话在账号间来回搬运，正是 2026-11-07 批量封禁的触发形态。
+func (h *Handler) stickyFollowSuccess(stickyKey string, acct *auth.Auth, realm string, crossRealm bool) {
+	if stickyKey == "" || acct == nil || h.cfg.Session == nil {
+		return
+	}
+	if bound, ok := h.cfg.Session.BoundUID(stickyKey); ok && bound != acct.UID {
+		if !h.stickyUnusableIsPermanent(bound, realm, crossRealm) {
+			return // 绑定号只是暂时不可用：保留归属，不改绑
+		}
+	}
+	h.cfg.Session.Bind(stickyKey, acct.UID)
+}
+
 // writeChatAggregate 写出非流式聚合响应，并记录用量/成本与粘性。
 func (h *Handler) writeChatAggregate(w http.ResponseWriter, r *http.Request, prep *preparedChat, ex *ChatExecution) {
 	st := ex.Stat
@@ -189,9 +204,7 @@ func (h *Handler) writeChatAggregate(w http.ResponseWriter, r *http.Request, pre
 	h.cfg.Pool.NoteSuccess(acct.UID)
 	h.cfg.Pool.ClearModelEntitlement(realm, bareModel)
 	h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-	if stickyKey != "" && h.cfg.Session != nil {
-		h.cfg.Session.Bind(stickyKey, acct.UID)
-	}
+	h.stickyFollowSuccess(stickyKey, acct, realm, prep.CrossRealm)
 	// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 	if hasCredit {
 		st.credit = credit

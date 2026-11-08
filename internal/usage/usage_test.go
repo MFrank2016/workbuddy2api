@@ -399,3 +399,23 @@ func TestAccountCredit(t *testing.T) {
 		t.Fatalf("account credit=%v want u1=4", got)
 	}
 }
+
+// TestAccountPromptTokens 账号日 token 闸的计数来源：按账号累计 prompt tokens。
+//
+// 抓的断裂：日 token 闸读错字段（用 TT 总量而非 PT 输入量），或漏掉跨模型累计
+// —— 事故现场正是「同一账号轮换多个模型把上下文反复灌进上游」，只按单模型统计
+// 会让闸形同虚设。
+func TestAccountPromptTokens(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "m1", Delta{PromptTokens: 100, HasPromptTokens: true, CompletionTokens: 5, HasCompletion: true}, true)
+	r.Add(now, "cn", "u1", "m2", Delta{PromptTokens: 200, HasPromptTokens: true, CompletionTokens: 7, HasCompletion: true}, true)
+	r.Add(now, "cn", "u2", "m1", Delta{PromptTokens: 300, HasPromptTokens: true}, true)
+	got := r.AccountPromptTokens(Window{From: now.Add(-time.Hour)})
+	if got["u1"] != 300 {
+		t.Errorf("u1 prompt tokens=%d want 300 (跨模型累计，只算 prompt 不算 completion)", got["u1"])
+	}
+	if got["u2"] != 300 {
+		t.Errorf("u2 prompt tokens=%d want 300", got["u2"])
+	}
+}

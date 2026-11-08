@@ -165,11 +165,17 @@ func (r *Router) LookupForModel(key, model string) (string, bool) {
 
 // ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
 // 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
-// 被该模型限流）走重新分配。
+// 被该模型限流）**保留绑定**并返回 ok=false，由调用方本轮换号服务。
 //
 // 为什么必须带模型：绑定只记 uid，同一个会话可能换模型；账号被 6004 模型级限额后
 // 对其他模型仍可用（见 pool.healthyForModel 的模型级冷却豁免）。若只按账号级
 // 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
+//
+// 为什么临时不可用时**不删绑定**（2026-11-07 事故根因）：软冷却/在途占满/6004 限流
+// 都会自动过期，删掉绑定等于把这段对话永久推给下一个账号——一条 900k 上下文的长对话
+// 于是在多个账号间接力，上游按「同一段私有对话跨账号出现」判异常行为并批量封号。
+// 保留绑定后，账号恢复时会话自动回到原号；本轮只是换号服务，不改变归属。
+// 结构性失效（账号被移除/禁用、realm 不兼容）仍由调用方显式 Unbind 处理。
 func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	now := time.Now()
 	available := r.availableSet(model)
@@ -183,7 +189,10 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 			r.touch(key, e.uid, now)
 			return e.uid, true
 		}
-		// 绑定号在该模型上已冷却/占满/被限流 → 失效，落入慢路径重分配。
+		// 绑定号在该模型上暂时不可用（冷却/占满/限流）：本轮不返回它，但**保留绑定**，
+		// 让会话在账号恢复后回归（见函数注释）。只滚动 lastActive，防 TTL 把绑定收走。
+		r.touch(key, e.uid, now)
+		return "", false
 	}
 
 	// ── Slow path: 写锁 re-check 后分配 ────────────────────
@@ -196,7 +205,9 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
 			return e2.uid, true
 		}
-		delete(r.entries, key) // 失效：清掉再分配
+		// 同上：临时不可用保留绑定，本轮交给调用方换号。
+		r.entries[key] = entry{uid: e2.uid, lastActive: now}
+		return "", false
 	}
 
 	uids := r.availableSlice(model)
@@ -257,6 +268,23 @@ func (r *Router) touch(key, uid string, now time.Time) {
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+}
+
+// BoundUID 返回会话 key 当前绑定的账号 uid（不校验可用性、不滚动续期）。
+// 供调用方在 ResolveForModel 返回 ok=false（绑定号临时不可用）后判断「绑定还在谁身上」：
+// 结构性失效（账号被禁用/移除、realm 不兼容）需要显式 Unbind，临时不可用则保留。
+func (r *Router) BoundUID(key string) (string, bool) {
+	if key == "" {
+		return "", false
+	}
+	now := time.Now()
+	r.mu.RLock()
+	e, found := r.entries[key]
+	r.mu.RUnlock()
+	if !found || expired(e, now, r.cfg.TTL) {
+		return "", false
+	}
+	return e.uid, true
 }
 
 // Bind 显式把会话 key 绑定到 uid（幂等覆盖旧值），并异步镜像到 redisstore。

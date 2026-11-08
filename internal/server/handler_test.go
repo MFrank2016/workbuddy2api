@@ -931,6 +931,92 @@ func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 	}
 }
 
+// TestChatStickyRateLimitedKeepsBinding 粘性号撞 429 → 本轮换号服务，但**粘性绑定
+// 不能被解绑**。
+//
+// 抓的断裂：fail() 无条件在「失败号 == 粘性号」时 Unbind。现场后果是——一条 900k
+// 上下文的长对话每次撞限流就换一个账号，上游侧看到同一段私有上下文 1 分钟内从另一个
+// 账号到达，这正是 2026-11-07 批量封禁（11140 unusual activity）的触发形态。账号只是
+// 被限流、本身健康，绑定必须留着，冷却结束后会话自动回到原号。
+func TestChatStickyRateLimitedKeepsBinding(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"bad", "good"} },
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000) // 积分高 → 无粘性时先被选中；此处靠粘性命中
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 429, `{"code":429,"msg":"too many requests"}`, false
+		}
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+	sess.Bind("conv-1", "bad")
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s（应换到 good 并成功）", rec.Code, rec.Body)
+	}
+	// 关键断言：绑定仍是 bad（未被 429 解绑）。下轮 bad 冷却结束后会话应回到它。
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "bad" {
+		t.Fatalf("429 不应解绑粘性：binding=%q ok=%v（want bad）binds=%v", uid, ok, st.binds)
+	}
+	if st.delCnt != 0 {
+		t.Fatalf("429 不应触发 DelBind，delCnt=%d", st.delCnt)
+	}
+}
+
+// TestChatStickyCoolingKeepsBindingAcrossRequests 粘性号处于限流冷却中 → 后续请求
+// 由别的账号服务，但绑定仍留在原号（不摘），冷却结束自动回归。
+//
+// 抓的断裂：粘性命中失败（冷却中）时无条件 unbindSticky。那样每个 429 都会把长对话
+// 推到下一个账号，形成「跨账号接力」——本次封禁事故的触发形态。
+func TestChatStickyCoolingKeepsBindingAcrossRequests(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"bad", "good"} },
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000)
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 429, `{"code":429,"msg":"too many requests"}`, false
+		}
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+	sess.Bind("conv-1", "bad")
+
+	body := `{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("第一次: code=%d body=%s", rec.Code, rec.Body)
+	}
+
+	// 第二次：bad 仍在冷却中 → 命中失败但不能摘绑定。
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	if rec2.Code != 200 {
+		t.Fatalf("第二次: code=%d body=%s", rec2.Code, rec2.Body)
+	}
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "bad" {
+		t.Fatalf("冷却期内粘性绑定应保留在 bad，got %q ok=%v", uid, ok)
+	}
+}
+
 // TestChatStickySuccessKeepsBinding 粘性号直接成功 → 绑定不变（仍为该号）。
 func TestChatStickySuccessKeepsBinding(t *testing.T) {
 	st := newBindStore()
@@ -956,9 +1042,12 @@ func TestChatStickySuccessKeepsBinding(t *testing.T) {
 	}
 }
 
-// TestChatStickyFullFallsBackToRotation 端到端验证 C3 语义：粘性号满载不可用时，
-// 请求在同一轮内解绑并回落普通轮换选中健康账号，绑定收敛到最终成功号——而非空耗一轮。
-func TestChatStickyFullFallsBackToRotation(t *testing.T) {
+// TestChatStickyFullServesElsewhereButKeepsBinding 粘性号在途满载 → 本轮回落普通轮换
+// 选中健康账号服务，但**绑定保留在原号**（满载是临时状态，释放后会话应回归）。
+//
+// 语义变更（2026-11-07 封禁事故）：旧行为是「满载即解绑并改绑到代跑号」，这会让同一段
+// 上下文在账号间反复搬迁。现在只让本轮换号，归属不动。
+func TestChatStickyFullServesElsewhereButKeepsBinding(t *testing.T) {
 	st := newBindStore()
 	sess := session.New(session.Config{
 		TTL:       time.Minute,
@@ -969,11 +1058,13 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
 		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
 	)
-	// bad 占满唯一在途名额：粘性命中校验将返回 nil（healthy 但 inFlight 满）→ 解绑 + 回落轮换。
+	// bad 占满唯一在途名额：粘性命中校验返回 nil（healthy 但 inFlight 满）。
 	p.SetMaxInFlight(1)
 	p.Acquire("bad")
 
+	var served []string
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		served = append(served, authz)
 		return 200, sseOK, true
 	})
 	h := NewHandler(Config{
@@ -989,11 +1080,47 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	// 满载粘性号被解绑，绑定收敛到最终成功号 good。
-	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
-		t.Fatalf("sticky binding should fall back to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
+	// 本轮确实由 good 代跑（没有空转等满载号）。
+	if len(served) != 1 || served[0] != "Bearer at-good" {
+		t.Fatalf("应由 good 代跑，served=%v", served)
+	}
+	// 但绑定仍在 bad：满载是临时状态，释放后会话回归。
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "bad" {
+		t.Fatalf("满载不应改绑：binding=%q ok=%v（want bad）", uid, ok)
 	}
 	p.Release("bad")
+}
+
+// TestChatStickyDisabledAccountRebinds 绑定号被禁用（结构性失效）→ 改绑到代跑号。
+//
+// 与临时不可用（冷却/满载/限流）的区别：禁用不会自动恢复，绑定留着只会让会话
+// 每次都要多绕一轮，且永远不会回到该号。
+func TestChatStickyDisabledAccountRebinds(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"bad", "good"} },
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.Disable("bad", "test disabled")
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+	sess.Bind("conv-1", "bad")
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
+		t.Fatalf("禁用属结构性失效，应改绑到 good，got %q ok=%v", uid, ok)
+	}
 }
 
 func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
@@ -2680,8 +2807,10 @@ func TestStaleSnapshotBoundedByPickGate(t *testing.T) {
 	if sawStale.Load() {
 		t.Fatal("stale 号已冷却，不得被出站选中（PickByUIDForModel 闸失效）")
 	}
-	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
-		t.Fatalf("绑定应收敛到 good（stale 被 Pick 闸拒绝后解绑回落），got %s ok=%v", uid, ok)
+	// 绑定**保留**在 stale：硬冷却是临时状态（到期自动恢复），改绑会让长对话永久
+	// 迁到别的账号——2026-11-07 事故的触发形态。本轮由 good 代跑，归属不动。
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "stale" {
+		t.Fatalf("冷却属临时不可用，绑定应保留在 stale，got %s ok=%v", uid, ok)
 	}
 }
 
@@ -3056,6 +3185,63 @@ func TestChatAccountDailyLimitAllBlocked(t *testing.T) {
 	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	if rec2.Code != http.StatusTooManyRequests || !strings.Contains(rec2.Body.String(), "daily_limit_exceeded") {
 		t.Fatalf("code=%d body=%s", rec2.Code, rec2.Body)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("触顶请求不应触达上游: calls=%d", calls.Load())
+	}
+}
+
+// TestChatAccountDailyTokenLimitSkipsBlocked 账号当日 prompt token 触顶 → 本轮跳过该账号。
+//
+// 抓的断裂：日 token 闸接线后仍按 credit 判定（本次事故里 hy4free 几乎不扣费，
+// 几个号只花 7~50 credit 就烧掉 100M+ tokens，credit 闸完全拦不住）。
+func TestChatAccountDailyTokenLimitSkipsBlocked(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at-u1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at-u2", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("u1", 2000) // u1 积分高 → 无闸时先被选中
+	p.SetCredits("u2", 1000)
+	rec := usage.New("")
+	// u1 已烧 500k prompt tokens（credit 只有 0.1，credit 闸不会拦它）
+	rec.Add(time.Now(), "cn", "u1", "glm-5.2", usage.Delta{PromptTokens: 500000, HasPromptTokens: true, Credit: 0.1, HasCredit: true}, true)
+	h := NewHandler(Config{Pool: p, Upstream: up, Usage: rec, AccountDailyTokenLimit: 200000})
+
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec2.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec2.Code, rec2.Body)
+	}
+	if calls["Bearer at-u1"] != 0 || calls["Bearer at-u2"] != 1 {
+		t.Fatalf("calls=%v want u1=0（token 触顶跳过）u2=1", calls)
+	}
+}
+
+// TestChatAccountDailyTokenLimitAllBlocked 全部账号 token 触顶 → 429，零上游，
+// 且文案要能区分是 token 闸还是 credit 闸（排查方向不同）。
+func TestChatAccountDailyTokenLimitAllBlocked(t *testing.T) {
+	var calls atomic.Int32
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls.Add(1)
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	rec := usage.New("")
+	rec.Add(time.Now(), "cn", "u1", "glm-5.2", usage.Delta{PromptTokens: 900000, HasPromptTokens: true}, true)
+	h := NewHandler(Config{Pool: p, Upstream: up, Usage: rec, AccountDailyTokenLimit: 200000})
+
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec2.Code != http.StatusTooManyRequests || !strings.Contains(rec2.Body.String(), "daily_limit_exceeded") {
+		t.Fatalf("code=%d body=%s", rec2.Code, rec2.Body)
+	}
+	if !strings.Contains(rec2.Body.String(), "token") {
+		t.Errorf("触顶文案应指明是 token 闸（与 credit 闸区分）: %s", rec2.Body)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("触顶请求不应触达上游: calls=%d", calls.Load())

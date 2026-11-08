@@ -174,6 +174,28 @@ type Config struct {
 	// <=0 = 关闭。达到上限的账号当日不再参与选号（吸收自 hub 的账号限额护栏）。
 	AccountDailyCreditLimit float64
 
+	// AccountDailyTokenLimit 单账号当日 prompt token 上限
+	// （pool.account_daily_token_limit）；<=0 = 关闭。达到上限的账号当日不再参与选号。
+	//
+	// 与 AccountDailyCreditLimit 的分工：credit 闸只管钱，但免费/近乎不扣费的模型
+	// （如 hy4free）会绕过它——实测事故里几个号只花 7~50 credit 就烧掉 100M+ tokens，
+	// credit 闸一次都没触发。token 闸按输入量兜底，覆盖「不扣费但猛灌上下文」这一类。
+	AccountDailyTokenLimit int64
+
+	// LargePromptThreshold 超大 prompt 的判定阈值（pool.large_prompt_threshold，
+	// 缺省 200000；<=0 = 关闭该保护）。
+	//
+	// 超过阈值的请求撞 ErrSoftRate 时**不换号重放**：改为等该号软冷却到期后同号
+	// 重试一轮，仍失败才回 429。动机是 2026-11-07 的批量封禁——一条 900k 上下文
+	// 撞限流后按 MaxRotate 向另外 2 个账号各重发一遍完整上下文，上游按「同一段
+	// 私有对话跨账号出现」判异常行为，一次封掉 23/31 个账号。
+	LargePromptThreshold int64
+
+	// LargePromptMaxWait 大 prompt 撞限流后等待同号冷却的上限
+	// （pool.large_prompt_max_wait，缺省 180s；<=0 = 不等待，直接回 429）。
+	// 等待期间持有该账号的在途名额，故上限不宜过大（会压低该号的并发）。
+	LargePromptMaxWait time.Duration
+
 	// BudgetLimit 当日累计 credit 上限（config budget.daily_credit_limit）。
 	// <=0 = 关闭该闸（不限），行为与引入前逐字一致。计数按 CST 自然日重置、
 	// 进程内不落盘（见 budget.go）。

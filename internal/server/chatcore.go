@@ -379,6 +379,73 @@ func modelBlockAllSoftRate(blk pool.ModelBlockStatus) bool {
 	return blk.Blocked && strings.HasPrefix(blk.Reason, "429 model rate limit")
 }
 
+// estimatePromptTokens 粗估请求体的 prompt token 数，只用于「是不是超大 prompt」
+// 这一档判定，不参与计费/账本（真实数值以末帧 usage 为准）。
+//
+// 口径沿用 estimateAnthropicTokens：CJK 约 1 token/字，其余约 4 字节/token。
+// 直接量 body 字节数（含 JSON 结构开销）而不是解析 messages：一是快（每个请求都要
+// 判一次），二是不会因畸形结构漏判——宁可高估一点点，也不要漏掉真正的 900k 请求。
+func estimatePromptTokens(body []byte) int64 {
+	var cjk, other int64
+	for _, r := range string(body) {
+		if r > 0x2E80 {
+			cjk++
+		} else {
+			other++
+		}
+	}
+	return cjk + (other+3)/4
+}
+
+// waitLargePromptCooldown 在超大 prompt 撞限流后，等待该账号的软冷却到期。
+// 返回 true 表示「冷却已过期，可以同号重试」。
+//
+// 等待上限 = min(账号冷却剩余, Config.LargePromptMaxWait)；后者 <=0 表示不等待
+// （直接回 429）。等待期间**持有该账号的在途名额**——这是刻意的：同号重试必须占住
+// 这个号，否则并发请求会把它抢走，重试就变成又一次换号。
+func (h *Handler) waitLargePromptCooldown(ctx context.Context, uid string) bool {
+	maxWait := h.cfg.LargePromptMaxWait
+	if maxWait <= 0 {
+		return false
+	}
+	st, ok := h.cfg.Pool.Status(uid)
+	if !ok {
+		return false
+	}
+	// 剩余冷却时间：账号级 until 与（可能的）模型级冷却取更远者。
+	remain := time.Duration(st.CoolRemaining) * time.Second
+	if remain <= 0 {
+		return true // 没有冷却（例如只写了模型级台账）→ 立即可重试
+	}
+	if remain > maxWait {
+		return false // 冷却比容忍上限还长 → 不白等，直接回 429
+	}
+	return sleepCtx(ctx, remain)
+}
+
+// stickyUnusableIsPermanent 报告「粘性号此刻选不到」是不是**结构性**原因
+// （realm 不符 / 账号已禁用或已移除）——只有这类原因才该解绑。
+//
+// 与之相对的是**临时性**原因：软冷却中、在途占满、该模型被 6004 限流。它们都会
+// 自动过期，绑定留着才能让会话在账号恢复后回归原号。区分二者的动机见 executeChat
+// 里粘性命中分支的注释（跨账号接续同一段长上下文 = 上游最敏感的多账号关联特征）。
+func (h *Handler) stickyUnusableIsPermanent(uid, realm string, crossRealm bool) bool {
+	if h.cfg.Pool == nil {
+		return true
+	}
+	acct := h.cfg.Pool.AuthByUID(uid)
+	if acct == nil {
+		return true // 账号已不在池里（被移除）→ 绑定无意义
+	}
+	if realm != "" && acct.Realm() != realm && !crossRealm {
+		return true // 跨域不兼容：换域选号也不会回到它
+	}
+	if st, ok := h.cfg.Pool.Status(uid); ok && st.Disabled {
+		return true // 已禁用：需人工 revive，绑定不该继续占位
+	}
+	return false
+}
+
 // executeChat 执行选号、刷新、轮转与错误处置。成功时返回上游流或聚合体，
 // 由调用方负责协议相关的响应写出；所有错误经 prep.OnError 输出。
 func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *preparedChat) (*ChatExecution, bool) {
@@ -435,16 +502,44 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 	profile := prep.Profile
 	key := authKeyFrom(r.Context())
 	tried := map[string]bool{}
-	// 账号日限额（pool.account_daily_credit_limit，0 = 关闭）：当日 credit 已达上限的
-	// 账号本轮不参与选号；全部触顶时末端回 429 daily_limit_exceeded。
+	// largePrompt 标记本次请求是否超过 pool.large_prompt_threshold。
+	// 超大 prompt 撞限流时禁止换号重放（见 Config.LargePromptThreshold）。
+	largePrompt := h.cfg.LargePromptThreshold > 0 && estimatePromptTokens(body) >= h.cfg.LargePromptThreshold
+	// forcedUID 大 prompt 同号重试的锁定目标（空 = 不锁定，走正常选号）。
+	// attempts 记录每个账号被同号重试的次数，超过上限就放弃（回 429），
+	// 防「一直等冷却 → 一直重试」把请求无限拖住。
+	forcedUID := ""
+	attempts := map[string]int{}
+	const maxLargePromptAttempts = 1
+	// 账号日限额（pool.account_daily_credit_limit / pool.account_daily_token_limit，
+	// 各自 0 = 关闭）：当日已触顶的账号本轮不参与选号；全部触顶时末端回 429
+	// daily_limit_exceeded。
 	var dailyLimited bool
-	blockedByDaily := 0
-	if h.cfg.AccountDailyCreditLimit > 0 && h.cfg.Usage != nil {
-		used := h.cfg.Usage.AccountCredit(usage.Window{From: cstDayStart(time.Now())})
-		for uid, c := range used {
-			if c >= h.cfg.AccountDailyCreditLimit {
-				tried[uid] = true
-				blockedByDaily++
+	var blockedByDaily int
+	// blockedByToken 记录触顶的是哪一类闸：末端文案要能区分（credit 闸=省钱，
+	// token 闸=防上下文猛灌，排查方向完全不同）。
+	var blockedByToken bool
+	if (h.cfg.AccountDailyCreditLimit > 0 || h.cfg.AccountDailyTokenLimit > 0) && h.cfg.Usage != nil {
+		since := usage.Window{From: cstDayStart(time.Now())}
+		if h.cfg.AccountDailyCreditLimit > 0 {
+			for uid, c := range h.cfg.Usage.AccountCredit(since) {
+				if c >= h.cfg.AccountDailyCreditLimit {
+					tried[uid] = true
+					blockedByDaily++
+				}
+			}
+		}
+		if h.cfg.AccountDailyTokenLimit > 0 {
+			for uid, t := range h.cfg.Usage.AccountPromptTokens(since) {
+				if t >= h.cfg.AccountDailyTokenLimit {
+					// 已因 credit 触顶的不重复计数（同一账号两道闸都踩了，只算一次，
+					// 但 token 闸命中要置位 blockedByToken 以给出更准确的文案）。
+					if !tried[uid] {
+						blockedByDaily++
+					}
+					tried[uid] = true
+					blockedByToken = true
+				}
 			}
 		}
 	}
@@ -482,6 +577,13 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		}
 		if uid, ok := resolve(stickyKey, peek.Model); ok {
 			stickyUID = uid
+		} else if bound, hasBound := h.cfg.Session.BoundUID(stickyKey); hasBound {
+			// 绑定号只是**临时**不可用（软冷却/占满/模型级限流）：保留绑定，本轮换号服务。
+			// 只有结构性失效（账号被禁用/移除、realm 不兼容）才摘掉——否则每次限流都会
+			// 把长对话推给下一个账号，形成跨账号接力的关联特征（2026-11-07 事故根因）。
+			if h.stickyUnusableIsPermanent(bound, realm, crossRealm) {
+				h.cfg.Session.Unbind(stickyKey)
+			}
 		}
 	}
 
@@ -528,6 +630,16 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		if stickyUID != "" && uid == stickyUID {
 			unbindSticky()
 		}
+	}
+	// failKeepSticky 用于「账号本身健康、只是暂时被限流」的失败（ErrSoftRate）：
+	// 释放租约但**保留**粘性绑定。
+	//
+	// 为什么不能解绑：解绑后下一次请求会换一个账号带着同一段上下文重新发，上游侧
+	// 看到同一段私有对话在几分钟内跨账号流转——这是最典型的多账号关联特征（实测
+	// 2026-11-07 一次批量封禁 23/31 个账号，触发形态就是一条 900k 上下文对话在
+	// 12 个账号间接力）。绑定留着，该号冷却结束后会话自动回到原号。
+	failKeepSticky := func() {
+		releaseHeld()
 	}
 
 	// 本次请求的密钥身份（多 Key 用量归因）：主密钥 = "main"，api_keys 条目用其
@@ -658,13 +770,28 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
-		if stickyUID != "" {
+		if forcedUID != "" {
+			// 大 prompt 同号重试：必须回到同一个账号，绝不换号。
+			acct = h.cfg.Pool.PickByUIDForModelGroupsProfiles(forcedUID, curModel, keyGroups, profile)
+			if acct == nil {
+				break // 该号仍不可用（冷却未过/被占）→ 放弃，回 429
+			}
+		}
+		if acct == nil && stickyUID != "" {
 			// 粘性命中同样受分组约束：绑定号若属于其他密钥的分组，返回 nil → 解绑重分配。
 			acct = h.cfg.Pool.PickByUIDForModelGroupsProfiles(stickyUID, curModel, keyGroups, profile)
 			if acct == nil || (realm != "" && acct.Realm() != realm && !crossRealm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）、realm 不符，
 				// 或不在本次密钥的可见分组内 → 解绑。
-				unbindSticky()
+				//
+				// 例外：**临时性**不可用（软冷却/在途占满/模型级限流）不摘绑定。
+				// 这类不可用会自动过期（软冷却到期、在途释放、6004 重置），绑定留着
+				// 才能让长对话在账号恢复后回到原号；反之每遇一次限流就把会话搬到下一个
+				// 账号，是上游最敏感的多账号关联特征（2026-11-07 事故根因）。
+				// 只有「结构性」不可用（realm 不符 / 分组隔离 / 账号已禁用）才解绑。
+				if h.stickyUnusableIsPermanent(stickyUID, realm, crossRealm) {
+					unbindSticky()
+				}
 			}
 		}
 		if acct == nil {
@@ -989,7 +1116,34 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-			fail(acct.UID)
+			if kind == upstream.ErrSoftRate {
+				// 限流 = 账号健康、只是此刻被上游按速率/用量挡住。不解绑粘性：
+				// 换号会把同一段上下文搬到另一个账号上，是最强的多账号关联特征
+				// （见 failKeepSticky 注释）。
+				failKeepSticky()
+				// 超大 prompt：**不换号重放**。等该号软冷却到期后同号重试一轮，
+				// 仍失败才终止轮转回 429。动机见 Config.LargePromptThreshold。
+				if largePrompt {
+					if !h.waitLargePromptCooldown(ctx, acct.UID) {
+						break // 冷却超上限 / 未启用等待 / 客户端断连 → 回 429
+					}
+					// 同号重试前的极短退避：让上游的秒级窗口滑过，避免立即重打同一秒。
+					if !sleepCtx(ctx, time.Second) {
+						break
+					}
+					// 锁定同号重试：把粘性指针钉到该号（若本次没有会话键，用局部
+					// forcedUID 兜底），并允许它再次被选中。
+					forcedUID = acct.UID
+					delete(tried, acct.UID)
+					attempts[acct.UID]++
+					if attempts[acct.UID] > maxLargePromptAttempts {
+						break // 同号已重试过，仍限流 → 回 429，不再无限等
+					}
+					continue
+				}
+			} else {
+				fail(acct.UID)
+			}
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义，
 			// 任务书设计纪律）：该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，
 			// IP 被拦而非账号）则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍
@@ -1092,6 +1246,11 @@ func (h *Handler) executeChat(ctx context.Context, r *http.Request, prep *prepar
 		status = http.StatusTooManyRequests
 		code = "daily_limit_exceeded"
 		msg = "all accounts reached their daily credit limit (pool.account_daily_credit_limit); retry after the CST daily reset"
+		if blockedByToken {
+			// 两道闸可能同时触发；token 闸命中时优先报它——本次事故正是
+			// 「几乎不扣费但猛灌上下文」，credit 文案会把人引向错误方向。
+			msg = "all accounts reached their daily prompt token limit (pool.account_daily_token_limit); retry after the CST daily reset"
+		}
 	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定（11133/11135
 	// 在 hint 层自带形态判定，ErrClient 家族也能带上 hint）；本地调度类错误

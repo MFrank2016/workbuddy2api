@@ -91,23 +91,31 @@ func TestTTLExpiryReassigns(t *testing.T) {
 	}
 }
 
-func TestBoundAccountCooldownReassigns(t *testing.T) {
-	r := routerWith(newCountingStore(), []string{"a1"}, time.Minute)
+// TestBoundAccountCooldownKeepsBinding 绑定号冷却 → 本轮不返回它（由 handler 换号
+// 服务），但绑定保留；冷却结束后会话回归原号。
+//
+// 语义变更（2026-11-07 封禁事故后）：旧行为是「冷却即重分配」，导致同一段长上下文
+// 在账号间接力，是上游判定「异常行为」的核心特征。现在只让本轮失效、绑定不动。
+func TestBoundAccountCooldownKeepsBinding(t *testing.T) {
+	st := newCountingStore()
+	r := routerWith(st, []string{"a1"}, time.Minute)
 	u1, _ := r.Resolve("c1")
 	if u1 != "a1" {
 		t.Fatalf("initial bind=%s want a1", u1)
 	}
-	// a1 冷却 → 可用列表只剩 a2 → 重新分配必须换到 a2。
+	// a1 冷却 → 本轮解析失败（handler 会去普通轮换里挑别的号）。
 	r.cfg.Available = func() []string { return []string{"a2"} }
-	u2, ok := r.Resolve("c1")
-	if !ok {
-		t.Fatal("resolve should succeed with fallback account")
+	if u2, ok := r.Resolve("c1"); ok {
+		t.Fatalf("冷却中不应返回绑定号，got %s ok=%v", u2, ok)
 	}
-	if u2 == u1 {
-		t.Fatalf("bound account %s cooled but still assigned", u1)
+	// 绑定仍在 a1：冷却结束（a1 重新可用）后会话必须回到原号。
+	r.cfg.Available = func() []string { return []string{"a1", "a2"} }
+	u3, ok := r.Resolve("c1")
+	if !ok || u3 != "a1" {
+		t.Fatalf("冷却结束后应回归原绑定 a1，got %s ok=%v", u3, ok)
 	}
-	if u2 != "a2" {
-		t.Fatalf("reassigned to %s want a2", u2)
+	if st.delBinds != 0 {
+		t.Errorf("冷却不应触发 DelBind，delBinds=%d", st.delBinds)
 	}
 }
 

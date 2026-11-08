@@ -606,6 +606,11 @@ func main() {
 		BudgetLimit: cfg.Budget.DailyCreditLimit,
 		// 单账号当日 credit 上限（pool.account_daily_credit_limit，0 = 关闭）。
 		AccountDailyCreditLimit: cfg.Pool.AccountDailyCreditLimit,
+		// 单账号当日 prompt token 上限（pool.account_daily_token_limit，0 = 关闭）。
+		AccountDailyTokenLimit: cfg.Pool.AccountDailyTokenLimit,
+		// 超大 prompt 保护（pool.large_prompt_threshold / large_prompt_max_wait）。
+		LargePromptThreshold: cfg.Pool.LargePromptThreshold,
+		LargePromptMaxWait:   cfg.LargePromptMaxWaitDur,
 		// 任务执行台账只读视图（/status 的 task_ledger 段 + /metrics 的任务指标）。
 		// 与 Tasks 同款：*taskledger.Store 结构上即满足 server 侧的窄接口，
 		// server 包不必反向 import scheduler。

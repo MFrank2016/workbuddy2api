@@ -904,3 +904,42 @@ func (r *Recorder) AccountCredit(w Window) map[string]float64 {
 	}
 	return out
 }
+
+// AccountPromptTokens 返回窗口内每个账号的 prompt tokens 累计
+// （pool.account_daily_token_limit 的判定来源）。
+//
+// 为什么单列一个方法而不是复用 AccountModelUsage：日 token 闸要的是**账号级**
+// 单值（跨模型、跨 realm 合并），而 AccountModelUsage 按 (realm, uid, model)
+// 分行——调用方还得自己聚合一遍。这里只取 PT（输入侧），不含 completion：
+// 事故形态是「同一段超长上下文被反复灌进上游」，放大的是输入量；把输出也算进去
+// 会让闸对「长输出短输入」的普通对话过早触发。
+func (r *Recorder) AccountPromptTokens(w Window) map[string]int64 {
+	if r == nil {
+		return nil
+	}
+	from, to := w.bounds()
+	r.mu.Lock()
+	bs := make([]bucket, 0, len(r.buckets))
+	for _, b := range r.buckets {
+		bs = append(bs, *b)
+	}
+	r.mu.Unlock()
+	out := map[string]int64{}
+	for i := range bs {
+		b := &bs[i]
+		if !from.IsZero() || !to.IsZero() {
+			ts, ok := bucketTime(b.Scope)
+			if !ok {
+				continue
+			}
+			if !from.IsZero() && ts.Before(from) {
+				continue
+			}
+			if !to.IsZero() && ts.After(to) {
+				continue
+			}
+		}
+		out[b.UID] += b.PT
+	}
+	return out
+}

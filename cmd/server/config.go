@@ -451,6 +451,17 @@ type Config struct {
 		// AccountDailyCreditLimit 单账号当日 credit 上限（0 = 关闭）：达到上限的账号
 		// 当日不再参与选号（吸收自 hub 的账号限额护栏）。
 		AccountDailyCreditLimit float64 `json:"account_daily_credit_limit"`
+		// AccountDailyTokenLimit 单账号当日 prompt token 上限（0 = 关闭）：达到上限
+		// 的账号当日不再参与选号。与 credit 闸互补——免费/近乎不扣费的模型
+		// （如 hy4free）绕过 credit 闸猛灌上下文，只能靠输入量兜底。
+		AccountDailyTokenLimit int64 `json:"account_daily_token_limit"`
+		// LargePromptThreshold 超大 prompt 阈值（token，0 = 关闭该保护）：超过它的
+		// 请求撞 429 时**不换号重放**，改为等该号冷却后同号重试一轮，仍失败回 429。
+		// 动机：一条 900k 上下文按 MaxRotate 重放到多个账号，是最强的多账号关联特征。
+		LargePromptThreshold int64 `json:"large_prompt_threshold"`
+		// LargePromptMaxWait 大 prompt 撞限流后等待同号冷却的上限（"0" = 不等待，
+		// 直接回 429）。等待期间持有该号在途名额，故不宜过大。
+		LargePromptMaxWait string `json:"large_prompt_max_wait"`
 		// AccountFaultHold 11140 账号级风控处置：长冷却时长（默认 "24h"）；
 		// "0" = 立即永久禁用（旧行为）。
 		AccountFaultHold string `json:"account_fault_hold"`
@@ -503,6 +514,8 @@ type Config struct {
 	ServerReadTimeoutDur time.Duration `json:"-"`
 	// AccountFaultHoldDur 解析后的 11140 长冷却时长（0 = 立即禁用）。
 	AccountFaultHoldDur time.Duration `json:"-"`
+	// LargePromptMaxWaitDur 解析后的「大 prompt 撞限流后等待同号冷却」上限。
+	LargePromptMaxWaitDur time.Duration `json:"-"`
 	// CreditExhaustedDur 解析后的积分耗尽冷却时长（issue #78）；0 = 不启用
 	// （保持「硬冷却到次日 04:00」的旧行为）。
 	CreditExhaustedDur time.Duration `json:"-"`
@@ -581,6 +594,10 @@ func Default() *Config {
 	c.Pool.PreferExpiring = true // 缺省开启：奖励积分优先在过期前消耗
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
+	// 超大 prompt 保护缺省开启（200k tokens）：超过它的请求撞限流时不再换号重放。
+	// 这是 2026-11-07 批量封禁（11140 unusual activity）的针对性护栏，缺省值取
+	// 事故现场「问题请求」的下沿——实测触发封禁的请求绝大多数 ≥500k。
+	c.Pool.LargePromptThreshold = 200000
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -1069,6 +1086,22 @@ func (c *Config) normalize() error {
 	}
 	if c.Pool.AccountDailyCreditLimit < 0 {
 		c.Pool.AccountDailyCreditLimit = 0 // 负值视为关闭
+	}
+	if c.Pool.AccountDailyTokenLimit < 0 {
+		c.Pool.AccountDailyTokenLimit = 0 // 负值视为关闭
+	}
+	// 超大 prompt 保护：阈值缺省 200k（0/负 = 关闭）；等待上限缺省 180s。
+	if c.Pool.LargePromptThreshold < 0 {
+		c.Pool.LargePromptThreshold = 0
+	}
+	if strings.TrimSpace(c.Pool.LargePromptMaxWait) == "" {
+		c.Pool.LargePromptMaxWait = "180s"
+	}
+	if c.LargePromptMaxWaitDur, err = time.ParseDuration(c.Pool.LargePromptMaxWait); err != nil {
+		return fmt.Errorf("pool.large_prompt_max_wait: %w", err)
+	}
+	if c.LargePromptMaxWaitDur < 0 {
+		return fmt.Errorf("pool.large_prompt_max_wait: 负时长 %q 无意义（0 = 不等待，直接回 429）", c.Pool.LargePromptMaxWait)
 	}
 	// 国内版对话上游覆盖：空 = 内置默认；非空必须是 http(s) URL。
 	if v := strings.TrimSpace(c.Upstream.CNChatBase); v != "" {
