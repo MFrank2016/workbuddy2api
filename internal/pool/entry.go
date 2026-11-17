@@ -59,6 +59,14 @@ type TokenUsageDelta struct {
 	TokensPerSecond     float64
 }
 
+// ExpiryBucket 单个自然日到期的积分合计（面板「积分到期提醒」快照用）。
+// 与 upstream.ExpiryBucket 同构；单独定义是为了不让底层 pool 反向依赖 upstream。
+type ExpiryBucket struct {
+	Date     string    `json:"date"`
+	ExpireAt time.Time `json:"expires_at,omitempty"`
+	Remain   int64     `json:"remain"`
+}
+
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
 	UID   string `json:"uid"`
@@ -73,12 +81,15 @@ type Status struct {
 	CreditsExpiring          int64     `json:"credits_expiring,omitempty"`
 	CreditsEarliestExpiry    time.Time `json:"credits_earliest_expiry,omitempty"`
 	CreditsEarliestRemaining int64     `json:"credits_earliest_remaining,omitempty"`
-	Cooling                  bool      `json:"cooling"`
-	CoolKind                 string    `json:"cool_kind,omitempty"`
-	CoolRemaining            int64     `json:"cool_remaining_sec,omitempty"`
-	Until                    time.Time `json:"until,omitempty"`
-	Reason                   string    `json:"reason,omitempty"`
-	SoftStreak               int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
+	// CreditsExpiryBuckets 全部未来到期批次按自然日聚合（升序）。首页「积分到期
+	// 提醒」直接渲染它——只有「最早一批」无法表达同日多包与后续批次。
+	CreditsExpiryBuckets []ExpiryBucket `json:"credits_expiry_buckets,omitempty"`
+	Cooling              bool           `json:"cooling"`
+	CoolKind             string         `json:"cool_kind,omitempty"`
+	CoolRemaining        int64          `json:"cool_remaining_sec,omitempty"`
+	Until                time.Time      `json:"until,omitempty"`
+	Reason               string         `json:"reason,omitempty"`
+	SoftStreak           int            `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
 	// RateLimitedModels 当前仍在限额的模型列表（issue #36 限额台账）。
 	// 仅「带解析时间 6004」触发的模型级独立冷却（modelCooldowns 未到期条目）时非空，
 	// 每模型一行；运维据此看到"账号 A 的模型 X 还在限额中，预计 Z 时间恢复"。到期即消失（零回归）。
@@ -219,6 +230,8 @@ type entry struct {
 	// （面板到期分布用；选号不消费）。
 	creditsEarliestExpiry    time.Time
 	creditsEarliestRemaining int64
+	// creditsExpiryBuckets 分日到期批次（升序）；由 SetCreditsDetailedWithBuckets 整体替换。
+	creditsExpiryBuckets []ExpiryBucket
 	// lastCheckinDay 最近一次签到成功的本地日期（panel CheckinDone 观测）。
 	lastCheckinDay string
 	// tokenUsage 聊天请求 token 用量摘要（panel TokenUsage，持久化）。
@@ -536,8 +549,10 @@ type stateAccount struct {
 	PlanCheckedAt            time.Time `json:"plan_checked_at,omitempty"`
 	CreditsEarliestExpiry    time.Time `json:"credits_earliest_expiry,omitempty"`
 	CreditsEarliestRemaining int64     `json:"credits_earliest_remaining,omitempty"`
-	Disabled                 bool      `json:"disabled"`
-	Reason                   string    `json:"reason,omitempty"`
+	// CreditsExpiryBuckets 分日到期批次（持久化后重启即可渲染完整快照）。
+	CreditsExpiryBuckets []ExpiryBucket `json:"credits_expiry_buckets,omitempty"`
+	Disabled             bool           `json:"disabled"`
+	Reason               string         `json:"reason,omitempty"`
 	// ManualDisabled 运维手动停用（issue #138/#118）。持久化——重启保留运维意图，
 	// 这也正是该功能要解决的痛点之一（旧权宜做法改 state.json 会被 5s flush 覆盖，
 	// 入口化后无需再碰文件）。零值也显式写出（运维口径，同 err_total 注释）。

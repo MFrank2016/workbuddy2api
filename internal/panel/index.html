@@ -593,6 +593,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .exp-main b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   .exp-main .note { margin-top: 2px; font-size: 11px; color: var(--ink-3); }
   .exp-main.err { color: var(--bad); }
+/* 分日到期批次：同一账号的后续批次并排展示，数字用 mono 对齐 */
+.exp-batch { display: inline-block; margin-right: 10px; font-family: var(--mono);
+  font-variant-numeric: tabular-nums; }
 
 </style>
 <!-- 移动端适配：独立文件，必须在主 <style> 之后（@media 覆盖依赖层叠顺序） -->

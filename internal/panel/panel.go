@@ -742,11 +742,25 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.cfg.Pool.ReenableIfCredits(uid, remain, total)
-	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
+	p.cfg.Pool.SetCreditsDetailedWithBuckets(uid, remain, total, expiring, earliestAt, earliestRemaining, p.expiryBuckets(a))
 	resp["credits"] = remain
 	resp["credits_total"] = total
 	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, total)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// expiryBuckets 取该账号的全部分日到期批次（soon=0 表示不按窗口裁剪）。
+// 批次是面板展示用的可选增强：取不到时返回 nil，不影响余额刷新本身。
+func (p *Panel) expiryBuckets(a *auth.Auth) []pool.ExpiryBucket {
+	buckets, err := p.cfg.Upstream.UserResourceExpiryBuckets(a, 0)
+	if err != nil || len(buckets) == 0 {
+		return nil
+	}
+	out := make([]pool.ExpiryBucket, 0, len(buckets))
+	for _, b := range buckets {
+		out = append(out, pool.ExpiryBucket{Date: b.Date, ExpireAt: b.ExpireAt, Remain: b.Remain})
+	}
+	return out
 }
 
 // accountBalance 单号余额刷新：更新余额与到期快照，不触碰冷却状态。
@@ -762,7 +776,7 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}
-	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
+	p.cfg.Pool.SetCreditsDetailedWithBuckets(uid, remain, total, expiring, earliestAt, earliestRemaining, p.expiryBuckets(a))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
 }
 

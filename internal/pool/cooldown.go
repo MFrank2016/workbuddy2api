@@ -5,6 +5,7 @@ package pool
 
 import (
 	"log"
+	"sort"
 	"strings"
 	"time"
 )
@@ -30,6 +31,49 @@ func (p *Pool) SetCredits(uid string, credits int64, total ...int64) {
 
 // SetCreditsDetailed 更新账号余额/总额、快过架子集与最早到期批次（签到/余额刷新调用）。
 // expiring/earliestRemaining 钳到 [0, credits]；earliestAt 非未来则清空。
+// SetCreditsDetailedWithBuckets 是 SetCreditsDetailed 的扩展：额外记录按日到期
+// 批次，供面板「积分到期提醒」渲染完整分日快照。批次整体替换，过期/零剩余条目
+// 在此惰性剔除（与落盘口径一致）。
+func (p *Pool) SetCreditsDetailedWithBuckets(uid string, credits, total, expiring int64, earliestAt time.Time, earliestRemaining int64, buckets []ExpiryBucket) {
+	p.SetCreditsDetailed(uid, credits, total, expiring, earliestAt, earliestRemaining)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	e.creditsExpiryBuckets = liveExpiryBuckets(buckets, time.Now())
+	p.dirty.Store(true)
+}
+
+// liveExpiryBuckets 剔除已过期与零剩余批次，保持升序。恢复/写入共用，保证
+// 面板看到的批次都是「未来且有钱」的。
+func liveExpiryBuckets(in []ExpiryBucket, now time.Time) []ExpiryBucket {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ExpiryBucket, 0, len(in))
+	for _, b := range in {
+		if b.Remain <= 0 {
+			continue
+		}
+		if !b.ExpireAt.IsZero() && !b.ExpireAt.After(now) {
+			continue
+		}
+		out = append(out, b)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Date != out[j].Date {
+			return out[i].Date < out[j].Date
+		}
+		return out[i].ExpireAt.Before(out[j].ExpireAt)
+	})
+	return out
+}
+
 func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, earliestAt time.Time, earliestRemaining int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

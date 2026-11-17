@@ -870,6 +870,8 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 	if st.Cooling || st.Disabled {
 		st.Reason = e.reason
 	}
+	// 分日到期批次随状态一起透出（面板首页直接渲染，不必再发一次上游请求）。
+	st.CreditsExpiryBuckets = e.creditsExpiryBuckets
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
 		st.DisabledReason = e.reason

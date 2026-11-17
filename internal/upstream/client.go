@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2273,6 +2274,18 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 // 背景（issue:积分过期）：套餐/奖励积分按 CycleEndTime 分批过期，总量口径的
 // remain 会让"明天就作废"的积分与"30 天后才过期"的积分被无差别选号，
 // 导致快过期积分没优先用掉、白白作废。拆桶后选号可优先消耗 Expiring。
+// ExpiryBucket 单个自然日到期的积分合计（按真实失效时刻聚合）。
+//
+// 面板「积分到期提醒」需要按日分组展示，CreditBuckets 的两桶只能回答「7 天内即将
+// 过期多少」，无法表达「哪一天到期多少」「同一天几个包合并」。日期取 UTC+8 墙钟
+// （上游与官网展示同口径），升序排列；ExpireAt 是该日最早一批的精确时刻，供
+// 「最早到期优先」选号使用。
+type ExpiryBucket struct {
+	Date     string    `json:"date"`
+	ExpireAt time.Time `json:"expires_at,omitempty"`
+	Remain   int64     `json:"remain"`
+}
+
 type CreditBuckets struct {
 	// Expiring 在 soon 窗口内（<= now+soon）即将过期的可用积分。
 	Expiring int64
@@ -2391,6 +2404,73 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain 
 	}
 	c.notifyCredits(a, remain, nil)
 	return remain, buckets, nil
+}
+
+// UserResourceExpiryBuckets 汇总全部未来到期批次，按自然日聚合（升序）。
+//
+// 与 UserResourceDetailed 的 CreditBuckets 分工：后者只回答「soon 窗口内有多少
+// 即将过期」，用于选号时的快期优先；本方法给出完整的分日快照，供面板「积分到期
+// 提醒」按日渲染。到期时刻取 earliestPackageEnd（多候选字段中最早者），已过期与
+// 零余额的包不参与——它们不构成提醒。
+func (c *Client) UserResourceExpiryBuckets(a *auth.Auth, soon time.Duration) ([]ExpiryBucket, error) {
+	now := time.Now()
+	resp, err := c.getUserResourceBody(a)
+	if err != nil {
+		return nil, err
+	}
+	type agg struct {
+		expireAt time.Time
+		remain   int64
+	}
+	byDate := make(map[string]*agg)
+	for _, acct := range resp.Response.Data.Accounts {
+		r, _, _ := packageRemainUsed(respAccount{
+			CapacityRemain:      acct.CapacityRemain,
+			CapacityUsed:        acct.CapacityUsed,
+			CapacitySize:        acct.CapacitySize,
+			CycleCapacityRemain: acct.CycleCapacityRemain,
+			CycleCapacityUsed:   acct.CycleCapacityUsed,
+			CycleCapacitySize:   acct.CycleCapacitySize,
+		})
+		if r <= 0 {
+			continue
+		}
+		end, ok := earliestPackageEnd(packageExpiryCandidate{
+			deductionEndMS: acct.DeductionEndTime,
+			expired:        acct.ExpiredTime,
+			packageEnd:     acct.PackageEndTime,
+			cycleEnd:       acct.CycleEndTime,
+		}, softRateResetLoc)
+		if !ok || !end.After(now) {
+			continue
+		}
+		if soon > 0 && end.After(now.Add(soon)) {
+			continue
+		}
+		key := end.Format("2006-01-02")
+		bucket := byDate[key]
+		if bucket == nil {
+			bucket = &agg{expireAt: end}
+			byDate[key] = bucket
+		} else if end.Before(bucket.expireAt) {
+			bucket.expireAt = end
+		}
+		bucket.remain += r
+	}
+	if len(byDate) == 0 {
+		return nil, nil
+	}
+	dates := make([]string, 0, len(byDate))
+	for date := range byDate {
+		dates = append(dates, date)
+	}
+	sort.Strings(dates)
+	out := make([]ExpiryBucket, 0, len(dates))
+	for _, date := range dates {
+		bucket := byDate[date]
+		out = append(out, ExpiryBucket{Date: date, ExpireAt: bucket.expireAt, Remain: bucket.remain})
+	}
+	return out, nil
 }
 
 // userResourceResp get-user-resource 响应结构（UserResourceDetailed 与 ResourceSummary

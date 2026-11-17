@@ -3326,12 +3326,29 @@ function renderExpirySnapshot(d) {
     const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
     const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
     const when = new Date(ms).toISOString().slice(0, 10);
+    // 分日批次（credits_expiry_buckets）：有快照就列出后续批次，没有则提示去「检查」。
+    const buckets = Array.isArray(a.credits_expiry_buckets) ? a.credits_expiry_buckets : [];
+    let bucketsHtml = '';
+    if (buckets.length > 1) {
+      const rest = buckets.slice(1).map(b => {
+        const bd = new Date(b.expires_at || b.date);
+        const bdays = isNaN(bd.getTime()) ? null
+          : Math.max(0, Math.ceil((bd.getTime() - today.getTime()) / 86400000));
+        const bwhen = b.date || (isNaN(bd.getTime()) ? '—' : bd.toISOString().slice(0, 10));
+        return '<span class="exp-batch">' + esc(bwhen) +
+          (bdays === null ? '' : '（' + bdays + ' 天后）') +
+          ' · ' + fmtTok(Number(b.remain || 0)) + '</span>';
+      }).join('');
+      bucketsHtml = '<div class="note">后续批次：' + rest + '</div>';
+    } else {
+      bucketsHtml = '<div class="note">仅最早一批，点「检查」看全部到期批次</div>';
+    }
     return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
       '<span class="exp-nm">' + nm + '</span>' +
       '<span class="exp-main">最近到期 <b>' + esc(when) + '</b>（' + dayWord +
       '）· 该批 <b>' + fmtTok(remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
       fmtTok(daily) + '</b>' +
-      '<div class="note">仅最早一批，点「检查」看全部到期批次</div>' +
+      bucketsHtml +
       '</span></div>';
   }).join('');
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
