@@ -239,6 +239,10 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 #taskTable .who { max-width: 360px; }
 #taskTable .who .nm, #taskTable .who .id { white-space: normal; word-break: break-all; }
 .who .nm { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 模型列表：id 与可用性标签同排，id 过长时省略而标签始终完整可见 */
+.acc.md .who .nm { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.acc.md .who .nm .mid { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.acc.md .who .nm .md-avail { flex: none; }
 .who .id { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .realm-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 4px; font: 500 10px/1 var(--sans); color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); vertical-align: 1px; }
 .realm-row { display: flex; align-items: center; gap: 14px; padding: 4px 0 10px; }
